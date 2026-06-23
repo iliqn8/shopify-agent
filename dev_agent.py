@@ -152,8 +152,7 @@ def _to_sdk_messages(messages):
     return result
 
 
-def chat(messages):
-    system = """You are the Dev Agent — an expert AI developer embedded inside the Shopify AI Agent application.
+SYSTEM = """You are the Dev Agent — an expert AI developer embedded inside the Shopify AI Agent application.
 You have full read/write access to all source files of this app via GitHub.
 
 The app is a Flask web application hosted on Railway with these components:
@@ -172,20 +171,37 @@ Rules:
 - Always read the current file before editing it
 - Make precise, minimal changes — don't rewrite unnecessarily
 - You can read multiple files to understand context before making changes
-- After a successful push, tell the user exactly what you changed and that Railway is redeploying
+- After a successful push, tell the user exactly what you changed and that Railway is redeploying (~1-2 min)
 - If the user's request is unclear, ask ONE clarifying question
 - All UI text must stay in English
 - Be conversational and explain your reasoning"""
 
+
+def _tool_status(name, inputs):
+    if name == "read_file":
+        return f"📖 Reading `{inputs.get('path', '')}`..."
+    elif name == "write_file":
+        return f"✏️ Writing `{inputs.get('path', '')}`..."
+    elif name == "list_files":
+        return "📂 Listing files..."
+    return f"⚙️ Running `{name}`..."
+
+
+def chat_stream(messages):
+    """Generator yielding SSE-style dicts: {type, ...}"""
     sdk_messages = _to_sdk_messages(messages)
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=8096,
-        system=system,
-        tools=TOOLS,
-        messages=sdk_messages,
-    )
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=8096,
+            system=SYSTEM,
+            tools=TOOLS,
+            messages=sdk_messages,
+        )
+    except Exception as e:
+        yield {"type": "done", "reply": f"Error: {e}", "messages": _serialize_messages(messages)}
+        return
 
     while response.stop_reason == "tool_use":
         assistant_content = response.content
@@ -193,7 +209,12 @@ Rules:
 
         for block in assistant_content:
             if block.type == "tool_use":
+                yield {"type": "status", "text": _tool_status(block.name, dict(block.input))}
                 result = run_tool(block.name, dict(block.input))
+
+                if block.name == "write_file" and result.get("success"):
+                    yield {"type": "status", "text": f"🚀 Pushed to GitHub! (commit `{result.get('commit', '')}`) — Railway is redeploying..."}
+
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -205,14 +226,18 @@ Rules:
             {"role": "user", "content": tool_results},
         ]
 
-        sdk_messages = _to_sdk_messages(messages)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8096,
-            system=system,
-            tools=TOOLS,
-            messages=sdk_messages,
-        )
+        try:
+            sdk_messages = _to_sdk_messages(messages)
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8096,
+                system=SYSTEM,
+                tools=TOOLS,
+                messages=sdk_messages,
+            )
+        except Exception as e:
+            yield {"type": "done", "reply": f"Error: {e}", "messages": _serialize_messages(messages)}
+            return
 
     text = ""
     for block in response.content:
@@ -220,10 +245,10 @@ Rules:
             text += block.text
 
     if not text:
-        text = "Done. Railway is redeploying with the changes (~1-2 min)."
+        text = "Done. Railway is redeploying (~1-2 min)."
 
     messages = messages + [
         {"role": "assistant", "content": _serialize_content(response.content)},
     ]
 
-    return text, _serialize_messages(messages)
+    yield {"type": "done", "reply": text, "messages": _serialize_messages(messages)}

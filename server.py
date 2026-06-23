@@ -117,22 +117,25 @@ def start_imagegen():
 
 @app.route("/api/dev-chat", methods=["POST"])
 def dev_chat():
-    try:
-        data = request.json
-        messages = data.get("messages", [])
-        user_message = data.get("message", "").strip()
-        if not user_message:
-            return jsonify({"error": "Empty message"}), 400
-        messages.append({"role": "user", "content": user_message})
-        reply, updated_messages = dev_agent.chat(messages)
-        if not reply:
-            reply = "Done (no text response from agent)."
-        return jsonify({"reply": reply, "messages": updated_messages})
-    except Exception as e:
-        import traceback
-        err = traceback.format_exc()
-        print(f"[dev-chat error] {err}")
-        return jsonify({"reply": f"Error: {str(e)}\n\n{err[:500]}"})
+    data = request.json
+    messages = data.get("messages", [])
+    user_message = data.get("message", "").strip()
+    if not user_message:
+        return jsonify({"error": "Empty message"}), 400
+    messages.append({"role": "user", "content": user_message})
+
+    def generate():
+        try:
+            for event in dev_agent.chat_stream(messages):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            import traceback
+            err = traceback.format_exc()
+            yield f"data: {json.dumps({'type': 'done', 'reply': f'Error: {e}', 'messages': messages})}\n\n"
+
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/api/set-local-agent", methods=["POST"])
