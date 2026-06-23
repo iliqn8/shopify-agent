@@ -90,6 +90,7 @@
   <div class="tab active" onclick="switchTab('chat', this)">💬 Chat</div>
   <div class="tab" onclick="switchTab('training', this)">🧠 Training</div>
   <div class="tab" onclick="switchTab('imagegen', this)">🎨 Image Generator</div>
+  <div class="tab" onclick="switchTab('dev', this)">🛠️ Dev</div>
 </div>
 
 <!-- Chat Panel -->
@@ -119,6 +120,26 @@
   <div class="chat-input">
     <textarea id="input" placeholder="Type a task... (Enter to send)" rows="1"></textarea>
     <button id="sendBtn" onclick="sendMessage()">➤</button>
+  </div>
+</div>
+
+<!-- Dev Panel -->
+<div class="panel" id="panel-dev">
+  <div class="chat-messages" id="dev-messages">
+    <div class="msg assistant">
+      <div class="avatar">🛠️</div>
+      <div class="bubble">I'm the Dev Agent. I can read and modify any file in this agent, then push to GitHub so Railway redeploys automatically.<br><br>Tell me what you want to change and I'll do it.</div>
+    </div>
+  </div>
+  <div class="typing" id="dev-typing">
+    <div class="msg assistant">
+      <div class="avatar">🛠️</div>
+      <div class="bubble"><span></span><span></span><span></span></div>
+    </div>
+  </div>
+  <div class="chat-input">
+    <textarea id="dev-input" placeholder="Describe the change you want... (Enter to send)" rows="1"></textarea>
+    <button id="dev-sendBtn" onclick="devSend()">➤</button>
   </div>
 </div>
 
@@ -358,6 +379,55 @@ async function loadKnowledge() {
 async function delKnowledge(id) {
   await fetch('/api/knowledge/' + id, {method: 'DELETE'});
   loadKnowledge();
+}
+
+// Dev chat
+let devMessages = [];
+let devSending = false;
+
+const devInput = document.getElementById('dev-input');
+devInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); devSend(); }
+  setTimeout(() => { devInput.style.height = 'auto'; devInput.style.height = Math.min(devInput.scrollHeight, 120) + 'px'; }, 0);
+});
+
+function addDevMessage(role, text) {
+  const msgs = document.getElementById('dev-messages');
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.innerHTML = `<div class="avatar">${role === 'user' ? '👤' : '🛠️'}</div><div class="bubble">${escHtml(text)}</div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+async function devSend() {
+  if (devSending) return;
+  const msg = devInput.value.trim();
+  if (!msg) return;
+  devInput.value = '';
+  devInput.style.height = '48px';
+  devSending = true;
+  document.getElementById('dev-sendBtn').disabled = true;
+  addDevMessage('user', msg);
+  document.getElementById('dev-typing').style.display = 'flex';
+  document.getElementById('dev-messages').scrollTop = 99999;
+
+  try {
+    const r = await fetch('/api/dev-chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, messages: devMessages})
+    });
+    const data = await r.json();
+    document.getElementById('dev-typing').style.display = 'none';
+    addDevMessage('assistant', data.reply || data.error || 'Error');
+    if (data.messages) devMessages = data.messages;
+  } catch(e) {
+    document.getElementById('dev-typing').style.display = 'none';
+    addDevMessage('assistant', 'Connection error.');
+  }
+  devSending = false;
+  document.getElementById('dev-sendBtn').disabled = false;
 }
 </script>
 </body>

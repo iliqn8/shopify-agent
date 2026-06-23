@@ -10,6 +10,7 @@ load_dotenv()
 
 import knowledge_base as kb
 import claude_agent as agent
+import dev_agent
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
@@ -112,6 +113,22 @@ def network_info():
 @app.route("/api/start-imagegen", methods=["POST"])
 def start_imagegen():
     return jsonify({"status": "running"})
+
+
+@app.route("/api/dev-chat", methods=["POST"])
+def dev_chat():
+    data = request.json
+    messages = data.get("messages", [])
+    user_message = data.get("message", "").strip()
+    if not user_message:
+        return jsonify({"error": "Empty message"}), 400
+    messages.append({"role": "user", "content": user_message})
+    try:
+        reply, updated_messages = dev_agent.chat(messages)
+    except Exception as e:
+        reply = f"Error: {str(e)}"
+        updated_messages = messages
+    return jsonify({"reply": reply, "messages": updated_messages})
 
 
 @app.route("/api/set-local-agent", methods=["POST"])
