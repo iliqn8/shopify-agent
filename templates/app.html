@@ -454,6 +454,34 @@ async function delKnowledge(id) {
 
 let devMessages = [];
 let devSending = false;
+let currentVersion = null;
+
+async function getVersion() {
+  try { const r = await fetch('/api/version'); const d = await r.json(); return d.version; }
+  catch(e) { return null; }
+}
+
+async function waitForRedeploy(statusBubble) {
+  if (!currentVersion) return;
+  const oldVersion = currentVersion;
+  let attempts = 0;
+  statusBubble.innerHTML += '<br>⏳ Waiting for Railway to redeploy...';
+  const interval = setInterval(async () => {
+    attempts++;
+    const v = await getVersion();
+    if (v && v !== oldVersion) {
+      clearInterval(interval);
+      currentVersion = v;
+      statusBubble.innerHTML += '<br>✅ Deployed! The new version is live.';
+      document.getElementById('dev-messages').scrollTop = 99999;
+    } else if (attempts >= 36) {
+      clearInterval(interval);
+      statusBubble.innerHTML += '<br>⏱️ Taking longer than usual — check Railway dashboard.';
+    }
+  }, 5000);
+}
+
+(async () => { currentVersion = await getVersion(); })();
 
 const devInput = document.getElementById('dev-input');
 devInput.addEventListener('keydown', e => {
@@ -513,12 +541,17 @@ async function devSend() {
           const event = JSON.parse(line.slice(6));
           if (event.type === 'status') {
             statusBubble.innerHTML = (statusBubble.innerHTML ? statusBubble.innerHTML + '<br>' : '') + escHtml(event.text);
+            if (event.text.includes('Pushed to GitHub')) waitForRedeploy(statusBubble);
             document.getElementById('dev-messages').scrollTop = 99999;
           } else if (event.type === 'done') {
-            statusDiv.remove();
             document.getElementById('dev-typing').style.display = 'none';
-            addDevMessage('assistant', event.reply || 'Done.');
+            const replyDiv = document.createElement('div');
+            replyDiv.className = 'msg assistant';
+            replyDiv.innerHTML = `<div class="avatar">🛠️</div><div class="bubble">${escHtml(event.reply || 'Done.')}</div>`;
+            document.getElementById('dev-messages').appendChild(replyDiv);
+            if (!event.reply.includes('Pushed') && !event.reply.includes('redeploying')) statusDiv.remove();
             if (event.messages) devMessages = event.messages;
+            document.getElementById('dev-messages').scrollTop = 99999;
           }
         } catch(e) {}
       }

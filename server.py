@@ -97,6 +97,15 @@ def delete_knowledge(kid):
     return jsonify({"ok": True})
 
 
+import time as _time
+_START_TIME = str(int(_time.time()))
+
+@app.route("/api/version")
+def version():
+    v = os.getenv("RAILWAY_GIT_COMMIT_SHA", _START_TIME)
+    return jsonify({"version": v})
+
+
 @app.route("/api/network-info")
 def network_info():
     try:
