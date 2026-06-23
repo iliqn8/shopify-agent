@@ -179,4 +179,7 @@ Rules:
         if hasattr(block, "text"):
             text += block.text
 
+    if not text:
+        text = "Done. Railway is redeploying with the changes (1-2 min)."
+
     return text, messages
