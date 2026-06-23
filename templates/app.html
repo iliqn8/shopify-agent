@@ -33,12 +33,21 @@
   .msg.user .avatar { background: #6366f1; }
   .msg.assistant .avatar { background: #1e4620; }
 
-  .chat-input { padding: 16px 20px; border-top: 1px solid #2a2a2a; display: flex; gap: 10px; background: #141414; }
+  .chat-input-area { padding: 16px 20px; border-top: 1px solid #2a2a2a; background: #141414; display: flex; flex-direction: column; gap: 8px; }
+  .chat-input { display: flex; gap: 10px; align-items: flex-end; }
   .chat-input textarea { flex: 1; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 10px; color: #e0e0e0; padding: 10px 14px; font-size: 14px; resize: none; font-family: inherit; outline: none; height: 48px; max-height: 120px; }
   .chat-input textarea:focus { border-color: #6366f1; }
-  .chat-input button { background: #6366f1; border: none; color: #fff; padding: 0 18px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; }
-  .chat-input button:hover { background: #5254cc; }
-  .chat-input button:disabled { background: #333; color: #666; cursor: default; }
+  .chat-input button.send-btn { background: #6366f1; border: none; color: #fff; padding: 0 18px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; height: 48px; }
+  .chat-input button.send-btn:hover { background: #5254cc; }
+  .chat-input button.send-btn:disabled { background: #333; color: #666; cursor: default; }
+  .chat-input button.upload-btn { background: #2a2a2a; border: 1px solid #3a3a3a; color: #aaa; padding: 0 14px; border-radius: 10px; cursor: pointer; font-size: 18px; height: 48px; transition: all 0.2s; }
+  .chat-input button.upload-btn:hover { background: #333; color: #fff; border-color: #6366f1; }
+
+  #photo-preview { display: none; align-items: center; gap: 8px; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 12px; }
+  #photo-preview img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
+  #photo-preview span { font-size: 12px; color: #aaa; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #photo-preview button { background: none; border: none; color: #666; cursor: pointer; font-size: 16px; padding: 0 4px; }
+  #photo-preview button:hover { color: #f87171; }
 
   .typing { display: none; align-items: center; gap: 8px; padding: 4px 0; }
   .typing span { width: 6px; height: 6px; border-radius: 50%; background: #6366f1; animation: bounce 1.2s infinite; }
@@ -98,7 +107,7 @@
   <div class="chat-messages" id="messages">
     <div class="msg assistant">
       <div class="avatar">🤖</div>
-      <div class="bubble">Hey! I'm your Shopify AI Agent. I can manage products, orders, collections and pages. How can I help you?</div>
+      <div class="bubble">Hey! I'm your Shopify AI Agent. I can manage products, orders, collections and pages, and generate product images. Use the 📎 button to attach a product photo. How can I help you?</div>
     </div>
   </div>
   <div class="typing" id="typing">
@@ -113,13 +122,24 @@
     <button class="quick-btn" onclick="sendQuick('Show the last 10 orders')">📋 Orders</button>
     <button class="quick-btn" onclick="sendQuick('Show all collections')">📁 Collections</button>
     <button class="quick-btn" onclick="sendQuick('Show all pages')">📄 Pages</button>
-    <button class="quick-btn" onclick="sendQuick('Generate product images for: ')">🎨 Generate Images</button>
+    <button class="quick-btn" onclick="sendQuick('Generate product images')">🎨 Generate Images</button>
     <button class="quick-btn" onclick="sendQuick('Show running processes')">🖥️ Processes</button>
     <button class="quick-btn" onclick="sendQuick('List files in C:\\')">📂 Files</button>
   </div>
-  <div class="chat-input">
-    <textarea id="input" placeholder="Type a task... (Enter to send)" rows="1"></textarea>
-    <button id="sendBtn" onclick="sendMessage()">➤</button>
+  <div class="chat-input-area">
+    <!-- Photo preview bar -->
+    <div id="photo-preview">
+      <img id="photo-thumb" src="" alt="preview">
+      <span id="photo-name"></span>
+      <button onclick="clearPhoto()" title="Remove photo">✕</button>
+    </div>
+    <div class="chat-input">
+      <!-- Hidden file input -->
+      <input type="file" id="photoInput" accept="image/*" style="display:none" onchange="handlePhotoSelect(this)">
+      <button class="upload-btn" onclick="document.getElementById('photoInput').click()" title="Attach product photo">📎</button>
+      <textarea id="input" placeholder="Type a task... (Enter to send)" rows="1"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+    </div>
   </div>
 </div>
 
@@ -185,6 +205,9 @@
 let sending = false;
 let networkUrl = '';
 
+// Attached photo state
+let attachedPhoto = null; // { b64: string, filename: string, dataUrl: string }
+
 (async () => {
   try {
     const r = await fetch('/api/network-info');
@@ -209,6 +232,35 @@ input.addEventListener('keydown', e => {
   setTimeout(() => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 120) + 'px'; }, 0);
 });
 
+// ── Photo attachment ──────────────────────────────────────────────────────
+
+function handlePhotoSelect(inputEl) {
+  const file = inputEl.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const dataUrl = e.target.result;
+    // Strip the "data:image/...;base64," prefix
+    const b64 = dataUrl.split(',')[1];
+    attachedPhoto = { b64, filename: file.name, dataUrl };
+    // Show preview
+    document.getElementById('photo-thumb').src = dataUrl;
+    document.getElementById('photo-name').textContent = file.name;
+    document.getElementById('photo-preview').style.display = 'flex';
+  };
+  reader.readAsDataURL(file);
+  inputEl.value = '';
+}
+
+function clearPhoto() {
+  attachedPhoto = null;
+  document.getElementById('photo-preview').style.display = 'none';
+  document.getElementById('photo-thumb').src = '';
+  document.getElementById('photo-name').textContent = '';
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────
+
 let imageGenLoaded = false;
 
 function switchTab(tab, el) {
@@ -222,9 +274,7 @@ function switchTab(tab, el) {
 
 async function loadImageGen() {
   document.getElementById('imagegen-loader').style.display = 'flex';
-  // Ask server to ensure image generator is running
   await fetch('/api/start-imagegen', { method: 'POST' });
-  // Poll until port 5000 is up
   let attempts = 0;
   while (attempts < 20) {
     try {
@@ -248,6 +298,8 @@ function onFrameLoad() {
   }
 }
 
+// ── Message rendering ─────────────────────────────────────────────────────
+
 function addMessage(role, text) {
   const msgs = document.getElementById('messages');
   const div = document.createElement('div');
@@ -259,17 +311,6 @@ function addMessage(role, text) {
 
 function escHtml(t) {
   return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
-}
-
-function renderReply(text) {
-  // Render image URLs as <img> tags
-  const urlRegex = /(https?:\/\/localhost:\d+\/generated\/[^\s"<]+\.png)/g;
-  let html = escHtml(text);
-  html = html.replace(urlRegex.source.replace(/\\\//g, '/'), (match) => {
-    return `</div><img src="${match}" style="max-width:100%;border-radius:8px;margin:6px 0;display:block"><div class="bubble" style="display:none">`;
-  });
-  // Also wrap in image grid if multiple images detected
-  return html;
 }
 
 function addMessageRich(role, text) {
@@ -295,30 +336,56 @@ function addMessageRich(role, text) {
   msgs.scrollTop = msgs.scrollHeight;
 }
 
+// Show user message — including photo thumbnail if attached
+function addUserMessage(text, photo) {
+  const msgs = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg user';
+  let content = '';
+  if (photo) {
+    content += `<img src="${photo.dataUrl}" style="max-width:160px;border-radius:8px;margin-bottom:6px;display:block">`;
+  }
+  content += `<div class="bubble">${escHtml(text)}</div>`;
+  div.innerHTML = `<div class="avatar">👤</div><div style="display:flex;flex-direction:column;align-items:flex-end">${content}</div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+// ── Send logic ────────────────────────────────────────────────────────────
+
 async function sendMessage() {
   if (sending) return;
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
   input.style.height = '48px';
-  doSend(msg);
+  const photo = attachedPhoto;
+  clearPhoto();
+  doSend(msg, photo);
 }
 
-function sendQuick(msg) { doSend(msg); }
+function sendQuick(msg) { doSend(msg, null); }
 
-async function doSend(msg) {
+async function doSend(msg, photo) {
   if (sending) return;
   sending = true;
   document.getElementById('sendBtn').disabled = true;
-  addMessage('user', msg);
+
+  addUserMessage(msg, photo);
+
   document.getElementById('typing').style.display = 'flex';
   document.getElementById('messages').scrollTop = 99999;
 
   try {
+    const body = { message: msg };
+    if (photo) {
+      body.image_b64 = photo.b64;
+      body.image_filename = photo.filename;
+    }
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg})
+      body: JSON.stringify(body)
     });
     const data = await r.json();
     document.getElementById('typing').style.display = 'none';
@@ -338,6 +405,8 @@ async function clearHistory() {
     <div class="msg assistant"><div class="avatar">🤖</div>
     <div class="bubble">History cleared. How can I help you?</div></div>`;
 }
+
+// ── Training ──────────────────────────────────────────────────────────────
 
 async function uploadFile(input) {
   const file = input.files[0];
@@ -381,7 +450,8 @@ async function delKnowledge(id) {
   loadKnowledge();
 }
 
-// Dev chat
+// ── Dev chat ──────────────────────────────────────────────────────────────
+
 let devMessages = [];
 let devSending = false;
 
