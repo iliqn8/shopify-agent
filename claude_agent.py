@@ -9,7 +9,7 @@ import shopify_client as sc
 
 client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
-IMAGE_GEN_URL = os.getenv("IMAGE_GENERATOR_URL", "http://localhost:5000")
+IMAGE_GEN_URL = os.getenv("IMAGE_GENERATOR_URL", "http://localhost:5001")
 
 
 # ── Image Generator helpers ────────────────────────────────────────────────

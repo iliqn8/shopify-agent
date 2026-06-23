@@ -23,7 +23,7 @@ kb.init_db()
 def _start_imagegen():
     try:
         from imagegen_server import run_imagegen
-        run_imagegen(port=5000)
+        run_imagegen(port=5001)
     except Exception as e:
         print(f"[imagegen] Failed to start: {e}")
 
@@ -124,7 +124,7 @@ def set_local_agent():
 
 # ── Image Generator Proxy ──────────────────────────────────────────────────
 
-IMG_GEN = "http://localhost:5000"
+IMG_GEN = "http://localhost:5001"
 
 
 def _proxy(path, method, stream=False):
