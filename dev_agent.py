@@ -5,6 +5,8 @@ import anthropic
 import os
 import base64
 import json
+import queue
+import threading
 import requests as _req
 
 client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
@@ -187,8 +189,8 @@ def _tool_status(name, inputs):
     return f"⚙️ Running `{name}`..."
 
 
-def chat_stream(messages):
-    """Generator yielding SSE-style dicts: {type, ...}"""
+def _run_agent_in_thread(messages, q):
+    """Runs the agent in a background thread, puts events into queue q."""
     sdk_messages = _to_sdk_messages(messages)
 
     try:
@@ -200,7 +202,7 @@ def chat_stream(messages):
             messages=sdk_messages,
         )
     except Exception as e:
-        yield {"type": "done", "reply": f"Error: {e}", "messages": _serialize_messages(messages)}
+        q.put({"type": "done", "reply": f"Error: {e}", "messages": _serialize_messages(messages)})
         return
 
     while response.stop_reason == "tool_use":
@@ -209,12 +211,10 @@ def chat_stream(messages):
 
         for block in assistant_content:
             if block.type == "tool_use":
-                yield {"type": "status", "text": _tool_status(block.name, dict(block.input))}
+                q.put({"type": "status", "text": _tool_status(block.name, dict(block.input))})
                 result = run_tool(block.name, dict(block.input))
-
                 if block.name == "write_file" and result.get("success"):
-                    yield {"type": "status", "text": f"🚀 Pushed to GitHub! (commit `{result.get('commit', '')}`) — Railway is redeploying..."}
-
+                    q.put({"type": "status", "text": f"🚀 Pushed to GitHub! (commit `{result.get('commit', '')}`) — Railway is redeploying..."})
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -236,7 +236,7 @@ def chat_stream(messages):
                 messages=sdk_messages,
             )
         except Exception as e:
-            yield {"type": "done", "reply": f"Error: {e}", "messages": _serialize_messages(messages)}
+            q.put({"type": "done", "reply": f"Error: {e}", "messages": _serialize_messages(messages)})
             return
 
     text = ""
@@ -250,5 +250,22 @@ def chat_stream(messages):
     messages = messages + [
         {"role": "assistant", "content": _serialize_content(response.content)},
     ]
+    q.put({"type": "done", "reply": text, "messages": _serialize_messages(messages)})
 
-    yield {"type": "done", "reply": text, "messages": _serialize_messages(messages)}
+
+def chat_stream(messages):
+    """Generator yielding events; runs agent in background thread with keep-alive pings."""
+    q = queue.Queue()
+    t = threading.Thread(target=_run_agent_in_thread, args=(messages, q), daemon=True)
+    t.start()
+
+    yield {"type": "status", "text": "🤔 Thinking..."}
+
+    while True:
+        try:
+            event = q.get(timeout=10)
+            yield event
+            if event.get("type") == "done":
+                break
+        except queue.Empty:
+            yield {"type": "ping"}  # keep-alive to prevent Railway timeout
