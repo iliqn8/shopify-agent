@@ -1,0 +1,6 @@
+flask
+anthropic
+requests
+python-dotenv
+Pillow
+openai

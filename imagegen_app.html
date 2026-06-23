@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Product Image Generator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #111113;
+    color: #e5e5e7;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    padding: 32px 16px 64px;
+  }
+
+  a { color: inherit; }
+
+  /* ── HEADER ── */
+  .header {
+    text-align: center;
+    margin-bottom: 36px;
+  }
+  .header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.5px;
+  }
+  .header p {
+    margin-top: 6px;
+    font-size: 13px;
+    color: #8e8e93;
+  }
+
+  /* ── CARD ── */
+  .card {
+    background: #1c1c1e;
+    border: 1px solid #2c2c2e;
+    border-radius: 14px;
+    padding: 28px;
+    max-width: 900px;
+    margin: 0 auto 24px;
+  }
+  .card h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 20px;
+    letter-spacing: 0.1px;
+  }
+
+  /* ── FORM ── */
+  .field-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #8e8e93;
+    margin-bottom: 6px;
+    display: block;
+  }
+  .field-label .req { color: #ff453a; margin-left: 2px; }
+
+  input[type="text"], textarea {
+    width: 100%;
+    background: #2c2c2e;
+    border: 1px solid #3a3a3c;
+    border-radius: 8px;
+    color: #e5e5e7;
+    font-size: 14px;
+    padding: 10px 12px;
+    outline: none;
+    transition: border-color 0.15s;
+    font-family: inherit;
+  }
+  input[type="text"]::placeholder, textarea::placeholder { color: #636366; }
+  input[type="text"]:focus, textarea:focus { border-color: #0a84ff; }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .field-group { margin-bottom: 16px; }
+
+  /* ── UPLOAD AREA ── */
+  .upload-area {
+    width: 100%;
+    height: 130px;
+    border: 2px dashed #3a3a3c;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+    overflow: hidden;
+    background: #222224;
+  }
+  .upload-area:hover, .upload-area.dragover { border-color: #0a84ff; background: #1a2030; }
+  .upload-area input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .upload-area .upload-icon { font-size: 24px; margin-bottom: 8px; }
+  .upload-area .upload-text { font-size: 14px; color: #e5e5e7; font-weight: 500; }
+  .upload-area .upload-hint { font-size: 12px; color: #636366; margin-top: 4px; }
+  .upload-preview {
+    width: 100%; height: 100%; object-fit: contain; border-radius: 8px;
+    position: absolute; inset: 0;
+  }
+
+  /* ── BUTTONS ── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: opacity 0.15s, transform 0.1s;
+    font-family: inherit;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-blue { background: #0a84ff; color: #fff; }
+  .btn-blue:hover:not(:disabled) { background: #0070e0; }
+  .btn-green { background: #30d158; color: #fff; }
+  .btn-green:hover:not(:disabled) { background: #25b84a; }
+  .btn-ghost {
+    background: transparent; color: #8e8e93;
+    border: 1px solid #3a3a3c;
+  }
+  .btn-ghost:hover { color: #e5e5e7; border-color: #636366; }
+
+  /* ── BRAND DNA PREVIEW ── */
+  #dna-section { display: none; }
+
+  .dna-row { margin-bottom: 22px; }
+  .dna-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase; color: #636366; margin-bottom: 10px;
+  }
+  .dna-vibe {
+    font-size: 22px; font-weight: 700; color: #fff; letter-spacing: -0.3px;
+  }
+
+  /* Color swatches */
+  .swatches { display: flex; gap: 12px; flex-wrap: wrap; }
+  .swatch {
+    flex: 1; min-width: 120px; border-radius: 10px; overflow: hidden;
+    border: 1px solid #3a3a3c;
+  }
+  .swatch-color { height: 70px; }
+  .swatch-info { background: #2c2c2e; padding: 8px 10px; }
+  .swatch-name { font-size: 11px; color: #8e8e93; }
+  .swatch-hex { font-size: 13px; color: #e5e5e7; font-weight: 600; font-family: monospace; }
+
+  /* Fonts */
+  .fonts-row { display: flex; gap: 12px; }
+  .font-box {
+    flex: 1; background: #2c2c2e; border: 1px solid #3a3a3c;
+    border-radius: 8px; padding: 12px 14px;
+  }
+  .font-box-label { font-size: 10px; color: #636366; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }
+  .font-box-name { font-size: 15px; color: #fff; font-weight: 600; }
+
+  /* Demographic */
+  .dna-text { color: #c7c7cc; font-size: 13px; line-height: 1.6; }
+
+  /* Copy highlights */
+  .highlights-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .highlight-item { background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px; padding: 10px 12px; }
+  .highlight-item .hl-label { font-size: 10px; color: #636366; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 4px; }
+  .highlight-item .hl-value { font-size: 13px; color: #e5e5e7; font-weight: 500; line-height: 1.4; }
+
+  /* Warning bar */
+  .warning-bar {
+    background: #2a2200; border: 1px solid #4a3800; border-radius: 8px;
+    padding: 10px 14px; font-size: 12px; color: #ffd60a;
+    margin-bottom: 18px; line-height: 1.5;
+  }
+
+  .dna-actions { display: flex; gap: 10px; align-items: center; }
+
+  /* ── GENERATED IMAGES ── */
+  #gen-section { display: none; }
+
+  .status-bar {
+    background: #2c2c2e; border-radius: 8px;
+    padding: 10px 14px; font-size: 13px; color: #8e8e93;
+    margin-bottom: 20px;
+  }
+  .status-bar.active { color: #30d158; }
+
+  .images-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+
+  .image-slot { }
+  .image-slot-label {
+    font-size: 12px; color: #636366; margin-bottom: 6px; font-weight: 500;
+  }
+  .image-slot-box {
+    background: #1c1c1e; border: 1px solid #2c2c2e;
+    border-radius: 10px; overflow: hidden;
+    aspect-ratio: 1 / 1;
+    display: flex; align-items: center; justify-content: center;
+    position: relative;
+  }
+  .image-slot-box img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+  .slot-placeholder {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 8px; color: #3a3a3c;
+  }
+  .slot-placeholder.generating { color: #636366; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .slot-placeholder svg { width: 32px; height: 32px; }
+  .slot-placeholder span { font-size: 12px; }
+
+  .slot-error { font-size: 11px; color: #ff453a; text-align: center; padding: 10px; }
+
+  .slot-controls { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+
+  .feedback-row { display: flex; gap: 6px; align-items: center; }
+  .feedback-input {
+    flex: 1; background: #2c2c2e; border: 1px solid #3a3a3c;
+    border-radius: 8px; color: #e5e5e7; font-size: 12px;
+    padding: 8px 10px; outline: none; font-family: inherit;
+    transition: border-color 0.15s;
+  }
+  .feedback-input::placeholder { color: #48484a; }
+  .feedback-input:focus { border-color: #0a84ff; }
+
+  .ref-upload-btn {
+    flex-shrink: 0; width: 34px; height: 34px;
+    background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: background 0.15s; position: relative;
+  }
+  .ref-upload-btn:hover { background: #3a3a3c; }
+  .ref-upload-btn.has-image { border-color: #0a84ff; }
+  .ref-upload-btn input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+
+  .ref-preview-strip {
+    display: flex; align-items: center; gap: 8px;
+    background: #2c2c2e; border: 1px solid #3a3a3c;
+    border-radius: 8px; padding: 5px 8px;
+  }
+  .ref-preview-strip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
+  .ref-preview-strip span { flex: 1; font-size: 11px; color: #8e8e93; }
+  .ref-clear-btn {
+    background: none; border: none; color: #636366; cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 2px;
+  }
+  .ref-clear-btn:hover { color: #ff453a; }
+
+  .slot-btn-row { display: flex; gap: 6px; }
+
+  .regen-btn, .save-btn {
+    flex: 1; background: #2c2c2e; border: 1px solid #3a3a3c;
+    border-radius: 8px; padding: 8px;
+    color: #e5e5e7; font-size: 12px; font-weight: 600;
+    cursor: pointer; display: flex; align-items: center;
+    justify-content: center; gap: 5px;
+    transition: background 0.15s; font-family: inherit;
+    text-decoration: none;
+  }
+  .regen-btn:hover, .save-btn:hover { background: #3a3a3c; }
+  .regen-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* spinner */
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid #3a3a3c;
+    border-top-color: #0a84ff; border-radius: 50%;
+    animation: spin 0.7s linear infinite; display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Loading overlay on build-dna button */
+  .btn-loading { opacity: 0.7; pointer-events: none; }
+
+  /* Separator */
+  .sep { height: 1px; background: #2c2c2e; margin: 20px 0; }
+
+  @media (max-width: 600px) {
+    .grid-2, .highlights-grid, .fonts-row { grid-template-columns: 1fr; }
+    .images-grid { grid-template-columns: 1fr 1fr; }
+    .swatches { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Product Image Generator</h1>
+  <p>Upload product &rarr; Build brand DNA &rarr; Generate 9 cohesive images</p>
+</div>
+
+<!-- ── STEP 1: FORM ── -->
+<div class="card" id="form-section">
+  <h2>Product Details</h2>
+
+  <div class="field-group">
+    <label class="field-label">PRODUCT IMAGE <span class="req">*</span></label>
+    <div class="upload-area" id="upload-area">
+      <input type="file" id="product-image-input" accept="image/png,image/jpeg,image/webp" />
+      <img class="upload-preview" id="upload-preview" style="display:none" />
+      <div id="upload-placeholder">
+        <div class="upload-icon">&#128247;</div>
+        <div class="upload-text">Click to upload product photo</div>
+        <div class="upload-hint">PNG or JPG, square works best. If your product has a logo on it, upload that version.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="field-group">
+      <label class="field-label" for="product-title">PRODUCT TITLE <span class="req">*</span></label>
+      <input type="text" id="product-title" placeholder="e.g. Aztec Death Whistle" />
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="domain-name">DOMAIN NAME <span class="req">*</span></label>
+      <input type="text" id="domain-name" placeholder="e.g. mictlan.com (used on comparison chart only)" />
+    </div>
+  </div>
+
+  <div class="field-group">
+    <label class="field-label" for="competitor">COMPETITOR URL OR DESCRIPTION <span class="req">*</span></label>
+    <input type="text" id="competitor" placeholder="e.g. https://competitor.com or 'Feminine wellness brand selling collagen'" />
+  </div>
+
+  <div class="grid-2">
+    <div class="field-group">
+      <label class="field-label" for="color-prefs">COLOR PREFERENCES (OPTIONAL)</label>
+      <input type="text" id="color-prefs" placeholder="e.g. dark moody / blush pink / leave blank for auto" />
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="additional-notes">ADDITIONAL NOTES (OPTIONAL)</label>
+      <input type="text" id="additional-notes" placeholder="e.g. target ages 25-40 men" />
+    </div>
+  </div>
+
+  <button class="btn btn-blue" id="build-btn" onclick="buildBrandDNA()">Build Brand DNA</button>
+</div>
+
+<!-- ── STEP 2: BRAND DNA PREVIEW ── -->
+<div class="card" id="dna-section">
+  <h2>Brand DNA Preview</h2>
+
+  <div class="dna-row">
+    <div class="dna-label">VIBE</div>
+    <div class="dna-vibe" id="dna-vibe"></div>
+  </div>
+
+  <div class="dna-row">
+    <div class="dna-label">COLOR PALETTE</div>
+    <div class="swatches" id="dna-swatches"></div>
+  </div>
+
+  <div class="dna-row">
+    <div class="dna-label">SHOPIFY FONTS (USE THESE IN YOUR THEME)</div>
+    <div class="fonts-row" id="dna-fonts"></div>
+  </div>
+
+  <div class="dna-row">
+    <div class="dna-label">DEMOGRAPHIC</div>
+    <div class="dna-text" id="dna-demographic"></div>
+  </div>
+
+  <div class="dna-row">
+    <div class="dna-label">COPY HIGHLIGHTS</div>
+    <div class="highlights-grid" id="dna-highlights"></div>
+  </div>
+
+  <div class="warning-bar">
+    Generation takes ~95 seconds (5 images first, then a 13-second wait for the rate limit window, then 4 more). Images appear as they finish. Spend $50+ on the API to unlock Tier 2 and remove this delay.
+  </div>
+
+  <div class="dna-actions">
+    <button class="btn btn-green" id="approve-btn" onclick="startGeneration()">Approve &amp; Generate 9 Images</button>
+    <button class="btn btn-ghost" onclick="editDetails()">Edit Details</button>
+  </div>
+</div>
+
+<!-- ── STEP 3: GENERATED IMAGES ── -->
+<div class="card" id="gen-section">
+  <h2>Generated Images</h2>
+  <div class="status-bar" id="status-bar">Starting generation...</div>
+  <div class="images-grid" id="images-grid"></div>
+</div>
+
+<script>
+const IMAGE_TYPES = [
+  "Hero", "Benefits", "Features", "How To Use",
+  "Review", "Comparison", "Guarantee",
+  "Social Proof in Action", "Value Props (Description)"
+];
+
+let brandDNA = null;
+
+// ── Upload handling ──
+const uploadArea = document.getElementById('upload-area');
+const fileInput = document.getElementById('product-image-input');
+const preview = document.getElementById('upload-preview');
+const placeholder = document.getElementById('upload-placeholder');
+
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  if (file) showPreview(file);
+});
+
+uploadArea.addEventListener('dragover', e => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+uploadArea.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadArea.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    fileInput.files = dt.files;
+    showPreview(file);
+  }
+});
+
+function showPreview(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    preview.src = e.target.result;
+    preview.style.display = 'block';
+    placeholder.style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+// ── Build Brand DNA ──
+async function buildBrandDNA() {
+  const productTitle = document.getElementById('product-title').value.trim();
+  const domainName = document.getElementById('domain-name').value.trim();
+  const competitor = document.getElementById('competitor').value.trim();
+
+  if (!productTitle) return alert('Please enter a product title.');
+  if (!domainName) return alert('Please enter a domain name.');
+  if (!competitor) return alert('Please enter a competitor URL or description.');
+
+  const btn = document.getElementById('build-btn');
+  btn.innerHTML = '<span class="spinner"></span> Analyzing...';
+  btn.disabled = true;
+
+  const formData = new FormData();
+  formData.append('product_title', productTitle);
+  formData.append('domain_name', domainName);
+  formData.append('competitor', competitor);
+  formData.append('color_preferences', document.getElementById('color-prefs').value.trim());
+  formData.append('additional_notes', document.getElementById('additional-notes').value.trim());
+
+  if (fileInput.files[0]) {
+    formData.append('product_image', fileInput.files[0]);
+  }
+
+  try {
+    const res = await fetch('/build-brand-dna', { method: 'POST', body: formData });
+    const data = await res.json();
+
+    if (data.error) {
+      alert('Error: ' + data.error);
+      btn.innerHTML = 'Build Brand DNA';
+      btn.disabled = false;
+      return;
+    }
+
+    brandDNA = data;
+    renderBrandDNA(data);
+    document.getElementById('form-section').style.display = 'none';
+    document.getElementById('dna-section').style.display = 'block';
+    document.getElementById('dna-section').scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    alert('Request failed: ' + err.message);
+    btn.innerHTML = 'Build Brand DNA';
+    btn.disabled = false;
+  }
+}
+
+function renderBrandDNA(d) {
+  document.getElementById('dna-vibe').textContent = d.VIBE_CATEGORY || '';
+
+  // Swatches
+  const swatchData = [
+    { label: 'Background', color: d.PRIMARY_BG_COLOR },
+    { label: 'Accent 1',   color: d.ACCENT_COLOR },
+    { label: 'Accent 2',   color: d.DARK_ACCENT_COLOR },
+    { label: 'Text',       color: d.HEADLINE_COLOR },
+  ];
+  document.getElementById('dna-swatches').innerHTML = swatchData.map(s => `
+    <div class="swatch">
+      <div class="swatch-color" style="background:${s.color}"></div>
+      <div class="swatch-info">
+        <div class="swatch-name">${s.label}</div>
+        <div class="swatch-hex">${s.color}</div>
+      </div>
+    </div>
+  `).join('');
+
+  // Fonts
+  document.getElementById('dna-fonts').innerHTML = `
+    <div class="font-box">
+      <div class="font-box-label">HEADLINE</div>
+      <div class="font-box-name">${d.HEADLINE_FONT || ''}</div>
+    </div>
+    <div class="font-box">
+      <div class="font-box-label">BODY TEXT</div>
+      <div class="font-box-name" style="color:#0a84ff">${d.BODY_FONT || ''}</div>
+    </div>
+  `;
+
+  // Demographic
+  document.getElementById('dna-demographic').textContent = d.DEMOGRAPHIC_ARCHETYPE || '';
+
+  // Copy highlights
+  const highlights = [
+    { label: 'HERO HEADLINE',    value: d.HEADLINE_HOOK },
+    { label: 'OUTCOME HEADLINE', value: d.OUTCOME_HEADLINE },
+    { label: 'HARD PROMISE',     value: d.QUANTIFIABLE_PROMISE },
+    { label: 'TOP 3 BENEFITS',   value: [d.BENEFIT_1, d.BENEFIT_2, d.BENEFIT_3].filter(Boolean).join(' • ') },
+    { label: 'CUSTOMER QUOTE',   value: d.CUSTOMER_QUOTE ? `"${d.CUSTOMER_QUOTE}"` : '' },
+    { label: 'SOCIAL PROOF',     value: d.SOCIAL_PROOF_METRIC },
+    { label: 'GUARANTEE',        value: d.GUARANTEE_HEADLINE },
+    { label: 'REASSURANCE',      value: d.REASSURANCE },
+  ];
+  document.getElementById('dna-highlights').innerHTML = highlights.map(h => `
+    <div class="highlight-item">
+      <div class="hl-label">${h.label}</div>
+      <div class="hl-value">${h.value || ''}</div>
+    </div>
+  `).join('');
+}
+
+function editDetails() {
+  document.getElementById('dna-section').style.display = 'none';
+  document.getElementById('form-section').style.display = 'block';
+  const btn = document.getElementById('build-btn');
+  btn.innerHTML = 'Build Brand DNA';
+  btn.disabled = false;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── Generate Images ──
+function buildGrid() {
+  const grid = document.getElementById('images-grid');
+  grid.innerHTML = IMAGE_TYPES.map((name, i) => `
+    <div class="image-slot" id="slot-${i}">
+      <div class="image-slot-label">${i + 1}. ${name}</div>
+      <div class="image-slot-box" id="slot-box-${i}">
+        <div class="slot-placeholder" id="slot-ph-${i}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+          <span>Waiting...</span>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function startGeneration() {
+  if (!brandDNA) return;
+
+  document.getElementById('approve-btn').textContent = 'Generating... (images appear as they finish)';
+  document.getElementById('approve-btn').disabled = true;
+
+  document.getElementById('gen-section').style.display = 'block';
+  buildGrid();
+  document.getElementById('gen-section').scrollIntoView({ behavior: 'smooth' });
+
+  const statusBar = document.getElementById('status-bar');
+  statusBar.classList.add('active');
+
+  try {
+    const response = await fetch('/generate-images', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(brandDNA),
+    });
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete last line
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const event = JSON.parse(line.slice(6));
+          handleStreamEvent(event);
+        } catch {}
+      }
+    }
+  } catch (err) {
+    statusBar.textContent = 'Connection error: ' + err.message;
+    statusBar.classList.remove('active');
+  }
+}
+
+function handleStreamEvent(event) {
+  const statusBar = document.getElementById('status-bar');
+
+  if (event.type === 'status') {
+    statusBar.textContent = event.message;
+  } else if (event.type === 'generating') {
+    statusBar.textContent = `Generating ${event.index + 1}/9 — ${event.name}...`;
+    const ph = document.getElementById(`slot-ph-${event.index}`);
+    if (ph) {
+      ph.classList.add('generating');
+      ph.querySelector('span').textContent = 'Generating...';
+    }
+  } else if (event.type === 'image_done') {
+    setSlotImage(event.index, event.url, event.name);
+  } else if (event.type === 'error') {
+    const box = document.getElementById(`slot-box-${event.index}`);
+    if (box) box.innerHTML = `<div class="slot-error">&#9888; Generation failed<br><small>${event.message}</small></div>`;
+  } else if (event.type === 'all_done') {
+    statusBar.textContent = 'All 9 images generated!';
+    statusBar.classList.remove('active');
+    document.getElementById('approve-btn').textContent = 'All Done!';
+  }
+}
+
+function setSlotImage(index, url, name) {
+  const box = document.getElementById(`slot-box-${index}`);
+  if (!box) return;
+  box.innerHTML = `<img src="${url}" alt="${name}" loading="lazy" />`;
+
+  const slot = document.getElementById(`slot-${index}`);
+  const existing = slot.querySelector('.slot-controls');
+  if (existing) existing.remove();
+
+  const controls = document.createElement('div');
+  controls.className = 'slot-controls';
+  controls.innerHTML = `
+    <div class="feedback-row">
+      <input type="text" class="feedback-input" id="feedback-${index}" placeholder="Optional feedback" />
+      <label class="ref-upload-btn" id="ref-btn-${index}" title="Upload reference image">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8e8e93" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21 15 16 10 5 21"/>
+        </svg>
+        <input type="file" id="ref-file-${index}" accept="image/*" onchange="onRefImageChange(${index}, this)" />
+      </label>
+    </div>
+    <div class="ref-preview-strip" id="ref-preview-${index}" style="display:none">
+      <img id="ref-thumb-${index}" src="" alt="ref" />
+      <span id="ref-name-${index}"></span>
+      <button class="ref-clear-btn" onclick="clearRefImage(${index})">&#10005;</button>
+    </div>
+    <div class="slot-btn-row">
+      <button class="regen-btn" id="regen-${index}" onclick="regenerateImage(${index})">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+        Regenerate
+      </button>
+      <a class="save-btn" id="save-btn-${index}" href="${url}" download="image-${index + 1}-${name.replace(/\s+/g,'-').toLowerCase()}.png">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Save
+      </a>
+    </div>
+  `;
+  slot.appendChild(controls);
+}
+
+function onRefImageChange(index, input) {
+  const file = input.files[0];
+  if (!file) return;
+  const preview = document.getElementById(`ref-preview-${index}`);
+  const thumb = document.getElementById(`ref-thumb-${index}`);
+  const nameEl = document.getElementById(`ref-name-${index}`);
+  const btn = document.getElementById(`ref-btn-${index}`);
+  const reader = new FileReader();
+  reader.onload = e => {
+    thumb.src = e.target.result;
+    nameEl.textContent = file.name.length > 22 ? file.name.slice(0, 20) + '…' : file.name;
+    preview.style.display = 'flex';
+    btn.classList.add('has-image');
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearRefImage(index) {
+  const fileInput = document.getElementById(`ref-file-${index}`);
+  const preview = document.getElementById(`ref-preview-${index}`);
+  const btn = document.getElementById(`ref-btn-${index}`);
+  if (fileInput) fileInput.value = '';
+  preview.style.display = 'none';
+  btn.classList.remove('has-image');
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function regenerateImage(index) {
+  if (!brandDNA) return;
+  const btn = document.getElementById(`regen-${index}`);
+  const feedbackEl = document.getElementById(`feedback-${index}`);
+  const feedback = feedbackEl ? feedbackEl.value.trim() : '';
+
+  const refFileEl = document.getElementById(`ref-file-${index}`);
+  let reference_image_b64 = null;
+  if (refFileEl && refFileEl.files[0]) {
+    reference_image_b64 = await fileToBase64(refFileEl.files[0]);
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Regenerating...';
+
+  const regenIcon = `
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+    Regenerate
+  `;
+
+  try {
+    const res = await fetch('/regenerate-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index, brand_dna: brandDNA, feedback, reference_image_b64 }),
+    });
+    const data = await res.json();
+    if (data.url) {
+      setSlotImage(index, data.url, IMAGE_TYPES[index]);
+    } else {
+      alert('Regeneration failed: ' + (data.error || 'Unknown error'));
+      btn.disabled = false;
+      btn.innerHTML = regenIcon;
+    }
+  } catch (err) {
+    alert('Request failed: ' + err.message);
+    btn.disabled = false;
+    btn.innerHTML = regenIcon;
+  }
+}
+</script>
+</body>
+</html>

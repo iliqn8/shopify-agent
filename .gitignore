@@ -1,0 +1,8 @@
+.env
+knowledge.db
+get_token.py
+uploads/
+generated_images/
+__pycache__/
+*.pyc
+*.pyo
