@@ -11,6 +11,8 @@ client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
 IMAGE_GEN_URL = os.getenv("IMAGE_GENERATOR_URL", "http://localhost:5001")
 
+IMAGE_GEN_TEMPLATE_TRIGGER = "[IMAGE_GEN_TEMPLATE]"
+
 
 # ── Image Generator helpers ────────────────────────────────────────────────
 
@@ -403,7 +405,12 @@ def chat(messages, extra_context=""):
     system = """You are an AI agent for managing a Shopify store and controlling the user's computer.
 You have tools for: Shopify product/order/collection management, AI product image generation, and computer control (run commands, open apps, read/write files).
 Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
-If generating images — warn the user it takes 2-3 minutes."""
+
+IMPORTANT — IMAGE GENERATION REQUESTS:
+When the user asks you to generate images for a product (in any phrasing), do NOT call the generate_product_images tool directly.
+Instead, reply ONLY with the following marker on its own line, then nothing else:
+[IMAGE_GEN_TEMPLATE]
+The UI will render an interactive form for the user to fill in all image generation details."""
 
     if extra_context:
         system += f"\n\n## Store Training Data:\n{extra_context}"
