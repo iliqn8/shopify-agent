@@ -117,18 +117,22 @@ def start_imagegen():
 
 @app.route("/api/dev-chat", methods=["POST"])
 def dev_chat():
-    data = request.json
-    messages = data.get("messages", [])
-    user_message = data.get("message", "").strip()
-    if not user_message:
-        return jsonify({"error": "Empty message"}), 400
-    messages.append({"role": "user", "content": user_message})
     try:
+        data = request.json
+        messages = data.get("messages", [])
+        user_message = data.get("message", "").strip()
+        if not user_message:
+            return jsonify({"error": "Empty message"}), 400
+        messages.append({"role": "user", "content": user_message})
         reply, updated_messages = dev_agent.chat(messages)
+        if not reply:
+            reply = "Done (no text response from agent)."
+        return jsonify({"reply": reply, "messages": updated_messages})
     except Exception as e:
-        reply = f"Error: {str(e)}"
-        updated_messages = messages
-    return jsonify({"reply": reply, "messages": updated_messages})
+        import traceback
+        err = traceback.format_exc()
+        print(f"[dev-chat error] {err}")
+        return jsonify({"reply": f"Error: {str(e)}\n\n{err[:500]}"})
 
 
 @app.route("/api/set-local-agent", methods=["POST"])
