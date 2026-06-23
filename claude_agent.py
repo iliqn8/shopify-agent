@@ -11,8 +11,6 @@ client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
 IMAGE_GEN_URL = os.getenv("IMAGE_GENERATOR_URL", "http://localhost:5001")
 
-IMAGE_GEN_TEMPLATE_TRIGGER = "[IMAGE_GEN_TEMPLATE]"
-
 
 # ── Image Generator helpers ────────────────────────────────────────────────
 
@@ -45,7 +43,7 @@ def _ensure_image_generator_running():
 
 
 def _build_brand_dna(product_title, domain_name="bambyna.com", competitor="",
-                     color_preferences="", additional_notes="", image_path=None):
+                     color_preferences="", additional_notes="", image_b64=None, image_filename=None):
     data = {
         "product_title": product_title,
         "domain_name": domain_name,
@@ -54,8 +52,10 @@ def _build_brand_dna(product_title, domain_name="bambyna.com", competitor="",
         "additional_notes": additional_notes,
     }
     files = {}
-    if image_path and os.path.exists(image_path):
-        files["product_image"] = open(image_path, "rb")
+    if image_b64 and image_filename:
+        import io
+        img_bytes = base64.b64decode(image_b64)
+        files["product_image"] = (image_filename, io.BytesIO(img_bytes), "image/jpeg")
     resp = _requests.post(f"{IMAGE_GEN_URL}/build-brand-dna", data=data, files=files or None)
     resp.raise_for_status()
     return resp.json()
@@ -217,6 +217,8 @@ TOOLS = [
                 "competitor": {"type": "string", "description": "Competitor site for style reference"},
                 "color_preferences": {"type": "string", "description": "Preferred colors"},
                 "additional_notes": {"type": "string", "description": "Extra instructions"},
+                "image_b64": {"type": "string", "description": "Base64-encoded product photo uploaded by user (optional)"},
+                "image_filename": {"type": "string", "description": "Filename of the uploaded photo (optional)"},
             },
             "required": ["product_title"],
         },
@@ -338,6 +340,8 @@ def run_tool(name, inputs):
                 competitor=inputs.get("competitor", ""),
                 color_preferences=inputs.get("color_preferences", ""),
                 additional_notes=inputs.get("additional_notes", ""),
+                image_b64=inputs.get("image_b64"),
+                image_filename=inputs.get("image_filename"),
             )
             images = _generate_images_sync(brand_dna)
             return {"brand_dna": brand_dna, "images": images, "count": len(images)}
@@ -407,10 +411,17 @@ You have tools for: Shopify product/order/collection management, AI product imag
 Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
 
 IMPORTANT — IMAGE GENERATION REQUESTS:
-When the user asks you to generate images for a product (in any phrasing), do NOT call the generate_product_images tool directly.
-Instead, reply ONLY with the following marker on its own line, then nothing else:
-[IMAGE_GEN_TEMPLATE]
-The UI will render an interactive form for the user to fill in all image generation details."""
+When the user asks to generate product images, ask them in plain conversational text for any missing details:
+- Product name (required)
+- Store domain (default: bambyna.com)
+- Competitor site for style reference (optional)
+- Color preferences (optional)
+- Any extra notes (optional)
+- They can also upload a product photo using the 📎 button in the chat input.
+
+Once you have the product name (and any other details they provide), call the generate_product_images tool.
+If the user already provided enough info in their first message, call the tool immediately without asking again.
+If they uploaded a photo, it will be included in the message as image_b64 and image_filename fields."""
 
     if extra_context:
         system += f"\n\n## Store Training Data:\n{extra_context}"
