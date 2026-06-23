@@ -124,6 +124,9 @@ def start_imagegen():
     return jsonify({"status": "running"})
 
 
+_dev_jobs = {}  # job_id -> {"events": [], "done": False}
+
+
 @app.route("/api/dev-chat", methods=["POST"])
 def dev_chat():
     data = request.json
@@ -133,18 +136,37 @@ def dev_chat():
         return jsonify({"error": "Empty message"}), 400
     messages.append({"role": "user", "content": user_message})
 
-    def generate():
+    import uuid, threading as _th
+    job_id = str(uuid.uuid4())
+    _dev_jobs[job_id] = {"events": [{"type": "status", "text": "🤔 Thinking..."}], "done": False}
+
+    def run():
         try:
             for event in dev_agent.chat_stream(messages):
-                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") != "ping":
+                    _dev_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    _dev_jobs[job_id]["done"] = True
         except Exception as e:
-            import traceback
-            err = traceback.format_exc()
-            yield f"data: {json.dumps({'type': 'done', 'reply': f'Error: {e}', 'messages': messages})}\n\n"
+            _dev_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}", "messages": messages})
+            _dev_jobs[job_id]["done"] = True
 
-    return Response(stream_with_context(generate()),
-                    mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    _th.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/dev-poll/<job_id>")
+def dev_poll(job_id):
+    job = _dev_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    since = request.args.get("since", 0, type=int)
+    events = job["events"][since:]
+    if job["done"] and not _dev_jobs.get(job_id + "_keep"):
+        # Clean up after done is fully consumed
+        if since + len(events) >= len(job["events"]):
+            threading.Timer(30, lambda: _dev_jobs.pop(job_id, None)).start()
+    return jsonify({"events": events, "total": len(job["events"]), "done": job["done"]})
 
 
 @app.route("/api/set-local-agent", methods=["POST"])
