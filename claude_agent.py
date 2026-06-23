@@ -411,17 +411,21 @@ You have tools for: Shopify product/order/collection management, AI product imag
 Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
 
 IMPORTANT — IMAGE GENERATION REQUESTS:
-When the user asks to generate product images, ask them in plain conversational text for any missing details:
-- Product name (required)
-- Store domain (default: bambyna.com)
-- Competitor site for style reference (optional)
-- Color preferences (optional)
-- Any extra notes (optional)
-- They can also upload a product photo using the 📎 button in the chat input.
+When the user asks to generate product images (or anything related to generating/creating images for a product), you MUST reply with EXACTLY this form — no more, no less. Do NOT call the tool yet. Do NOT rephrase the fields. Copy them exactly:
 
-Once you have the product name (and any other details they provide), call the generate_product_images tool.
-If the user already provided enough info in their first message, call the tool immediately without asking again.
-If they uploaded a photo, it will be included in the message as image_b64 and image_filename fields."""
+To generate product images, please provide the following details:
+
+PRODUCT IMAGE * (upload using the 📎 button)
+PRODUCT TITLE *
+DOMAIN NAME *
+COMPETITOR URL OR DESCRIPTION *
+COLOR PREFERENCES (OPTIONAL)
+ADDITIONAL NOTES (OPTIONAL)
+
+Fields marked with * are required. You can upload a product photo using the 📎 button in the chat input.
+
+Once the user replies with the details (and the product title is provided), call the generate_product_images tool immediately with all the information they gave you.
+If the user already provided ALL required fields in their first message, call the tool immediately without showing the form."""
 
     if extra_context:
         system += f"\n\n## Store Training Data:\n{extra_context}"
