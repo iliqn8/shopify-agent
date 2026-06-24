@@ -47,7 +47,7 @@ def chat():
 
     kb.save_message("user", user_message)
     history = kb.get_history(limit=20)
-    context = kb.get_context()
+    context = kb.get_context_for_message(user_message)
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
     try:
@@ -80,7 +80,7 @@ def chat_start():
 
     kb.save_message("user", user_message)
     history = kb.get_history(limit=20)
-    context = kb.get_context()
+    context = kb.get_context_for_message(user_message)
 
     MEDIA_TYPES = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
                    "png": "image/png", "gif": "image/gif", "webp": "image/webp"}
@@ -169,18 +169,25 @@ def list_knowledge():
 
 @app.route("/api/knowledge", methods=["POST"])
 def add_knowledge():
+    category = request.args.get("category", "General")
     if "file" in request.files:
         f = request.files["file"]
         content = f.read().decode("utf-8", errors="ignore")
-        kb.add_knowledge(f.filename, content)
+        kb.add_knowledge(f.filename, content, category)
         return jsonify({"ok": True, "name": f.filename})
     data = request.json or {}
     name = data.get("name", "Manual")
     content = data.get("content", "")
+    category = data.get("category", category)
     if not content:
         return jsonify({"error": "No content"}), 400
-    kb.add_knowledge(name, content)
+    kb.add_knowledge(name, content, category)
     return jsonify({"ok": True})
+
+
+@app.route("/api/categories", methods=["GET"])
+def get_categories():
+    return jsonify(kb.list_categories())
 
 
 @app.route("/api/knowledge/<int:kid>", methods=["DELETE"])
