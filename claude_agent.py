@@ -61,7 +61,7 @@ def _build_brand_dna(product_title, domain_name="bambyna.com", competitor="",
     return resp.json()
 
 
-def _generate_images_sync(brand_dna):
+def _generate_images_sync(brand_dna, on_progress=None):
     """Consume SSE stream and return list of generated image URLs."""
     resp = _requests.post(
         f"{IMAGE_GEN_URL}/generate-images",
@@ -80,6 +80,10 @@ def _generate_images_sync(brand_dna):
                 if ev.get("type") == "image_done":
                     urls.append({"index": ev["index"], "name": ev["name"],
                                  "url": IMAGE_GEN_URL + ev["url"]})
+                    if on_progress:
+                        on_progress(f"🖼️ Image {ev['index'] + 1} generated...")
+                elif ev.get("type") == "progress" and on_progress:
+                    on_progress(f"🎨 {ev.get('message', 'Generating...')}")
             except Exception:
                 pass
     return urls
@@ -303,10 +307,32 @@ TOOLS = [
     },
 ]
 
+# Human-readable tool names for status display
+TOOL_LABELS = {
+    "get_shop_info": "🏪 Getting store info...",
+    "list_products": "📦 Loading products...",
+    "get_product": "📦 Getting product details...",
+    "create_product": "✏️ Creating product...",
+    "update_product": "✏️ Updating product...",
+    "delete_product": "🗑️ Deleting product...",
+    "list_collections": "📁 Loading collections...",
+    "list_orders": "📋 Loading orders...",
+    "list_pages": "📄 Loading pages...",
+    "create_page": "📄 Creating page...",
+    "generate_product_images": "🎨 Starting image generation...",
+    "upload_images_to_product": "⬆️ Uploading images to Shopify...",
+    "run_command": "💻 Running command...",
+    "open_application": "🖥️ Opening application...",
+    "list_files": "📂 Listing files...",
+    "read_file": "📖 Reading file...",
+    "write_file": "💾 Writing file...",
+    "get_running_processes": "🖥️ Getting running processes...",
+}
+
 
 # ── Tool runner ────────────────────────────────────────────────────────────
 
-def run_tool(name, inputs):
+def run_tool(name, inputs, on_progress=None):
     try:
         # Shopify tools
         if name == "get_shop_info":
@@ -334,6 +360,8 @@ def run_tool(name, inputs):
         # Image Generator tools
         elif name == "generate_product_images":
             _ensure_image_generator_running()
+            if on_progress:
+                on_progress("🎨 Building brand DNA...")
             brand_dna = _build_brand_dna(
                 product_title=inputs.get("product_title"),
                 domain_name=inputs.get("domain_name", "bambyna.com"),
@@ -343,13 +371,17 @@ def run_tool(name, inputs):
                 image_b64=inputs.get("image_b64"),
                 image_filename=inputs.get("image_filename"),
             )
-            images = _generate_images_sync(brand_dna)
+            if on_progress:
+                on_progress("🖼️ Generating images (this takes 2-3 min)...")
+            images = _generate_images_sync(brand_dna, on_progress=on_progress)
             return {"brand_dna": brand_dna, "images": images, "count": len(images)}
 
         elif name == "upload_images_to_product":
             results = []
-            for url in inputs.get("image_urls", []):
+            for i, url in enumerate(inputs.get("image_urls", [])):
                 try:
+                    if on_progress:
+                        on_progress(f"⬆️ Uploading image {i+1}/{len(inputs['image_urls'])}...")
                     img = _upload_image_to_shopify(inputs["product_id"], url)
                     results.append({"id": img["id"], "src": img["src"]})
                 except Exception as e:
@@ -403,32 +435,10 @@ def run_tool(name, inputs):
         return {"error": str(e)}
 
 
-# ── Main chat function ─────────────────────────────────────────────────────
+# ── Main chat function (blocking, kept for compatibility) ──────────────────
 
 def chat(messages, extra_context=""):
-    system = """You are an AI agent for managing a Shopify store and controlling the user's computer.
-You have tools for: Shopify product/order/collection management, AI product image generation, and computer control (run commands, open apps, read/write files).
-Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
-
-IMPORTANT — IMAGE GENERATION REQUESTS:
-When the user asks to generate product images (or anything related to generating/creating images for a product), you MUST reply with EXACTLY this form — no more, no less. Do NOT call the tool yet. Do NOT rephrase the fields. Copy them exactly:
-
-To generate product images, please provide the following details:
-
-PRODUCT IMAGE * (upload using the 📎 button)
-PRODUCT TITLE *
-DOMAIN NAME *
-COMPETITOR URL OR DESCRIPTION *
-COLOR PREFERENCES (OPTIONAL)
-ADDITIONAL NOTES (OPTIONAL)
-
-Fields marked with * are required. You can upload a product photo using the 📎 button in the chat input.
-
-Once the user replies with the details (and the product title is provided), call the generate_product_images tool immediately with all the information they gave you.
-If the user already provided ALL required fields in their first message, call the tool immediately without showing the form."""
-
-    if extra_context:
-        system += f"\n\n## Store Training Data:\n{extra_context}"
+    system = _build_system(extra_context)
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
@@ -470,3 +480,108 @@ If the user already provided ALL required fields in their first message, call th
             text += block.text
 
     return text, messages
+
+
+# ── Streaming chat function (yields events) ───────────────────────────────
+
+def chat_stream(messages, extra_context=""):
+    """
+    Generator that yields event dicts:
+      {"type": "status", "text": "..."} — live progress update
+      {"type": "done", "reply": "...", "messages": [...]} — final answer
+    """
+    system = _build_system(extra_context)
+
+    yield {"type": "status", "text": "🤔 Thinking..."}
+
+    current_messages = list(messages)
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=system,
+            tools=TOOLS,
+            messages=current_messages,
+        )
+
+        iteration = 0
+        while response.stop_reason == "tool_use":
+            iteration += 1
+            tool_results = []
+            assistant_content = response.content
+
+            for block in response.content:
+                if block.type == "tool_use":
+                    label = TOOL_LABELS.get(block.name, f"🔧 Running {block.name}...")
+                    yield {"type": "status", "text": label}
+
+                    progress_events = []
+
+                    def on_progress(msg, _events=progress_events):
+                        _events.append(msg)
+
+                    result = run_tool(block.name, dict(block.input), on_progress=on_progress)
+
+                    # Flush any progress events collected during tool run
+                    for msg in progress_events:
+                        yield {"type": "status", "text": msg}
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, ensure_ascii=False, default=str),
+                    })
+
+            current_messages = current_messages + [
+                {"role": "assistant", "content": assistant_content},
+                {"role": "user", "content": tool_results},
+            ]
+
+            yield {"type": "status", "text": "🤔 Processing results..."}
+
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=system,
+                tools=TOOLS,
+                messages=current_messages,
+            )
+
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                text += block.text
+
+        yield {"type": "done", "reply": text, "messages": current_messages}
+
+    except Exception as e:
+        yield {"type": "done", "reply": f"Error: {str(e)}", "messages": current_messages}
+
+
+def _build_system(extra_context=""):
+    system = """You are an AI agent for managing a Shopify store and controlling the user's computer.
+You have tools for: Shopify product/order/collection management, AI product image generation, and computer control (run commands, open apps, read/write files).
+Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
+
+IMPORTANT — IMAGE GENERATION REQUESTS:
+When the user asks to generate product images (or anything related to generating/creating images for a product), you MUST reply with EXACTLY this form — no more, no less. Do NOT call the tool yet. Do NOT rephrase the fields. Copy them exactly:
+
+To generate product images, please provide the following details:
+
+PRODUCT IMAGE * (upload using the 📎 button)
+PRODUCT TITLE *
+DOMAIN NAME *
+COMPETITOR URL OR DESCRIPTION *
+COLOR PREFERENCES (OPTIONAL)
+ADDITIONAL NOTES (OPTIONAL)
+
+Fields marked with * are required. You can upload a product photo using the 📎 button in the chat input.
+
+Once the user replies with the details (and the product title is provided), call the generate_product_images tool immediately with all the information they gave you.
+If the user already provided ALL required fields in their first message, call the tool immediately without showing the form."""
+
+    if extra_context:
+        system += f"\n\n## Store Training Data:\n{extra_context}"
+
+    return system
