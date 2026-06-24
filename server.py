@@ -393,6 +393,28 @@ def delete_product_page(pid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/backup-db")
+def backup_db():
+    from flask import send_file
+    db_path = kb.DB_PATH
+    if not os.path.exists(db_path):
+        return jsonify({"error": "DB not found"}), 404
+    return send_file(db_path, as_attachment=True, download_name="knowledge_backup.db")
+
+
+@app.route("/api/restore-db", methods=["POST"])
+def restore_db():
+    import shutil
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file"}), 400
+    backup_path = kb.DB_PATH + ".bak"
+    shutil.copy2(kb.DB_PATH, backup_path)
+    f.save(kb.DB_PATH)
+    kb.init_db()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/product-build-poll/<job_id>")
 def product_build_poll(job_id):
     job = _build_jobs.get(job_id)
