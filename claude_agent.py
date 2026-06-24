@@ -497,6 +497,22 @@ def chat_stream(messages, extra_context=""):
 
     current_messages = list(messages)
 
+    def _strip_images(msgs):
+        """Replace base64 image blocks with placeholder to keep subsequent API calls lean."""
+        result = []
+        for msg in msgs:
+            if isinstance(msg.get("content"), list):
+                new_content = []
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        new_content.append({"type": "text", "text": "[user attached image — already processed]"})
+                    else:
+                        new_content.append(block)
+                result.append({**msg, "content": new_content})
+            else:
+                result.append(msg)
+        return result
+
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -504,6 +520,7 @@ def chat_stream(messages, extra_context=""):
             system=system,
             tools=TOOLS,
             messages=current_messages,
+            timeout=120.0,
         )
 
         iteration = 0
@@ -524,7 +541,6 @@ def chat_stream(messages, extra_context=""):
 
                     result = run_tool(block.name, dict(block.input), on_progress=on_progress)
 
-                    # Flush any progress events collected during tool run
                     for msg in progress_events:
                         yield {"type": "status", "text": msg}
 
@@ -534,7 +550,7 @@ def chat_stream(messages, extra_context=""):
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     })
 
-            current_messages = current_messages + [
+            current_messages = _strip_images(current_messages) + [
                 {"role": "assistant", "content": assistant_content},
                 {"role": "user", "content": tool_results},
             ]
@@ -547,6 +563,7 @@ def chat_stream(messages, extra_context=""):
                 system=system,
                 tools=TOOLS,
                 messages=current_messages,
+                timeout=120.0,
             )
 
         text = ""
