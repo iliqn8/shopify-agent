@@ -43,11 +43,11 @@
   .chat-input button.upload-btn { background: #2a2a2a; border: 1px solid #3a3a3a; color: #aaa; padding: 0 14px; border-radius: 10px; cursor: pointer; font-size: 18px; height: 48px; transition: all 0.2s; }
   .chat-input button.upload-btn:hover { background: #333; color: #fff; border-color: #6366f1; }
 
-  #photo-preview { display: none; align-items: center; gap: 8px; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 12px; }
-  #photo-preview img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
-  #photo-preview span { font-size: 12px; color: #aaa; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #photo-preview button { background: none; border: none; color: #666; cursor: pointer; font-size: 16px; padding: 0 4px; }
-  #photo-preview button:hover { color: #f87171; }
+  #photo-preview { display: none; flex-wrap: wrap; gap: 8px; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 8px; padding: 8px 12px; }
+  .photo-thumb-item { position: relative; }
+  .photo-thumb-item img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
+  .photo-thumb-item .remove-btn { position: absolute; top: -6px; right: -6px; background: #f87171; border: none; color: #fff; cursor: pointer; font-size: 11px; width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; }
+  .photo-thumb-item .remove-btn:hover { background: #ef4444; }
 
   .typing { display: none; align-items: center; gap: 8px; padding: 4px 0; }
   .typing span { width: 6px; height: 6px; border-radius: 50%; background: #6366f1; animation: bounce 1.2s infinite; }
@@ -128,15 +128,11 @@
   </div>
   <div class="chat-input-area">
     <!-- Photo preview bar -->
-    <div id="photo-preview">
-      <img id="photo-thumb" src="" alt="preview">
-      <span id="photo-name"></span>
-      <button onclick="clearPhoto()" title="Remove photo">✕</button>
-    </div>
+    <div id="photo-preview"></div>
     <div class="chat-input">
       <!-- Hidden file input -->
-      <input type="file" id="photoInput" accept="image/*" style="display:none" onchange="handlePhotoSelect(this)">
-      <button class="upload-btn" onclick="document.getElementById('photoInput').click()" title="Attach product photo">📎</button>
+      <input type="file" id="photoInput" accept="image/*" multiple style="display:none" onchange="handlePhotoSelect(this)">
+      <button class="upload-btn" onclick="document.getElementById('photoInput').click()" title="Attach product photos">📎</button>
       <textarea id="input" placeholder="Type a task... (Enter to send)" rows="1"></textarea>
       <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
     </div>
@@ -214,8 +210,8 @@
 let sending = false;
 let networkUrl = '';
 
-// Attached photo state
-let attachedPhoto = null; // { b64: string, filename: string, dataUrl: string }
+// Attached photos state
+let attachedPhotos = []; // [{ b64, filename, dataUrl }, ...]
 
 (async () => {
   try {
@@ -244,28 +240,44 @@ input.addEventListener('keydown', e => {
 // ── Photo attachment ──────────────────────────────────────────────────────
 
 function handlePhotoSelect(inputEl) {
-  const file = inputEl.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const dataUrl = e.target.result;
-    // Strip the "data:image/...;base64," prefix
-    const b64 = dataUrl.split(',')[1];
-    attachedPhoto = { b64, filename: file.name, dataUrl };
-    // Show preview
-    document.getElementById('photo-thumb').src = dataUrl;
-    document.getElementById('photo-name').textContent = file.name;
-    document.getElementById('photo-preview').style.display = 'flex';
-  };
-  reader.readAsDataURL(file);
+  const files = Array.from(inputEl.files);
+  if (!files.length) return;
+  let loaded = 0;
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      const b64 = dataUrl.split(',')[1];
+      attachedPhotos.push({ b64, filename: file.name, dataUrl });
+      loaded++;
+      if (loaded === files.length) renderPhotoPreviews();
+    };
+    reader.readAsDataURL(file);
+  });
   inputEl.value = '';
 }
 
+function renderPhotoPreviews() {
+  const preview = document.getElementById('photo-preview');
+  preview.innerHTML = '';
+  if (!attachedPhotos.length) { preview.style.display = 'none'; return; }
+  preview.style.display = 'flex';
+  attachedPhotos.forEach((p, i) => {
+    const item = document.createElement('div');
+    item.className = 'photo-thumb-item';
+    item.innerHTML = `<img src="${p.dataUrl}" title="${p.filename}"><button class="remove-btn" onclick="removePhoto(${i})">✕</button>`;
+    preview.appendChild(item);
+  });
+}
+
+function removePhoto(index) {
+  attachedPhotos.splice(index, 1);
+  renderPhotoPreviews();
+}
+
 function clearPhoto() {
-  attachedPhoto = null;
-  document.getElementById('photo-preview').style.display = 'none';
-  document.getElementById('photo-thumb').src = '';
-  document.getElementById('photo-name').textContent = '';
+  attachedPhotos = [];
+  renderPhotoPreviews();
 }
 
 // ── Tab switching ─────────────────────────────────────────────────────────
@@ -345,14 +357,15 @@ function addMessageRich(role, text) {
   msgs.scrollTop = msgs.scrollHeight;
 }
 
-// Show user message — including photo thumbnail if attached
-function addUserMessage(text, photo) {
+function addUserMessage(text, photos) {
   const msgs = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'msg user';
   let content = '';
-  if (photo) {
-    content += `<img src="${photo.dataUrl}" style="max-width:160px;border-radius:8px;margin-bottom:6px;display:block">`;
+  if (photos && photos.length) {
+    content += `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;justify-content:flex-end">`;
+    photos.forEach(p => { content += `<img src="${p.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;">`; });
+    content += `</div>`;
   }
   content += `<div class="bubble">${escHtml(text)}</div>`;
   div.innerHTML = `<div class="avatar">👤</div><div style="display:flex;flex-direction:column;align-items:flex-end">${content}</div>`;
@@ -368,19 +381,19 @@ async function sendMessage() {
   if (!msg) return;
   input.value = '';
   input.style.height = '48px';
-  const photo = attachedPhoto;
+  const photos = attachedPhotos.slice();
   clearPhoto();
-  doSend(msg, photo);
+  doSend(msg, photos);
 }
 
-function sendQuick(msg) { doSend(msg, null); }
+function sendQuick(msg) { doSend(msg, []); }
 
-async function doSend(msg, photo) {
+async function doSend(msg, photos) {
   if (sending) return;
   sending = true;
   document.getElementById('sendBtn').disabled = true;
 
-  addUserMessage(msg, photo);
+  addUserMessage(msg, photos);
   document.getElementById('messages').scrollTop = 99999;
 
   // Create live status bubble
@@ -393,7 +406,9 @@ async function doSend(msg, photo) {
 
   try {
     const body = { message: msg };
-    if (photo) { body.image_b64 = photo.b64; body.image_filename = photo.filename; }
+    if (photos && photos.length) {
+      body.images = photos.map(p => ({ b64: p.b64, filename: p.filename }));
+    }
     const r = await fetch('/api/chat-start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},

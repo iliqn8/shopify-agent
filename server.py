@@ -66,10 +66,14 @@ _chat_jobs = {}  # job_id -> {"events": [], "done": False}
 
 @app.route("/api/chat-start", methods=["POST"])
 def chat_start():
+    import base64 as _b64, uuid as _uuid2
     data = request.json
     user_message = data.get("message", "").strip()
-    image_b64 = data.get("image_b64")
-    image_filename = data.get("image_filename")
+
+    # Support both single image (legacy) and multiple images array
+    images_raw = data.get("images") or []
+    if not images_raw and data.get("image_b64"):
+        images_raw = [{"b64": data["image_b64"], "filename": data.get("image_filename", "image.jpg")}]
 
     if not user_message:
         return jsonify({"error": "Empty message"}), 400
@@ -78,39 +82,38 @@ def chat_start():
     history = kb.get_history(limit=20)
     context = kb.get_context()
 
-    # Build messages list; inject image if provided
+    MEDIA_TYPES = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                   "png": "image/png", "gif": "image/gif", "webp": "image/webp"}
+
+    # Build messages list; inject images if provided
     messages = []
-    for m in history[:-1]:  # all but the last (which is the current user message)
+    for m in history[:-1]:
         messages.append({"role": m["role"], "content": m["content"]})
 
-    # Last message = current user message, possibly with image
-    if image_b64 and image_filename:
-        ext = image_filename.rsplit(".", 1)[-1].lower()
-        media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-                          "png": "image/png", "gif": "image/gif", "webp": "image/webp"}
-        media_type = media_type_map.get(ext, "image/jpeg")
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
-                {"type": "text", "text": user_message},
-            ]
-        })
+    if images_raw:
+        content = []
+        for img in images_raw:
+            ext = img["filename"].rsplit(".", 1)[-1].lower()
+            media_type = MEDIA_TYPES.get(ext, "image/jpeg")
+            content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img["b64"]}})
+        content.append({"type": "text", "text": user_message})
+        messages.append({"role": "user", "content": content})
     else:
         messages.append({"role": "user", "content": user_message})
 
-    # If user attached an image, save it and pass URL to agent
-    if image_b64 and image_filename:
-        import base64 as _b64
-        ext = image_filename.rsplit(".", 1)[-1].lower() or "jpg"
-        import uuid as _uuid2
-        saved_filename = f"user_attach_{_uuid2.uuid4().hex[:8]}.{ext}"
-        saved_path = os.path.join(app.config["UPLOAD_FOLDER"], saved_filename)
-        with open(saved_path, "wb") as _f:
-            _f.write(_b64.b64decode(image_b64))
+    # Save each attached image and pass URLs to agent context
+    if images_raw:
         port = os.getenv("PORT", "5001")
-        attach_url = f"http://127.0.0.1:{port}/user-uploads/{saved_filename}"
-        context = (context or "") + f"\n\n[USER ATTACHED IMAGE — use this URL with upload_images_to_product to attach it to the Shopify product: {attach_url}]"
+        attach_urls = []
+        for img in images_raw:
+            ext = img["filename"].rsplit(".", 1)[-1].lower() or "jpg"
+            saved_filename = f"user_attach_{_uuid2.uuid4().hex[:8]}.{ext}"
+            saved_path = os.path.join(app.config["UPLOAD_FOLDER"], saved_filename)
+            with open(saved_path, "wb") as _f:
+                _f.write(_b64.b64decode(img["b64"]))
+            attach_urls.append(f"http://127.0.0.1:{port}/user-uploads/{saved_filename}")
+        urls_str = ", ".join(attach_urls)
+        context = (context or "") + f"\n\n[USER ATTACHED {len(attach_urls)} IMAGE(S) — use these URLs with upload_images_to_product: {urls_str}]"
 
     import uuid
     job_id = str(uuid.uuid4())
