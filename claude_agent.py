@@ -513,6 +513,23 @@ def chat_stream(messages, extra_context=""):
                 result.append(msg)
         return result
 
+    def _blocks_to_dicts(content):
+        """Convert Anthropic SDK content blocks to plain serializable dicts."""
+        if not isinstance(content, list):
+            return content
+        result = []
+        for block in content:
+            if isinstance(block, dict):
+                result.append(block)
+            elif hasattr(block, "model_dump"):
+                result.append(block.model_dump())
+            elif hasattr(block, "dict"):
+                result.append(block.dict())
+            else:
+                result.append({"type": getattr(block, "type", "unknown"),
+                                "text": getattr(block, "text", str(block))})
+        return result
+
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
@@ -551,7 +568,7 @@ def chat_stream(messages, extra_context=""):
                     })
 
             current_messages = _strip_images(current_messages) + [
-                {"role": "assistant", "content": assistant_content},
+                {"role": "assistant", "content": _blocks_to_dicts(assistant_content)},
                 {"role": "user", "content": tool_results},
             ]
 
@@ -571,10 +588,10 @@ def chat_stream(messages, extra_context=""):
             if hasattr(block, "text"):
                 text += block.text
 
-        yield {"type": "done", "reply": text, "messages": current_messages}
+        yield {"type": "done", "reply": text}
 
     except Exception as e:
-        yield {"type": "done", "reply": f"Error: {str(e)}", "messages": current_messages}
+        yield {"type": "done", "reply": f"Error: {str(e)}"}
 
 
 def _build_system(extra_context=""):
