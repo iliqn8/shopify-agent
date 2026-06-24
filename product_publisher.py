@@ -246,6 +246,39 @@ def fill_template(template_json_str, parsed):
     return json.dumps(tmpl)
 
 
+# ── Theme color updater ────────────────────────────────────────────────────
+
+def apply_theme_colors(tid, colors):
+    if not colors:
+        return
+    raw = sc.get_theme_file(tid, 'config/settings_data.json')
+    data = json.loads(raw.get('value') or raw.get('attachment') or '{}')
+    cur = data.get('current', {})
+
+    if colors.get('bg'):
+        cur['colors_background_1'] = colors['bg']
+    if colors.get('text'):
+        cur['colors_text'] = colors['text']
+    if colors.get('accent1'):
+        cur['colors_accent_1'] = colors['accent1']
+    if colors.get('accent2'):
+        cur['colors_accent_2'] = colors['accent2']
+
+    # Also update scheme-1 (the primary scheme used by most sections)
+    s1 = cur.get('color_schemes', {}).get('scheme-1', {}).get('settings', {})
+    if s1:
+        if colors.get('bg'):
+            s1['background'] = colors['bg']
+        if colors.get('text'):
+            s1['text'] = colors['text']
+            s1['secondary_button_label'] = colors['text']
+        if colors.get('accent1'):
+            s1['button'] = colors['accent1']
+
+    data['current'] = cur
+    sc.update_theme_file(tid, 'config/settings_data.json', json.dumps(data))
+
+
 # ── Main publish function ──────────────────────────────────────────────────
 
 def publish(product_name, generated_text):
@@ -266,7 +299,7 @@ def publish(product_name, generated_text):
     slug = re.sub(r'[^a-z0-9]+', '-', product_name.lower()).strip('-')[:40]
     template_suffix = None
 
-    # Create filled template
+    # Create filled template + apply colors
     try:
         theme = sc.get_active_theme()
         if theme:
@@ -277,6 +310,9 @@ def publish(product_name, generated_text):
             new_key = f'templates/product.{slug}.json'
             sc.update_theme_file(tid, new_key, filled_json)
             template_suffix = slug
+            # Apply brand colors to theme settings
+            if parsed.get('colors'):
+                apply_theme_colors(tid, parsed['colors'])
     except Exception as e:
         print(f'[publisher] Template error: {e}')
 
