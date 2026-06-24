@@ -59,6 +59,82 @@ def chat():
     return jsonify({"reply": reply})
 
 
+# ── Streaming chat with live status updates ────────────────────────────────
+
+_chat_jobs = {}  # job_id -> {"events": [], "done": False}
+
+
+@app.route("/api/chat-start", methods=["POST"])
+def chat_start():
+    data = request.json
+    user_message = data.get("message", "").strip()
+    image_b64 = data.get("image_b64")
+    image_filename = data.get("image_filename")
+
+    if not user_message:
+        return jsonify({"error": "Empty message"}), 400
+
+    kb.save_message("user", user_message)
+    history = kb.get_history(limit=20)
+    context = kb.get_context()
+
+    # Build messages list; inject image if provided
+    messages = []
+    for m in history[:-1]:  # all but the last (which is the current user message)
+        messages.append({"role": m["role"], "content": m["content"]})
+
+    # Last message = current user message, possibly with image
+    if image_b64 and image_filename:
+        ext = image_filename.rsplit(".", 1)[-1].lower()
+        media_type_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                          "png": "image/png", "gif": "image/gif", "webp": "image/webp"}
+        media_type = media_type_map.get(ext, "image/jpeg")
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                {"type": "text", "text": user_message},
+            ]
+        })
+    else:
+        messages.append({"role": "user", "content": user_message})
+
+    import uuid
+    job_id = str(uuid.uuid4())
+    _chat_jobs[job_id] = {"events": [], "done": False}
+
+    def run():
+        try:
+            for event in agent.chat_stream(messages, extra_context=context):
+                _chat_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    reply = event.get("reply", "")
+                    kb.save_message("assistant", reply)
+                    _chat_jobs[job_id]["done"] = True
+        except Exception as e:
+            err = f"Error: {e}"
+            kb.save_message("assistant", err)
+            _chat_jobs[job_id]["events"].append({"type": "done", "reply": err, "messages": []})
+            _chat_jobs[job_id]["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/chat-poll/<job_id>")
+def chat_poll(job_id):
+    job = _chat_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    since = request.args.get("since", 0, type=int)
+    events = job["events"][since:]
+    done = job["done"]
+    # Clean up finished jobs after a delay
+    if done and since + len(events) >= len(job["events"]):
+        threading.Timer(60, lambda: _chat_jobs.pop(job_id, None)).start()
+    return jsonify({"events": events, "total": len(job["events"]), "done": done})
+
+
 @app.route("/api/history", methods=["GET"])
 def history():
     return jsonify(kb.get_history(limit=100))
