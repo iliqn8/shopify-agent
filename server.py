@@ -101,6 +101,23 @@ def chat_start():
     else:
         messages.append({"role": "user", "content": user_message})
 
+    # Inject training images for matching categories (max 3, before user images)
+    training_imgs = kb.get_images_for_message(user_message)
+    if training_imgs:
+        last = messages[-1]
+        if isinstance(last.get("content"), str):
+            base_content = [{"type": "text", "text": last["content"]}]
+        else:
+            base_content = list(last.get("content", []))
+        extra = []
+        for img in training_imgs[:3]:
+            extra.append({"type": "image", "source": {
+                "type": "base64", "media_type": img["media_type"], "data": img["b64"]
+            }})
+        if extra:
+            extra.append({"type": "text", "text": "[Reference images from training — use as visual guide]"})
+            messages[-1] = {**last, "content": extra + base_content}
+
     # Save each attached image and pass URLs to agent context
     if images_raw:
         port = os.getenv("PORT", "5001")
@@ -167,6 +184,9 @@ def list_knowledge():
     return jsonify(kb.list_knowledge())
 
 
+_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
+
+
 def _read_uploaded_file(f):
     filename = f.filename.lower()
     if filename.endswith(".docx"):
@@ -181,9 +201,19 @@ def _read_uploaded_file(f):
 
 @app.route("/api/knowledge", methods=["POST"])
 def add_knowledge():
+    import uuid as _uuid3
     category = request.args.get("category", "General")
     if "file" in request.files:
         f = request.files["file"]
+        ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+        if ext in _IMAGE_EXTS:
+            # Save image to persistent storage
+            os.makedirs(kb.IMAGES_DIR, exist_ok=True)
+            filename = f"training_{_uuid3.uuid4().hex[:8]}.{ext}"
+            save_path = os.path.join(kb.IMAGES_DIR, filename)
+            f.save(save_path)
+            kb.add_image(f.filename, save_path, category)
+            return jsonify({"ok": True, "name": f.filename, "type": "image"})
         content = _read_uploaded_file(f)
         kb.add_knowledge(f.filename, content, category)
         return jsonify({"ok": True, "name": f.filename})

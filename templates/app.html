@@ -475,10 +475,19 @@ function renderSection(cat, items) {
   const textNameId = `tn_${cat.replace(/\s+/g,'_')}`;
   const textContentId = `tc_${cat.replace(/\s+/g,'_')}`;
   const itemsHtml = items.length
-    ? items.map(k => `<div class="knowledge-item">
-        <div><div class="name">${escHtml(k.name)}</div><div class="date">${k.created_at}</div></div>
-        <button onclick="delKnowledge(${k.id})" title="Delete">✕</button>
-      </div>`).join('')
+    ? items.map(k => k.content_type === 'image'
+        ? `<div class="knowledge-item">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">🖼️</span>
+              <div><div class="name">${escHtml(k.name)}</div><div class="date">${k.created_at}</div></div>
+            </div>
+            <button onclick="delKnowledge(${k.id})" title="Delete">✕</button>
+          </div>`
+        : `<div class="knowledge-item">
+            <div><div class="name">${escHtml(k.name)}</div><div class="date">${k.created_at}</div></div>
+            <button onclick="delKnowledge(${k.id})" title="Delete">✕</button>
+          </div>`
+      ).join('')
     : '<div class="empty">No files yet</div>';
 
   return `<div class="section-card" style="margin-bottom:10px">
@@ -492,7 +501,10 @@ function renderSection(cat, items) {
       <div class="section-actions">
         <input type="file" id="${fileInputId}" accept=".txt,.md,.csv,.json,.html,.docx" multiple style="display:none"
           onchange="uploadToSection(this,'${escHtml(cat)}')">
+        <input type="file" id="img_${fileInputId}" accept="image/*" multiple style="display:none"
+          onchange="uploadImagesToSection(this,'${escHtml(cat)}')">
         <button class="btn-sm" onclick="document.getElementById('${fileInputId}').click()">📎 Upload files</button>
+        <button class="btn-sm" onclick="document.getElementById('img_${fileInputId}').click()">🖼️ Upload images</button>
       </div>
       <div style="margin-bottom:10px">
         <input class="name-input" id="${textNameId}" placeholder="Title">
@@ -511,6 +523,18 @@ function toggleSection(cat) {
 }
 
 async function uploadToSection(input, category) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file);
+    await fetch(`/api/knowledge?category=${encodeURIComponent(category)}`, {method:'POST', body:fd});
+  }
+  input.value = '';
+  loadKnowledge();
+}
+
+async function uploadImagesToSection(input, category) {
   const files = Array.from(input.files);
   if (!files.length) return;
   for (const file of files) {
