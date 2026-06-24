@@ -6,6 +6,7 @@ import base64
 import requests as _requests
 
 import shopify_client as sc
+import skills_loader
 
 client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
@@ -491,7 +492,19 @@ def chat_stream(messages, extra_context=""):
       {"type": "status", "text": "..."} — live progress update
       {"type": "done", "reply": "...", "messages": [...]} — final answer
     """
-    system = _build_system(extra_context)
+    # Extract user text from last message to detect relevant skills
+    user_text = ""
+    if messages:
+        last = messages[-1]
+        if isinstance(last.get("content"), str):
+            user_text = last["content"]
+        elif isinstance(last.get("content"), list):
+            for block in last["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    user_text += block.get("text", "")
+
+    skills_content = skills_loader.get_relevant_skills(user_text)
+    system = _build_system(extra_context, skills_content)
 
     yield {"type": "status", "text": "🤔 Thinking..."}
 
@@ -594,7 +607,7 @@ def chat_stream(messages, extra_context=""):
         yield {"type": "done", "reply": f"Error: {str(e)}"}
 
 
-def _build_system(extra_context=""):
+def _build_system(extra_context="", skills_content=""):
     system = """You are an AI agent for managing a Shopify store and controlling the user's computer.
 You have tools for: Shopify product/order/collection management, AI product image generation, and computer control (run commands, open apps, read/write files).
 Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
@@ -615,6 +628,9 @@ Fields marked with * are required. You can upload a product photo using the 📎
 
 Once the user replies with the details (and the product title is provided), call the generate_product_images tool immediately with all the information they gave you.
 If the user already provided ALL required fields in their first message, call the tool immediately without showing the form."""
+
+    if skills_content:
+        system += f"\n\n## Active Marketing Skills (apply these for this task):\n{skills_content}"
 
     if extra_context:
         system += f"\n\n## Store Training Data:\n{extra_context}"
