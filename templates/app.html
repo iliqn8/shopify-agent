@@ -184,9 +184,9 @@
     <div class="card">
       <h3>📁 Upload File</h3>
       <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-        <input type="file" id="fileInput" accept=".txt,.md,.csv,.json,.html" onchange="uploadFile(this)">
+        <input type="file" id="fileInput" accept=".txt,.md,.csv,.json,.html" multiple onchange="uploadFile(this)">
         <div class="icon">📂</div>
-        <p>Click or drag a file here<br><small style="color:#444">Supports: .txt .md .csv .json .html</small></p>
+        <p>Click or drag files here<br><small style="color:#444">Supports: .txt .md .csv .json .html — select multiple</small></p>
       </div>
     </div>
     <div class="card">
@@ -456,14 +456,16 @@ async function clearHistory() {
 // ── Training ──────────────────────────────────────────────────────────────
 
 async function uploadFile(input) {
-  const file = input.files[0];
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('file', file);
-  await fetch('/api/knowledge', {method: 'POST', body: fd});
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file);
+    await fetch('/api/knowledge', {method: 'POST', body: fd});
+  }
   input.value = '';
   loadKnowledge();
-  alert('File uploaded successfully!');
+  alert(`${files.length} file${files.length > 1 ? 's' : ''} uploaded successfully!`);
 }
 
 async function addText() {
