@@ -99,6 +99,19 @@ def chat_start():
     else:
         messages.append({"role": "user", "content": user_message})
 
+    # If user attached an image, save it and pass URL to agent
+    if image_b64 and image_filename:
+        import base64 as _b64
+        ext = image_filename.rsplit(".", 1)[-1].lower() or "jpg"
+        import uuid as _uuid2
+        saved_filename = f"user_attach_{_uuid2.uuid4().hex[:8]}.{ext}"
+        saved_path = os.path.join(app.config["UPLOAD_FOLDER"], saved_filename)
+        with open(saved_path, "wb") as _f:
+            _f.write(_b64.b64decode(image_b64))
+        port = os.getenv("PORT", "5001")
+        attach_url = f"http://127.0.0.1:{port}/user-uploads/{saved_filename}"
+        context = (context or "") + f"\n\n[USER ATTACHED IMAGE — use this URL with upload_images_to_product to attach it to the Shopify product: {attach_url}]"
+
     import uuid
     job_id = str(uuid.uuid4())
     _chat_jobs[job_id] = {"events": [], "done": False}
@@ -303,6 +316,11 @@ def imagegen_proxy(path):
                         content_type=ct,
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     return Response(r.content, content_type=ct, status=r.status_code)
+
+
+@app.route("/user-uploads/<filename>")
+def serve_user_upload(filename):
+    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 
 @app.route("/uploads/<path:filename>")

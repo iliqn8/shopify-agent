@@ -98,6 +98,7 @@ def _upload_image_to_shopify(product_id, image_url):
         f"https://{sc.SHOP}/admin/api/2024-04/products/{product_id}/images.json",
         headers=sc.HEADERS,
         json={"image": {"attachment": b64, "filename": filename}},
+        timeout=60,
     )
     r.raise_for_status()
     return r.json()["image"]
@@ -506,7 +507,7 @@ def chat_stream(messages, extra_context=""):
         )
 
         iteration = 0
-        while response.stop_reason == "tool_use":
+        while response.stop_reason == "tool_use" and iteration < 15:
             iteration += 1
             tool_results = []
             assistant_content = response.content
