@@ -107,6 +107,7 @@
   <div class="tab" onclick="switchTab('training', this)">🧠 Training</div>
   <div class="tab" onclick="switchTab('imagegen', this)">🎨 Image Generator</div>
   <div class="tab" onclick="switchTab('dev', this)">🛠️ Dev</div>
+  <div class="tab" onclick="switchTab('builder', this)">🛍️ Product Builder</div>
 </div>
 
 <!-- Chat Panel -->
@@ -142,6 +143,57 @@
       <button class="upload-btn" onclick="document.getElementById('photoInput').click()" title="Attach product photos">📎</button>
       <textarea id="input" placeholder="Type a task... (Enter to send)" rows="1"></textarea>
       <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+    </div>
+  </div>
+</div>
+
+<!-- Product Builder Panel -->
+<div class="panel" id="panel-builder">
+  <div style="max-width:720px;margin:0 auto;padding:24px 20px">
+    <h2 style="color:#fff;font-size:18px;margin:0 0 4px">🛍️ Product Page Builder</h2>
+    <p style="color:#888;font-size:13px;margin:0 0 24px">Fill in the details and click Generate. Takes ~30-60 seconds.</p>
+
+    <div style="display:grid;gap:16px">
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT NAME *</label>
+        <input id="pb-product" type="text" placeholder="e.g. Magnetic eyelashes" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">COMPETITOR URL <span style="color:#555">(optional)</span></label>
+        <input id="pb-url" type="text" placeholder="TikTok Shop, Shopify or any competitor URL" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT COST ($) *</label>
+          <input id="pb-pcost" type="number" min="0" step="0.01" placeholder="e.g. 8.50" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SHIPPING COST ($) *</label>
+          <input id="pb-scost" type="number" min="0" step="0.01" placeholder="e.g. 2.30" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+        </div>
+      </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT IMAGES <span style="color:#555">(optional)</span></label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="file" id="pb-img-input" accept="image/*" multiple style="display:none" onchange="pbHandleImages(this)">
+          <button onclick="document.getElementById('pb-img-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">📎 Attach images</button>
+          <div id="pb-img-thumbs" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+        </div>
+      </div>
+    </div>
+
+    <button id="pb-gen-btn" onclick="pbGenerate()" style="margin-top:24px;width:100%;background:#6366f1;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
+      🚀 Generate Product Page
+    </button>
+
+    <div id="pb-status" style="display:none;margin-top:16px;color:#aaa;font-size:13px;text-align:center"></div>
+
+    <div id="pb-result" style="display:none;margin-top:24px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span style="color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:1px">Result</span>
+        <button onclick="pbCopy()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">📋 Copy all</button>
+      </div>
+      <div id="pb-output" style="background:#111;border:1px solid #222;border-radius:10px;padding:20px;color:#e0e0e0;font-size:14px;line-height:1.7;white-space:pre-wrap;max-height:70vh;overflow-y:auto"></div>
     </div>
   </div>
 </div>
@@ -587,6 +639,109 @@ async function deleteSection(cat) {
   }
   _openSections.delete(cat);
   loadKnowledge();
+}
+
+// ── Product Builder ───────────────────────────────────────────────────────
+
+let pbImages = [];
+
+function pbHandleImages(input) {
+  Array.from(input.files).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const b64 = e.target.result.split(',')[1];
+      const ext = file.name.split('.').pop().toLowerCase();
+      const mimeMap = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'};
+      pbImages.push({b64, filename: file.name, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result});
+      pbRenderThumbs();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function pbRenderThumbs() {
+  const el = document.getElementById('pb-img-thumbs');
+  el.innerHTML = pbImages.map((img, i) => `
+    <div style="position:relative">
+      <img src="${img.dataUrl}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid #333">
+      <button onclick="pbImages.splice(${i},1);pbRenderThumbs()" style="position:absolute;top:-6px;right:-6px;background:#333;border:none;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;line-height:18px;padding:0">✕</button>
+    </div>`).join('');
+}
+
+async function pbGenerate() {
+  const productName = document.getElementById('pb-product').value.trim();
+  const competitorUrl = document.getElementById('pb-url').value.trim();
+  const productCost = document.getElementById('pb-pcost').value || '0';
+  const shippingCost = document.getElementById('pb-scost').value || '0';
+
+  if (!productName) { alert('Enter a product name'); return; }
+  if (!productCost || productCost === '0') { alert('Enter the product cost'); return; }
+
+  const btn = document.getElementById('pb-gen-btn');
+  const statusEl = document.getElementById('pb-status');
+  const resultEl = document.getElementById('pb-result');
+  const outputEl = document.getElementById('pb-output');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = '🛍️ Building your product page...';
+  resultEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/product-build-start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        product_name: productName,
+        competitor_url: competitorUrl,
+        product_cost: productCost,
+        shipping_cost: shippingCost,
+        images: pbImages.map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type}))
+      })
+    });
+    const {job_id} = await res.json();
+
+    let since = 0;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/product-build-poll/${job_id}?since=${since}`);
+        const data = await r.json();
+        since += data.events.length;
+        for (const ev of data.events) {
+          if (ev.type === 'status') statusEl.textContent = ev.text;
+          if (ev.type === 'done') {
+            clearInterval(poll);
+            btn.disabled = false;
+            btn.textContent = '🚀 Generate Product Page';
+            statusEl.style.display = 'none';
+            outputEl.textContent = ev.reply || '';
+            resultEl.style.display = 'block';
+          }
+        }
+        if (data.done && !data.events.some(e => e.type === 'done')) {
+          clearInterval(poll);
+          btn.disabled = false;
+          btn.textContent = '🚀 Generate Product Page';
+          statusEl.textContent = 'Done.';
+        }
+      } catch(e) { console.error('poll error', e); }
+    }, 1500);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🚀 Generate Product Page';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+function pbCopy() {
+  const text = document.getElementById('pb-output').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => btn.textContent = '📋 Copy all', 2000);
+  });
 }
 
 // ── Dev chat ──────────────────────────────────────────────────────────────

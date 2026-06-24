@@ -321,6 +321,55 @@ def dev_poll(job_id):
     return jsonify({"events": events, "total": len(job["events"]), "done": job["done"]})
 
 
+_build_jobs = {}
+
+
+@app.route("/api/product-build-start", methods=["POST"])
+def product_build_start():
+    import uuid as _uuid4
+    data = request.json or {}
+    product_name = data.get("product_name", "").strip()
+    competitor_url = data.get("competitor_url", "").strip()
+    product_cost = data.get("product_cost", "0")
+    shipping_cost = data.get("shipping_cost", "0")
+    images = data.get("images", [])
+
+    if not product_name:
+        return jsonify({"error": "Product name required"}), 400
+
+    job_id = str(_uuid4.uuid4())
+    _build_jobs[job_id] = {"events": [], "done": False}
+
+    def run():
+        try:
+            import product_builder
+            for event in product_builder.build_stream(
+                product_name, competitor_url, product_cost, shipping_cost, images
+            ):
+                _build_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    _build_jobs[job_id]["done"] = True
+        except Exception as e:
+            _build_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
+            _build_jobs[job_id]["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/product-build-poll/<job_id>")
+def product_build_poll(job_id):
+    job = _build_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Not found"}), 404
+    since = request.args.get("since", 0, type=int)
+    events = job["events"][since:]
+    done = job["done"]
+    if done and since + len(events) >= len(job["events"]):
+        threading.Timer(120, lambda: _build_jobs.pop(job_id, None)).start()
+    return jsonify({"events": events, "total": len(job["events"]), "done": done})
+
+
 @app.route("/api/set-local-agent", methods=["POST"])
 def set_local_agent():
     url = request.json.get("url", "")
