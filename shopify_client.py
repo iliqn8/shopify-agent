@@ -109,3 +109,27 @@ def get_inventory_levels(location_id=None):
 
 def list_locations():
     return _get("/locations.json")["locations"]
+
+
+# ── Theme ──────────────────────────────────────────────────────────────────
+
+def get_active_theme():
+    themes = _get("/themes.json")["themes"]
+    for t in themes:
+        if t.get("role") == "main":
+            return t
+    return themes[0] if themes else None
+
+
+def list_theme_files(theme_id):
+    return _get(f"/themes/{theme_id}/assets.json")["assets"]
+
+
+def get_theme_file(theme_id, key):
+    data = _get(f"/themes/{theme_id}/assets.json", {"asset[key]": key, "theme_id": theme_id})
+    return data["asset"]
+
+
+def update_theme_file(theme_id, key, value):
+    return _put(f"/themes/{theme_id}/assets.json",
+                {"asset": {"key": key, "value": value}})["asset"]

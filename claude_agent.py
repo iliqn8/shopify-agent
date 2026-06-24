@@ -245,6 +245,35 @@ TOOLS = [
             "required": ["product_id", "image_urls"],
         },
     },
+    # Theme
+    {
+        "name": "list_theme_files",
+        "description": "List all files in the active Shopify theme (templates, sections, snippets, assets, config, layout)",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_theme_file",
+        "description": "Read the full content of a theme file by its key (e.g. 'sections/product-template.liquid', 'templates/product.json', 'assets/base.css')",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "File path in the theme, e.g. sections/main-product.liquid"},
+            },
+            "required": ["key"],
+        },
+    },
+    {
+        "name": "update_theme_file",
+        "description": "Write/update a theme file. Use get_theme_file first to read the current content, make the targeted changes, then write the full updated content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "File path in the theme"},
+                "value": {"type": "string", "description": "Full new content of the file"},
+            },
+            "required": ["key", "value"],
+        },
+    },
     # Computer Control
     {
         "name": "run_command",
@@ -321,6 +350,9 @@ TOOL_LABELS = {
     "list_orders": "📋 Loading orders...",
     "list_pages": "📄 Loading pages...",
     "create_page": "📄 Creating page...",
+    "list_theme_files": "🎨 Loading theme files...",
+    "get_theme_file": "📄 Reading theme file...",
+    "update_theme_file": "💾 Updating theme file...",
     "generate_product_images": "🎨 Starting image generation...",
     "upload_images_to_product": "⬆️ Uploading images to Shopify...",
     "run_command": "💻 Running command...",
@@ -358,6 +390,25 @@ def run_tool(name, inputs, on_progress=None):
             return sc.list_pages()
         elif name == "create_page":
             return sc.create_page(**inputs)
+
+        # Theme tools
+        elif name == "list_theme_files":
+            theme = sc.get_active_theme()
+            if not theme:
+                return {"error": "No active theme found"}
+            files = sc.list_theme_files(theme["id"])
+            return {"theme_name": theme["name"], "theme_id": theme["id"],
+                    "files": [f["key"] for f in files]}
+        elif name == "get_theme_file":
+            theme = sc.get_active_theme()
+            if not theme:
+                return {"error": "No active theme found"}
+            return sc.get_theme_file(theme["id"], inputs["key"])
+        elif name == "update_theme_file":
+            theme = sc.get_active_theme()
+            if not theme:
+                return {"error": "No active theme found"}
+            return sc.update_theme_file(theme["id"], inputs["key"], inputs["value"])
 
         # Image Generator tools
         elif name == "generate_product_images":
