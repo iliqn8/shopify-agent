@@ -148,7 +148,7 @@
   <div class="chat-messages" id="dev-messages">
     <div class="msg assistant">
       <div class="avatar">🛠️</div>
-      <div class="bubble">I'm the Dev Agent. I can read and modify any file in this agent, then push to GitHub so Railway redeploys automatically.<br><br>Tell me what you want to change and I'll do it.</div>
+      <div class="bubble">I'm the Dev Agent. I can read and modify any file in this agent, then push to GitHub so Railway redeploys automatically.<br><br>Tell me what you want to change and I'll do it. You can also attach a screenshot with 📎.</div>
     </div>
   </div>
   <div class="typing" id="dev-typing">
@@ -157,9 +157,18 @@
       <div class="bubble"><span></span><span></span><span></span></div>
     </div>
   </div>
-  <div class="chat-input">
-    <textarea id="dev-input" placeholder="Describe the change you want... (Enter to send)" rows="1"></textarea>
-    <button id="dev-sendBtn" onclick="devSend()">➤</button>
+  <div class="chat-input-area">
+    <div id="dev-photo-preview" style="display:none;align-items:center;gap:8px;background:#1e1e1e;border:1px solid #2a2a2a;border-radius:8px;padding:8px 12px">
+      <img id="dev-photo-thumb" src="" style="width:40px;height:40px;object-fit:cover;border-radius:4px">
+      <span id="dev-photo-name" style="font-size:12px;color:#aaa;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      <button onclick="clearDevPhoto()" style="background:none;border:none;color:#666;cursor:pointer;font-size:16px;padding:0 4px">✕</button>
+    </div>
+    <div class="chat-input">
+      <input type="file" id="devPhotoInput" accept="image/*" style="display:none" onchange="handleDevPhotoSelect(this)">
+      <button class="upload-btn" onclick="document.getElementById('devPhotoInput').click()" title="Attach screenshot">📎</button>
+      <textarea id="dev-input" placeholder="Describe the change you want... (Enter to send)" rows="1"></textarea>
+      <button class="send-btn" id="dev-sendBtn" onclick="devSend()">➤</button>
+    </div>
   </div>
 </div>
 
@@ -455,6 +464,29 @@ async function delKnowledge(id) {
 let devMessages = [];
 let devSending = false;
 let currentVersion = null;
+let attachedDevPhoto = null;
+
+function handleDevPhotoSelect(inputEl) {
+  const file = inputEl.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const dataUrl = e.target.result;
+    attachedDevPhoto = { b64: dataUrl.split(',')[1], filename: file.name, dataUrl };
+    document.getElementById('dev-photo-thumb').src = dataUrl;
+    document.getElementById('dev-photo-name').textContent = file.name;
+    document.getElementById('dev-photo-preview').style.display = 'flex';
+  };
+  reader.readAsDataURL(file);
+  inputEl.value = '';
+}
+
+function clearDevPhoto() {
+  attachedDevPhoto = null;
+  document.getElementById('dev-photo-preview').style.display = 'none';
+  document.getElementById('dev-photo-thumb').src = '';
+  document.getElementById('dev-photo-name').textContent = '';
+}
 
 async function getVersion() {
   try { const r = await fetch('/api/version'); const d = await r.json(); return d.version; }
@@ -506,9 +538,18 @@ async function devSend() {
   devInput.style.height = '48px';
   devSending = true;
   document.getElementById('dev-sendBtn').disabled = true;
-  addDevMessage('user', msg);
+  const devPhoto = attachedDevPhoto;
+  clearDevPhoto();
+  // Show user message with optional photo
+  const devMsgs = document.getElementById('dev-messages');
+  const userDiv = document.createElement('div');
+  userDiv.className = 'msg user';
+  let userContent = devPhoto ? `<img src="${devPhoto.dataUrl}" style="max-width:160px;border-radius:8px;margin-bottom:6px;display:block">` : '';
+  userContent += `<div class="bubble">${escHtml(msg)}</div>`;
+  userDiv.innerHTML = `<div class="avatar">👤</div><div style="display:flex;flex-direction:column;align-items:flex-end">${userContent}</div>`;
+  devMsgs.appendChild(userDiv);
+  devMsgs.scrollTop = 99999;
   document.getElementById('dev-typing').style.display = 'flex';
-  document.getElementById('dev-messages').scrollTop = 99999;
 
   // Status bubble — updates in real-time
   const statusDiv = document.createElement('div');
@@ -518,10 +559,12 @@ async function devSend() {
   const statusBubble = statusDiv.querySelector('.status-bubble');
 
   try {
+    const body = {message: msg, messages: devMessages};
+    if (devPhoto) { body.image_b64 = devPhoto.b64; body.image_filename = devPhoto.filename; }
     const r = await fetch('/api/dev-chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg, messages: devMessages})
+      body: JSON.stringify(body)
     });
     const {job_id} = await r.json();
     if (!job_id) throw new Error('No job_id returned');

@@ -210,7 +210,18 @@ def dev_chat():
     user_message = data.get("message", "").strip()
     if not user_message:
         return jsonify({"error": "Empty message"}), 400
-    messages.append({"role": "user", "content": user_message})
+    image_b64 = data.get("image_b64")
+    image_filename = data.get("image_filename", "image.jpg")
+    if image_b64:
+        import re as _re
+        ext = image_filename.rsplit(".", 1)[-1].lower() if "." in image_filename else "jpeg"
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/jpeg")
+        messages.append({"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": mime, "data": image_b64}},
+            {"type": "text", "text": user_message},
+        ]})
+    else:
+        messages.append({"role": "user", "content": user_message})
 
     import uuid, threading as _th
     job_id = str(uuid.uuid4())
