@@ -381,27 +381,50 @@ async function doSend(msg, photo) {
   document.getElementById('sendBtn').disabled = true;
 
   addUserMessage(msg, photo);
+  document.getElementById('messages').scrollTop = 99999;
 
-  document.getElementById('typing').style.display = 'flex';
+  // Create live status bubble
+  const statusDiv = document.createElement('div');
+  statusDiv.className = 'msg assistant';
+  statusDiv.innerHTML = '<div class="avatar">🤖</div><div class="bubble" style="color:#888;font-size:13px;font-style:italic">🤔 Thinking...</div>';
+  document.getElementById('messages').appendChild(statusDiv);
+  const statusBubble = statusDiv.querySelector('.bubble');
   document.getElementById('messages').scrollTop = 99999;
 
   try {
     const body = { message: msg };
-    if (photo) {
-      body.image_b64 = photo.b64;
-      body.image_filename = photo.filename;
-    }
-    const r = await fetch('/api/chat', {
+    if (photo) { body.image_b64 = photo.b64; body.image_filename = photo.filename; }
+    const r = await fetch('/api/chat-start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body)
     });
-    const data = await r.json();
-    document.getElementById('typing').style.display = 'none';
-    addMessageRich('assistant', data.reply || data.error || 'Error');
+    const {job_id} = await r.json();
+    if (!job_id) throw new Error('No job_id');
+
+    let since = 0, done = false;
+    while (!done) {
+      await new Promise(res => setTimeout(res, 800));
+      try {
+        const pr = await fetch(`/api/chat-poll/${job_id}?since=${since}`);
+        const pd = await pr.json();
+        for (const ev of pd.events) {
+          if (ev.type === 'status') {
+            statusBubble.textContent = ev.text;
+            document.getElementById('messages').scrollTop = 99999;
+          } else if (ev.type === 'done') {
+            statusDiv.remove();
+            addMessageRich('assistant', ev.reply || 'Done.');
+            document.getElementById('messages').scrollTop = 99999;
+          }
+        }
+        since = pd.total;
+        done = pd.done && pd.events.some(e => e.type === 'done');
+      } catch(e) { /* retry */ }
+    }
   } catch(e) {
-    document.getElementById('typing').style.display = 'none';
-    addMessage('assistant', 'Connection error.');
+    statusDiv.remove();
+    addMessage('assistant', 'Connection error: ' + e.message);
   }
   sending = false;
   document.getElementById('sendBtn').disabled = false;
