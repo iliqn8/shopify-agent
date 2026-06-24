@@ -24,6 +24,18 @@ def init_db():
         file_path TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS product_pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_name TEXT NOT NULL,
+        title TEXT,
+        price TEXT,
+        shopify_product_id TEXT,
+        shopify_product_url TEXT,
+        admin_url TEXT,
+        template_suffix TEXT,
+        generated_text TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS chat_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         role TEXT NOT NULL,
@@ -150,6 +162,39 @@ def get_images_for_message(message):
                 b64 = base64.b64encode(f.read()).decode()
             result.append({"b64": b64, "media_type": media_type, "name": name})
     return result
+
+
+def save_product_page(product_name, generated_text, title=None, price=None,
+                      shopify_product_id=None, shopify_product_url=None,
+                      admin_url=None, template_suffix=None):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""INSERT INTO product_pages
+        (product_name, generated_text, title, price, shopify_product_id,
+         shopify_product_url, admin_url, template_suffix)
+        VALUES (?,?,?,?,?,?,?,?)""",
+        (product_name, generated_text, title, price, shopify_product_id,
+         shopify_product_url, admin_url, template_suffix))
+    conn.commit()
+    conn.close()
+
+
+def list_product_pages():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, product_name, title, price, shopify_product_id, shopify_product_url, admin_url, template_suffix, generated_text, created_at FROM product_pages ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [{"id": r[0], "product_name": r[1], "title": r[2], "price": r[3],
+             "shopify_product_id": r[4], "shopify_product_url": r[5],
+             "admin_url": r[6], "template_suffix": r[7],
+             "generated_text": r[8], "created_at": r[9]} for r in rows]
+
+
+def delete_product_page(page_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM product_pages WHERE id = ?", (page_id,))
+    conn.commit()
+    conn.close()
 
 
 def save_message(role, content):

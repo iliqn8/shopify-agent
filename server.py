@@ -357,6 +357,42 @@ def product_build_start():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/product-publish", methods=["POST"])
+def product_publish():
+    import product_publisher as pub
+    data = request.json or {}
+    product_name = data.get("product_name", "").strip()
+    generated_text = data.get("generated_text", "").strip()
+    if not product_name or not generated_text:
+        return jsonify({"error": "Missing fields"}), 400
+    try:
+        result = pub.publish(product_name, generated_text)
+        kb.save_product_page(
+            product_name=product_name,
+            generated_text=generated_text,
+            title=result.get("title"),
+            price=result.get("price"),
+            shopify_product_id=result.get("product_id"),
+            shopify_product_url=result.get("product_url"),
+            admin_url=result.get("admin_url"),
+            template_suffix=result.get("template_suffix"),
+        )
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/product-pages", methods=["GET"])
+def list_product_pages():
+    return jsonify(kb.list_product_pages())
+
+
+@app.route("/api/product-pages/<int:pid>", methods=["DELETE"])
+def delete_product_page(pid):
+    kb.delete_product_page(pid)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/product-build-poll/<job_id>")
 def product_build_poll(job_id):
     job = _build_jobs.get(job_id)

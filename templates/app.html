@@ -194,7 +194,24 @@
         <button onclick="pbCopy()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">📋 Copy all</button>
       </div>
       <div id="pb-output" style="background:#111;border:1px solid #222;border-radius:10px;padding:20px;color:#e0e0e0;font-size:14px;line-height:1.7;white-space:pre-wrap"></div>
+
+      <button id="pb-publish-btn" onclick="pbPublish()" style="margin-top:16px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
+        🛍️ Create in Shopify
+      </button>
+      <div id="pb-publish-status" style="display:none;margin-top:10px;font-size:13px;text-align:center"></div>
     </div>
+
+    <!-- History -->
+    <div style="margin-top:40px;border-top:1px solid #222;padding-top:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2 style="color:#fff;font-size:16px;margin:0">📚 Page History</h2>
+        <button onclick="pbLoadHistory()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px">↻ Refresh</button>
+      </div>
+      <div id="pb-history" style="display:flex;flex-direction:column;gap:8px">
+        <div style="color:#555;font-size:13px">No pages yet.</div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -332,6 +349,7 @@ function switchTab(tab, el) {
   document.getElementById('panel-' + tab).classList.add('active');
   if (tab === 'training') loadKnowledge();
   if (tab === 'imagegen' && !imageGenLoaded) loadImageGen();
+  if (tab === 'builder') pbLoadHistory();
 }
 
 async function loadImageGen() {
@@ -683,6 +701,13 @@ async function pbGenerate() {
   const resultEl = document.getElementById('pb-result');
   const outputEl = document.getElementById('pb-output');
 
+  _pbCurrentProductName = productName;
+  // Reset publish button
+  const pubBtn = document.getElementById('pb-publish-btn');
+  const pubStatus = document.getElementById('pb-publish-status');
+  if (pubBtn) { pubBtn.disabled = false; pubBtn.textContent = '🛍️ Create in Shopify'; pubBtn.style.background = '#16a34a'; }
+  if (pubStatus) { pubStatus.style.display = 'none'; pubStatus.textContent = ''; }
+
   btn.disabled = true;
   btn.textContent = '⏳ Generating...';
   statusEl.style.display = 'block';
@@ -742,6 +767,92 @@ function pbCopy() {
     btn.textContent = '✅ Copied!';
     setTimeout(() => btn.textContent = '📋 Copy all', 2000);
   });
+}
+
+let _pbCurrentProductName = '';
+
+async function pbPublish() {
+  const productName = _pbCurrentProductName || document.getElementById('pb-product').value.trim();
+  const generatedText = document.getElementById('pb-output').textContent;
+  if (!generatedText) return;
+
+  const btn = document.getElementById('pb-publish-btn');
+  const statusEl = document.getElementById('pb-publish-status');
+  btn.disabled = true;
+  btn.textContent = '⏳ Creating in Shopify...';
+  statusEl.style.display = 'block';
+  statusEl.style.color = '#aaa';
+  statusEl.textContent = 'Creating product and theme template...';
+
+  try {
+    const res = await fetch('/api/product-publish', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({product_name: productName, generated_text: generatedText})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = '✅ Created!';
+      btn.style.background = '#166534';
+      statusEl.style.color = '#4ade80';
+      const tmpl = data.template_suffix ? ` | Template: product.${data.template_suffix}` : '';
+      statusEl.innerHTML = `✅ <strong>${data.title}</strong> — $${data.price}${tmpl}<br>
+        <a href="${data.admin_url}" target="_blank" style="color:#6366f1">Open in Shopify Admin →</a>`;
+      pbLoadHistory();
+    } else {
+      throw new Error(data.error || 'Unknown error');
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🛍️ Create in Shopify';
+    statusEl.style.color = '#f87171';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function pbLoadHistory() {
+  const container = document.getElementById('pb-history');
+  try {
+    const res = await fetch('/api/product-pages');
+    const pages = await res.json();
+    if (!pages.length) {
+      container.innerHTML = '<div style="color:#555;font-size:13px">No pages yet.</div>';
+      return;
+    }
+    container.innerHTML = pages.map(p => `
+      <div style="background:#161616;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden">
+        <div onclick="pbToggleHistory(${p.id})" style="display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;user-select:none">
+          <span id="ph-arrow-${p.id}" style="color:#555;font-size:12px;transition:transform 0.2s">▶</span>
+          <div style="flex:1">
+            <div style="color:#e0e0e0;font-size:14px;font-weight:500">${escHtml(p.title || p.product_name)}</div>
+            <div style="color:#555;font-size:11px;margin-top:2px">
+              ${p.created_at ? p.created_at.split('T')[0] || p.created_at.split(' ')[0] : ''}
+              ${p.price ? ' · $' + p.price : ''}
+              ${p.template_suffix ? ' · product.' + p.template_suffix : ''}
+            </div>
+          </div>
+          ${p.shopify_product_url ? `<a href="${p.admin_url || p.shopify_product_url}" target="_blank" onclick="event.stopPropagation()" style="color:#6366f1;font-size:12px;white-space:nowrap">Shopify →</a>` : ''}
+          <button onclick="event.stopPropagation();pbDeleteHistory(${p.id})" style="background:none;border:none;color:#444;cursor:pointer;font-size:14px;padding:2px 6px" title="Delete">✕</button>
+        </div>
+        <div id="ph-body-${p.id}" style="display:none;border-top:1px solid #222;padding:16px;color:#ccc;font-size:13px;line-height:1.7;white-space:pre-wrap;max-height:500px;overflow-y:auto">${escHtml(p.generated_text || '')}</div>
+      </div>`).join('');
+  } catch(e) {
+    container.innerHTML = '<div style="color:#f87171;font-size:13px">Failed to load history.</div>';
+  }
+}
+
+function pbToggleHistory(id) {
+  const body = document.getElementById('ph-body-' + id);
+  const arrow = document.getElementById('ph-arrow-' + id);
+  const open = body.style.display === 'block';
+  body.style.display = open ? 'none' : 'block';
+  arrow.style.transform = open ? '' : 'rotate(90deg)';
+}
+
+async function pbDeleteHistory(id) {
+  if (!confirm('Delete this page from history?')) return;
+  await fetch('/api/product-pages/' + id, {method: 'DELETE'});
+  pbLoadHistory();
 }
 
 // ── Dev chat ──────────────────────────────────────────────────────────────
