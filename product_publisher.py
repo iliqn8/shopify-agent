@@ -65,7 +65,6 @@ def publish(product_name, generated_text):
         title=parsed["title"],
         body_html=parsed["body_html"],
         price=parsed["price"],
-        status="draft",
     )
     product_id = str(product["id"])
     handle = product.get("handle", product_id)
