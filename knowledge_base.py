@@ -2,7 +2,9 @@ import sqlite3
 import os
 from collections import defaultdict
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "knowledge.db")
+# Use persistent volume on Railway (/data), fall back to local for dev
+_DATA_DIR = "/data" if os.path.isdir("/data") else os.path.dirname(__file__)
+DB_PATH = os.path.join(_DATA_DIR, "knowledge.db")
 
 
 def init_db():
