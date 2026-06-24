@@ -167,12 +167,24 @@ def list_knowledge():
     return jsonify(kb.list_knowledge())
 
 
+def _read_uploaded_file(f):
+    filename = f.filename.lower()
+    if filename.endswith(".docx"):
+        try:
+            import docx, io
+            doc = docx.Document(io.BytesIO(f.read()))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception as e:
+            return f"[Could not parse docx: {e}]"
+    return f.read().decode("utf-8", errors="ignore")
+
+
 @app.route("/api/knowledge", methods=["POST"])
 def add_knowledge():
     category = request.args.get("category", "General")
     if "file" in request.files:
         f = request.files["file"]
-        content = f.read().decode("utf-8", errors="ignore")
+        content = _read_uploaded_file(f)
         kb.add_knowledge(f.filename, content, category)
         return jsonify({"ok": True, "name": f.filename})
     data = request.json or {}

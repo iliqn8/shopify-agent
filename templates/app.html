@@ -490,7 +490,7 @@ function renderSection(cat, items) {
     </div>
     <div class="section-body ${isOpen?'open':''}">
       <div class="section-actions">
-        <input type="file" id="${fileInputId}" accept=".txt,.md,.csv,.json,.html" multiple style="display:none"
+        <input type="file" id="${fileInputId}" accept=".txt,.md,.csv,.json,.html,.docx" multiple style="display:none"
           onchange="uploadToSection(this,'${escHtml(cat)}')">
         <button class="btn-sm" onclick="document.getElementById('${fileInputId}').click()">📎 Upload files</button>
       </div>
