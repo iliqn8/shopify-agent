@@ -31,6 +31,15 @@ WHAT TO BUILD
 Analyze ONLY the section visible in the screenshot (ignore header/footer/other sections unless they
 are literally inside the screenshot). Recreate it as a brand-new, custom Shopify section.
 
+NO INVENTED DECORATION (STRICT)
+Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
+floating bubbles, badges, or graphics that are not present in the reference image, even if you think
+they would look nice. Every icon/graphic in your output must map to exactly ONE editable setting
+(a block's image_picker or a section image_picker) — never render the same visual concept twice
+(e.g. an icon inside a feature block AND a second copy of a similar icon floating elsewhere as a
+hardcoded, non-editable SVG). If a piece of content doesn't map to something editable, leave it out
+rather than hardcoding it.
+
 OUTPUT FORMAT (STRICT)
 Output ONE thing only: a single, complete Shopify `.liquid` section file, wrapped in one ```liquid
 code fence and nothing else — no explanation before or after the fence.
@@ -43,6 +52,14 @@ The file MUST contain, in this order:
    scope EVERY CSS rule under that exact class (never write bare/global selectors like `h2 {}` or
    `.button {}` — they will collide with the rest of the theme). section.id is unique per rendered
    instance, so this guarantees no collision even if this section is added twice on one page.
+   COLOR RULE (STRICT): the outer wrapper must carry a `color-{{ section.settings.color_scheme }}`
+   class (Shopify's scheme system), and every background/text/border color in your CSS that should
+   follow the merchant's chosen Color Scheme MUST be written as `rgb(var(--color-background))`,
+   `rgb(var(--color-foreground))`, or `rgba(var(--color-foreground), 0.NN)` for muted variants —
+   NEVER a literal hex/rgb value like `#f0faff` or `#333` for these. Hardcoded literal colors make
+   the "Color Scheme" setting do nothing when the merchant changes it, which is a critical bug.
+   Only truly decorative accents that must stay constant across every scheme (rare) may use a
+   literal color, and only if there is no reasonable alternative.
 3. Responsive breakpoints matching Dawn/OS 2.0 convention:
    - Unprefixed rules = desktop.
    - @media screen and (max-width: 989px) {{ ... }} = tablet adjustments.
@@ -73,6 +90,11 @@ SELF-CHECK BEFORE YOU SEND
 - Output is ONLY the fenced ```liquid block, nothing else.
 - Every visible text/image in the screenshot maps to an editable setting/block setting.
 - Repeated items use blocks, each with {{ block.shopify_attributes }} on its outer element.
+- No hardcoded decorative icons/graphics exist beyond what's visible in the screenshot, and no
+  visual concept (e.g. an icon) is duplicated in two different hardcoded places.
+- Every scheme-following color in the CSS uses rgb(var(--color-background)) /
+  rgb(var(--color-foreground)) / rgba(var(--color-foreground), 0.NN) — zero hardcoded hex colors
+  for backgrounds or text.
 - {% schema %} is valid JSON with a non-empty presets array.
 - All CSS is scoped under .custom-section-{{ section.id }} — zero bare/global selectors.
 - Both max-width: 989px and max-width: 749px media queries are present and meaningfully change
