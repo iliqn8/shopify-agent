@@ -13,8 +13,12 @@ You are an expert Shopify Theme developer specializing in Online Store 2.0 (OS 2
 same style and conventions as Shopify's own Dawn theme.
 
 TASK
-The user is showing you ONE section of a webpage (via the attached screenshot) from this reference URL:
+The user is showing you ONE section of a webpage from this reference URL:
 [REFERENCE_URL]
+
+You are given a DESKTOP screenshot of that section, and — if provided — a second MOBILE screenshot
+showing exactly how the SAME section renders on an actual mobile device on the source site. Each
+attached image is preceded by a text label identifying which one it is.
 
 Below is the raw extracted text content of that page, for exact copy reference:
 ---PAGE TEXT START---
@@ -65,8 +69,15 @@ The file MUST contain, in this order:
    - @media screen and (max-width: 989px) {{ ... }} = tablet adjustments.
    - @media screen and (max-width: 749px) {{ ... }} = mobile adjustments (stack multi-column
      layouts to one column here).
-   The section must visually reflow across these breakpoints to match the source site's behavior
-   (or sensible Dawn-style stacking if source behavior can't be inferred).
+   MOBILE GROUND TRUTH (STRICT, only when a MOBILE screenshot was provided): the 749px media query
+   MUST reproduce the exact element order, stacking, and grouping visible in the MOBILE screenshot —
+   this is ground truth, not a guess. Do NOT default to a generic "image always first" or
+   "image always last" stacking assumption. If the mobile screenshot shows content interleaved
+   (e.g. some items before the image, some after), reproduce that exact order using CSS `order`
+   on flex/grid children (keep the HTML/blocks in their natural editable sequence, and only reorder
+   visually via CSS) rather than by physically reordering the HTML. If NO mobile screenshot was
+   provided, fall back to sensible Dawn-style single-column stacking in the same top-to-bottom
+   order the elements appear in the desktop screenshot.
 4. A {% schema %} block containing STRICTLY VALID JSON (double-quoted keys/strings, no trailing
    commas, no comments) with:
    - "name": short human-readable name shown in the Add Section menu.
@@ -99,6 +110,8 @@ SELF-CHECK BEFORE YOU SEND
 - All CSS is scoped under .custom-section-{{ section.id }} — zero bare/global selectors.
 - Both max-width: 989px and max-width: 749px media queries are present and meaningfully change
   the layout.
+- If a MOBILE screenshot was provided, the 749px layout's element order/grouping matches it exactly
+  (checked via CSS `order`, not by guessing).
 """
 
 
@@ -155,21 +168,30 @@ def unique_asset_key(section_name):
     return key
 
 
-def build_stream(reference_url, image, section_name=None):
+def build_stream(reference_url, image_desktop, image_mobile=None, section_name=None):
     """Generator yielding {type: status/done} events.
-    image = {b64, filename, media_type} — single screenshot dict (not a list)."""
+    image_desktop / image_mobile = {b64, filename, media_type} dicts (image_mobile optional)."""
     yield {"type": "status", "text": "🌐 Fetching reference page..."}
     title, page_text = fetch_page_text(reference_url)
 
-    yield {"type": "status", "text": "👁️ Analyzing screenshot + generating section..."}
+    status_text = "👁️ Analyzing screenshots + generating section..." if image_mobile else \
+                  "👁️ Analyzing screenshot + generating section..."
+    yield {"type": "status", "text": status_text}
     prompt = (SECTION_PROMPT_TEMPLATE
               .replace("[REFERENCE_URL]", reference_url)
               .replace("[PAGE_TEXT]", page_text or "(no page text could be fetched)"))
 
     content = [
-        {"type": "image", "source": {"type": "base64", "media_type": image["media_type"], "data": image["b64"]}},
-        {"type": "text", "text": prompt},
+        {"type": "text", "text": "DESKTOP SCREENSHOT (reference for the desktop layout):"},
+        {"type": "image", "source": {"type": "base64", "media_type": image_desktop["media_type"], "data": image_desktop["b64"]}},
     ]
+    if image_mobile:
+        content += [
+            {"type": "text", "text": "MOBILE SCREENSHOT (ground truth for the exact 749px mobile layout — "
+                                      "match this element order/stacking precisely, do not guess):"},
+            {"type": "image", "source": {"type": "base64", "media_type": image_mobile["media_type"], "data": image_mobile["b64"]}},
+        ]
+    content.append({"type": "text", "text": prompt})
 
     try:
         response = client.messages.create(

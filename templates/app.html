@@ -232,11 +232,19 @@
         <input id="sec-name" type="text" placeholder="e.g. Feature Grid" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
       </div>
       <div>
-        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SCREENSHOT OF THE SECTION *</label>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">DESKTOP SCREENSHOT OF THE SECTION *</label>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <input type="file" id="sec-img-input" accept="image/*" style="display:none" onchange="secHandleImage(this)">
-          <button onclick="document.getElementById('sec-img-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">📎 Attach screenshot</button>
-          <div id="sec-img-thumb"></div>
+          <input type="file" id="sec-img-input-desktop" accept="image/*" style="display:none" onchange="secHandleImage(this, 'desktop')">
+          <button onclick="document.getElementById('sec-img-input-desktop').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">📎 Attach desktop screenshot</button>
+          <div id="sec-img-thumb-desktop"></div>
+        </div>
+      </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">MOBILE SCREENSHOT <span style="color:#555">(optional, recommended — how it actually looks on a phone)</span></label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="file" id="sec-img-input-mobile" accept="image/*" style="display:none" onchange="secHandleImage(this, 'mobile')">
+          <button onclick="document.getElementById('sec-img-input-mobile').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">📱 Attach mobile screenshot</button>
+          <div id="sec-img-thumb-mobile"></div>
         </div>
       </div>
     </div>
@@ -920,10 +928,10 @@ async function pbDeleteHistory(id) {
 
 // ── Section Builder ──────────────────────────────────────────────────────
 
-let secImage = null;
+let secImages = {desktop: null, mobile: null};
 let _secReferenceUrl = '';
 
-function secHandleImage(input) {
+function secHandleImage(input, device) {
   const file = input.files[0];
   if (!file) return;
   const reader = new FileReader();
@@ -931,11 +939,11 @@ function secHandleImage(input) {
     const b64 = e.target.result.split(',')[1];
     const ext = file.name.split('.').pop().toLowerCase();
     const mimeMap = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'};
-    secImage = {b64, filename: file.name, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result};
-    document.getElementById('sec-img-thumb').innerHTML = `
+    secImages[device] = {b64, filename: file.name, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result};
+    document.getElementById('sec-img-thumb-' + device).innerHTML = `
       <div style="position:relative;display:inline-block">
-        <img src="${secImage.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">
-        <button onclick="secImage=null;document.getElementById('sec-img-thumb').innerHTML=''" style="position:absolute;top:-6px;right:-6px;background:#333;border:none;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;line-height:18px;padding:0">✕</button>
+        <img src="${secImages[device].dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">
+        <button onclick="secImages.${device}=null;document.getElementById('sec-img-thumb-${device}').innerHTML=''" style="position:absolute;top:-6px;right:-6px;background:#333;border:none;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;line-height:18px;padding:0">✕</button>
       </div>`;
   };
   reader.readAsDataURL(file);
@@ -947,7 +955,7 @@ async function secGenerate() {
   const sectionName = document.getElementById('sec-name').value.trim();
 
   if (!referenceUrl) { alert('Enter a reference URL'); return; }
-  if (!secImage) { alert('Attach a screenshot of the section'); return; }
+  if (!secImages.desktop) { alert('Attach a desktop screenshot of the section'); return; }
 
   _secReferenceUrl = referenceUrl;
 
@@ -969,7 +977,8 @@ async function secGenerate() {
       body: JSON.stringify({
         reference_url: referenceUrl,
         section_name: sectionName,
-        image: {b64: secImage.b64, filename: secImage.filename, media_type: secImage.media_type}
+        image_desktop: {b64: secImages.desktop.b64, filename: secImages.desktop.filename, media_type: secImages.desktop.media_type},
+        image_mobile: secImages.mobile ? {b64: secImages.mobile.b64, filename: secImages.mobile.filename, media_type: secImages.mobile.media_type} : null
       })
     });
     const {job_id} = await res.json();

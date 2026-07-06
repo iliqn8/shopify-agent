@@ -437,12 +437,13 @@ def section_build_start():
     data = request.json or {}
     reference_url = data.get("reference_url", "").strip()
     section_name = data.get("section_name", "").strip() or None
-    image = data.get("image")
+    image_desktop = data.get("image_desktop")
+    image_mobile = data.get("image_mobile")
 
     if not reference_url:
         return jsonify({"error": "Reference URL required"}), 400
-    if not image or not image.get("b64"):
-        return jsonify({"error": "Screenshot required"}), 400
+    if not image_desktop or not image_desktop.get("b64"):
+        return jsonify({"error": "Desktop screenshot required"}), 400
 
     job_id = str(_uuid5.uuid4())
     _section_jobs[job_id] = {"events": [], "done": False}
@@ -450,7 +451,7 @@ def section_build_start():
     def run():
         try:
             import section_builder
-            for event in section_builder.build_stream(reference_url, image, section_name):
+            for event in section_builder.build_stream(reference_url, image_desktop, image_mobile, section_name):
                 _section_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":
                     _section_jobs[job_id]["done"] = True
