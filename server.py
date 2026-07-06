@@ -428,6 +428,107 @@ def product_build_poll(job_id):
     return jsonify({"events": events, "total": len(job["events"]), "done": done})
 
 
+_section_jobs = {}
+
+
+@app.route("/api/section-build-start", methods=["POST"])
+def section_build_start():
+    import uuid as _uuid5
+    data = request.json or {}
+    reference_url = data.get("reference_url", "").strip()
+    section_name = data.get("section_name", "").strip() or None
+    image = data.get("image")
+
+    if not reference_url:
+        return jsonify({"error": "Reference URL required"}), 400
+    if not image or not image.get("b64"):
+        return jsonify({"error": "Screenshot required"}), 400
+
+    job_id = str(_uuid5.uuid4())
+    _section_jobs[job_id] = {"events": [], "done": False}
+
+    def run():
+        try:
+            import section_builder
+            for event in section_builder.build_stream(reference_url, image, section_name):
+                _section_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    _section_jobs[job_id]["done"] = True
+        except Exception as e:
+            _section_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
+            _section_jobs[job_id]["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/section-build-poll/<job_id>")
+def section_build_poll(job_id):
+    job = _section_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Not found"}), 404
+    since = request.args.get("since", 0, type=int)
+    events = job["events"][since:]
+    done = job["done"]
+    if done and since + len(events) >= len(job["events"]):
+        threading.Timer(120, lambda: _section_jobs.pop(job_id, None)).start()
+    return jsonify({"events": events, "total": len(job["events"]), "done": done})
+
+
+@app.route("/api/section-publish", methods=["POST"])
+def section_publish():
+    import section_builder
+    import shopify_client as sc
+    data = request.json or {}
+    section_name = data.get("section_name", "").strip() or "Custom Section"
+    liquid_code = data.get("liquid_code", "").strip()
+    reference_url = data.get("reference_url", "").strip()
+
+    if not liquid_code:
+        return jsonify({"error": "Missing liquid_code"}), 400
+
+    try:
+        theme = sc.get_active_theme()
+        if not theme:
+            return jsonify({"error": "No active theme found"}), 500
+        theme_id = theme["id"]
+        asset_key = section_builder.unique_asset_key(section_name)
+        sc.update_theme_file(theme_id, asset_key, liquid_code)
+        kb.save_custom_section(
+            section_name=section_name,
+            asset_key=asset_key,
+            liquid_code=liquid_code,
+            reference_url=reference_url,
+            theme_id=str(theme_id),
+        )
+        return jsonify({
+            "ok": True,
+            "asset_key": asset_key,
+            "theme_id": theme_id,
+            "editor_url": f"https://{sc.SHOP}/admin/themes/{theme_id}/editor",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/custom-sections", methods=["GET"])
+def list_custom_sections():
+    return jsonify(kb.list_custom_sections())
+
+
+@app.route("/api/custom-sections/<int:sid>", methods=["DELETE"])
+def delete_custom_section(sid):
+    import shopify_client as sc
+    row = kb.get_custom_section(sid)
+    if row and row.get("theme_id") and row.get("asset_key"):
+        try:
+            sc.delete_theme_file(row["theme_id"], row["asset_key"])
+        except Exception as e:
+            print(f"[section_builder] Failed to delete theme file: {e}")
+    kb.delete_custom_section(sid)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/set-local-agent", methods=["POST"])
 def set_local_agent():
     url = request.json.get("url", "")

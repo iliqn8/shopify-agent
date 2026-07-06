@@ -133,3 +133,10 @@ def get_theme_file(theme_id, key):
 def update_theme_file(theme_id, key, value):
     return _put(f"/themes/{theme_id}/assets.json",
                 {"asset": {"key": key, "value": value}})["asset"]
+
+
+def delete_theme_file(theme_id, key):
+    r = requests.delete(f"{BASE}/themes/{theme_id}/assets.json",
+                        headers=HEADERS, params={"asset[key]": key})
+    r.raise_for_status()
+    return {"success": True}

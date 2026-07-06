@@ -108,6 +108,7 @@
   <div class="tab" onclick="switchTab('imagegen', this)">🎨 Image Generator</div>
   <div class="tab" onclick="switchTab('dev', this)">🛠️ Dev</div>
   <div class="tab" onclick="switchTab('builder', this)">🛍️ Product Builder</div>
+  <div class="tab" onclick="switchTab('sections', this)">🧩 Section Builder</div>
 </div>
 
 <!-- Chat Panel -->
@@ -209,6 +210,67 @@
       </div>
       <div id="pb-history" style="display:flex;flex-direction:column;gap:8px">
         <div style="color:#555;font-size:13px">No pages yet.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Section Builder Panel -->
+<div class="panel" id="panel-sections" style="overflow-y:auto">
+  <div style="max-width:720px;margin:0 auto;padding:24px 20px">
+    <h2 style="color:#fff;font-size:18px;margin:0 0 4px">🧩 Section Builder</h2>
+    <p style="color:#888;font-size:13px;margin:0 0 24px">Paste a reference URL and upload a screenshot of ONE section from that page. Generates a brand-new, fully editable, responsive Shopify theme section.</p>
+
+    <div style="display:grid;gap:16px">
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">REFERENCE URL *</label>
+        <input id="sec-url" type="text" placeholder="https://competitor.com/products/example" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SECTION NAME <span style="color:#555">(optional — Claude will suggest one)</span></label>
+        <input id="sec-name" type="text" placeholder="e.g. Feature Grid" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SCREENSHOT OF THE SECTION *</label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="file" id="sec-img-input" accept="image/*" style="display:none" onchange="secHandleImage(this)">
+          <button onclick="document.getElementById('sec-img-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">📎 Attach screenshot</button>
+          <div id="sec-img-thumb"></div>
+        </div>
+      </div>
+    </div>
+
+    <button id="sec-gen-btn" onclick="secGenerate()" style="margin-top:24px;width:100%;background:#6366f1;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
+      🧩 Generate Section
+    </button>
+
+    <div id="sec-status" style="display:none;margin-top:16px;color:#aaa;font-size:13px;text-align:center"></div>
+
+    <div id="sec-result" style="display:none;margin-top:24px">
+      <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SECTION NAME (edit before publishing)</label>
+      <input id="sec-final-name" type="text" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:16px">
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span style="color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:1px">Generated .liquid code</span>
+        <button onclick="secCopy()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">📋 Copy code</button>
+      </div>
+      <pre id="sec-output" style="background:#111;border:1px solid #222;border-radius:10px;padding:20px;color:#e0e0e0;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:400px;overflow-y:auto;font-family:monospace"></pre>
+
+      <button id="sec-publish-btn" onclick="secPublish()" style="margin-top:16px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
+        🛍️ Add to Theme Library
+      </button>
+      <div id="sec-publish-status" style="display:none;margin-top:10px;font-size:13px;text-align:center"></div>
+    </div>
+
+    <!-- History -->
+    <div style="margin-top:40px;border-top:1px solid #222;padding-top:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h2 style="color:#fff;font-size:16px;margin:0">📚 Section History</h2>
+        <button onclick="secLoadHistory()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px">↻ Refresh</button>
+      </div>
+      <div id="sec-history" style="display:flex;flex-direction:column;gap:8px">
+        <div style="color:#555;font-size:13px">No sections yet.</div>
       </div>
     </div>
 
@@ -350,6 +412,7 @@ function switchTab(tab, el) {
   if (tab === 'training') loadKnowledge();
   if (tab === 'imagegen' && !imageGenLoaded) loadImageGen();
   if (tab === 'builder') pbLoadHistory();
+  if (tab === 'sections') secLoadHistory();
 }
 
 async function loadImageGen() {
@@ -853,6 +916,180 @@ async function pbDeleteHistory(id) {
   if (!confirm('Delete this page from history?')) return;
   await fetch('/api/product-pages/' + id, {method: 'DELETE'});
   pbLoadHistory();
+}
+
+// ── Section Builder ──────────────────────────────────────────────────────
+
+let secImage = null;
+let _secReferenceUrl = '';
+
+function secHandleImage(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const b64 = e.target.result.split(',')[1];
+    const ext = file.name.split('.').pop().toLowerCase();
+    const mimeMap = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'};
+    secImage = {b64, filename: file.name, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result};
+    document.getElementById('sec-img-thumb').innerHTML = `
+      <div style="position:relative;display:inline-block">
+        <img src="${secImage.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">
+        <button onclick="secImage=null;document.getElementById('sec-img-thumb').innerHTML=''" style="position:absolute;top:-6px;right:-6px;background:#333;border:none;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;cursor:pointer;line-height:18px;padding:0">✕</button>
+      </div>`;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+async function secGenerate() {
+  const referenceUrl = document.getElementById('sec-url').value.trim();
+  const sectionName = document.getElementById('sec-name').value.trim();
+
+  if (!referenceUrl) { alert('Enter a reference URL'); return; }
+  if (!secImage) { alert('Attach a screenshot of the section'); return; }
+
+  _secReferenceUrl = referenceUrl;
+
+  const btn = document.getElementById('sec-gen-btn');
+  const statusEl = document.getElementById('sec-status');
+  const resultEl = document.getElementById('sec-result');
+  const outputEl = document.getElementById('sec-output');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = '🌐 Fetching reference page...';
+  resultEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/section-build-start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        reference_url: referenceUrl,
+        section_name: sectionName,
+        image: {b64: secImage.b64, filename: secImage.filename, media_type: secImage.media_type}
+      })
+    });
+    const {job_id} = await res.json();
+
+    let since = 0;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/section-build-poll/${job_id}?since=${since}`);
+        const data = await r.json();
+        since += data.events.length;
+        for (const ev of data.events) {
+          if (ev.type === 'status') statusEl.textContent = ev.text;
+          if (ev.type === 'done') {
+            clearInterval(poll);
+            btn.disabled = false;
+            btn.textContent = '🧩 Generate Section';
+            statusEl.style.display = 'none';
+            outputEl.textContent = ev.reply || '';
+            document.getElementById('sec-final-name').value = ev.suggested_name || sectionName || 'Custom Section';
+            resultEl.style.display = 'block';
+          }
+        }
+      } catch(e) { console.error('poll error', e); }
+    }, 1500);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🧩 Generate Section';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+function secCopy() {
+  const text = document.getElementById('sec-output').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => btn.textContent = '📋 Copy code', 2000);
+  });
+}
+
+async function secPublish() {
+  const sectionName = document.getElementById('sec-final-name').value.trim() || 'Custom Section';
+  const liquidCode = document.getElementById('sec-output').textContent;
+  if (!liquidCode) return;
+
+  const btn = document.getElementById('sec-publish-btn');
+  const statusEl = document.getElementById('sec-publish-status');
+  btn.disabled = true;
+  btn.textContent = '⏳ Writing to theme...';
+  statusEl.style.display = 'block';
+  statusEl.style.color = '#aaa';
+  statusEl.textContent = 'Adding section to theme library...';
+
+  try {
+    const res = await fetch('/api/section-publish', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({section_name: sectionName, liquid_code: liquidCode, reference_url: _secReferenceUrl})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = '✅ Added!';
+      btn.style.background = '#166534';
+      statusEl.style.color = '#4ade80';
+      statusEl.innerHTML = `✅ Added as <strong>${data.asset_key}</strong>. Open the theme editor and use "Add section" to place it.<br>
+        <a href="${data.editor_url}" target="_blank" style="color:#6366f1">Open Theme Editor →</a>`;
+      secLoadHistory();
+    } else {
+      throw new Error(data.error || 'Unknown error');
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🛍️ Add to Theme Library';
+    statusEl.style.color = '#f87171';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function secLoadHistory() {
+  const container = document.getElementById('sec-history');
+  try {
+    const res = await fetch('/api/custom-sections');
+    const items = await res.json();
+    if (!items.length) {
+      container.innerHTML = '<div style="color:#555;font-size:13px">No sections yet.</div>';
+      return;
+    }
+    container.innerHTML = items.map(s => `
+      <div style="background:#161616;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden">
+        <div onclick="secToggleHistory(${s.id})" style="display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;user-select:none">
+          <span id="sh-arrow-${s.id}" style="color:#555;font-size:12px;transition:transform 0.2s">▶</span>
+          <div style="flex:1">
+            <div style="color:#e0e0e0;font-size:14px;font-weight:500">${escHtml(s.section_name)}</div>
+            <div style="color:#555;font-size:11px;margin-top:2px">
+              ${s.created_at ? (s.created_at.split('T')[0] || s.created_at.split(' ')[0]) : ''}
+              · ${s.asset_key}
+            </div>
+          </div>
+          ${s.reference_url ? `<a href="${s.reference_url}" target="_blank" onclick="event.stopPropagation()" style="color:#6366f1;font-size:12px;white-space:nowrap">Source →</a>` : ''}
+          <button onclick="event.stopPropagation();secDeleteHistory(${s.id})" style="background:none;border:none;color:#444;cursor:pointer;font-size:14px;padding:2px 6px" title="Delete">✕</button>
+        </div>
+        <div id="sh-body-${s.id}" style="display:none;border-top:1px solid #222;padding:16px;color:#ccc;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:400px;overflow-y:auto;font-family:monospace">${escHtml(s.liquid_code || '')}</div>
+      </div>`).join('');
+  } catch(e) {
+    container.innerHTML = '<div style="color:#f87171;font-size:13px">Failed to load history.</div>';
+  }
+}
+
+function secToggleHistory(id) {
+  const body = document.getElementById('sh-body-' + id);
+  const arrow = document.getElementById('sh-arrow-' + id);
+  const open = body.style.display === 'block';
+  body.style.display = open ? 'none' : 'block';
+  arrow.style.transform = open ? '' : 'rotate(90deg)';
+}
+
+async function secDeleteHistory(id) {
+  if (!confirm('Delete this section? This will also remove it from the live theme.')) return;
+  await fetch('/api/custom-sections/' + id, {method: 'DELETE'});
+  secLoadHistory();
 }
 
 // ── Dev chat ──────────────────────────────────────────────────────────────

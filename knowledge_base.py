@@ -42,6 +42,15 @@ def init_db():
         content TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS custom_sections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        section_name TEXT NOT NULL,
+        asset_key TEXT NOT NULL,
+        reference_url TEXT,
+        theme_id TEXT,
+        liquid_code TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     for col, definition in [
         ("category", "TEXT NOT NULL DEFAULT 'General'"),
@@ -193,6 +202,47 @@ def list_product_pages():
 def delete_product_page(page_id):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM product_pages WHERE id = ?", (page_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_custom_section(section_name, asset_key, liquid_code, reference_url=None, theme_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""INSERT INTO custom_sections
+        (section_name, asset_key, reference_url, theme_id, liquid_code)
+        VALUES (?,?,?,?,?)""",
+        (section_name, asset_key, reference_url, theme_id, liquid_code))
+    conn.commit()
+    conn.close()
+
+
+def list_custom_sections():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, section_name, asset_key, reference_url, theme_id, liquid_code, created_at "
+        "FROM custom_sections ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [{"id": r[0], "section_name": r[1], "asset_key": r[2], "reference_url": r[3],
+             "theme_id": r[4], "liquid_code": r[5], "created_at": r[6]} for r in rows]
+
+
+def get_custom_section(section_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT id, section_name, asset_key, reference_url, theme_id, liquid_code, created_at "
+        "FROM custom_sections WHERE id = ?", (section_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"id": row[0], "section_name": row[1], "asset_key": row[2], "reference_url": row[3],
+            "theme_id": row[4], "liquid_code": row[5], "created_at": row[6]}
+
+
+def delete_custom_section(section_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM custom_sections WHERE id = ?", (section_id,))
     conn.commit()
     conn.close()
 
