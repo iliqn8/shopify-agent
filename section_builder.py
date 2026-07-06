@@ -179,6 +179,37 @@ def _extract_liquid(text):
     return m.group(1).strip() if m else text.strip()
 
 
+def _enforce_heading_alignment(liquid_code):
+    """Deterministic safety net: strip any text-align override on heading-like selectors
+    inside @media blocks. Despite explicit prompt instructions, the model repeatedly flips
+    headings to text-align:left on mobile with no basis in the reference screenshot — so this
+    is enforced in code rather than relying on the prompt alone. Liquid {{ }} / {% %} tags are
+    masked first so their braces don't confuse the CSS block matching below."""
+    placeholders = []
+
+    def mask(m):
+        placeholders.append(m.group(0))
+        return f"\x00{len(placeholders) - 1}\x00"
+
+    masked = re.sub(r"\{\{.*?\}\}|\{%.*?%\}", mask, liquid_code, flags=re.DOTALL)
+
+    def strip_rule(rule_match):
+        selector, body = rule_match.group(1), rule_match.group(2)
+        if "heading" in selector.lower():
+            body = re.sub(r"\s*text-align\s*:\s*[^;]+;", "", body)
+        return selector + "{" + body + "}"
+
+    def strip_media_block(media_match):
+        return re.sub(r"([^{}]+)\{([^{}]*)\}", strip_rule, media_match.group(0))
+
+    fixed_masked = re.sub(r"@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", strip_media_block, masked, flags=re.DOTALL)
+
+    def unmask(m):
+        return placeholders[int(m.group(1))]
+
+    return re.sub(r"\x00(\d+)\x00", unmask, fixed_masked)
+
+
 def _extract_schema_name(liquid_code):
     m = re.search(r"\{%\s*schema\s*%\}(.*?)\{%\s*endschema\s*%\}", liquid_code, re.DOTALL)
     if not m:
@@ -240,6 +271,7 @@ def build_stream(reference_url, image_desktop, image_mobile=None, section_name=N
         )
         raw = response.content[0].text
         liquid_code = _extract_liquid(raw)
+        liquid_code = _enforce_heading_alignment(liquid_code)
         suggested_name = _extract_schema_name(liquid_code) or section_name or title or "Custom Section"
         yield {"type": "done", "reply": liquid_code, "suggested_name": suggested_name}
     except Exception as e:
