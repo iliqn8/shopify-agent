@@ -58,6 +58,23 @@ renders cleanly with zero risk of leaking text. Apply the same rule consistently
 image_picker in the section (all block icons AND the main section image) — never give one a clean
 fallback and another no fallback at all.
 
+TYPOGRAPHY & SIZE FIDELITY (STRICT)
+The goal is a PIXEL-FAITHFUL match to the screenshot, not a generic Dawn-style approximation:
+- NEVER let text fall back to the browser's default font. Explicitly set
+  `font-family: var(--font-heading-family);` on every heading-like element and
+  `font-family: var(--font-body-family);` on every body/paragraph element, so the section always
+  renders in the merchant's actual theme fonts instead of a mismatched generic font. This is
+  mandatory even though it may seem redundant with inheritance — do it explicitly every time.
+- Measure font sizes, spacing, and element proportions AGAINST the screenshot, not against a
+  memorized "typical" scale. If the heading fills most of the section's width and wraps to 2 lines
+  in the screenshot, its font-size must be large enough to do the same (do not default to a
+  conservative/small clamp() range just because that's common in other Shopify sections). If body
+  text reads as a normal comfortable paragraph size in the screenshot, don't shrink it down.
+- Do NOT change text-align, flex-direction, or other structural properties at a breakpoint unless
+  the corresponding screenshot (mobile screenshot for the 749px query, desktop screenshot otherwise)
+  actually shows that change. A centered desktop heading stays centered on mobile unless the mobile
+  screenshot clearly shows it left-aligned — never flip alignment as an unexplained "mobile default."
+
 OUTPUT FORMAT (STRICT)
 Output ONE thing only: a single, complete Shopify `.liquid` section file, wrapped in one ```liquid
 code fence and nothing else — no explanation before or after the fence.
@@ -128,6 +145,11 @@ SELF-CHECK BEFORE YOU SEND
   (checked via CSS `order`, not by guessing).
 - Every image_picker (block icons AND section image) has a clean CSS-only empty-state fallback —
   zero use of `placeholder_svg_tag` combined with `append` filters anywhere in the output.
+- Every heading uses `font-family: var(--font-heading-family)` and every body/paragraph element uses
+  `font-family: var(--font-body-family)` — never left to fall back on browser/generic defaults.
+- Font sizes and proportions were measured against the screenshot, not defaulted to a generic scale.
+- No text-align/flex-direction/structural change at any breakpoint unless the matching screenshot
+  (mobile screenshot for 749px, desktop screenshot otherwise) actually shows that change.
 """
 
 
