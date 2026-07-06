@@ -44,6 +44,20 @@ they would look nice. Every icon/graphic in your output must map to exactly ONE 
 hardcoded, non-editable SVG). If a piece of content doesn't map to something editable, leave it out
 rather than hardcoding it.
 
+EMPTY-STATE PLACEHOLDERS (STRICT)
+The merchant will NOT have picked any images yet the first time this section is added (every
+image_picker starts blank). Every image_picker MUST render a safe, simple fallback when blank —
+a plain empty `<div>` styled with CSS only (e.g. `background: rgba(var(--color-foreground), 0.06);`
+plus the element's normal width/height/border-radius) is enough. NEVER use the `placeholder_svg_tag`
+filter chained with `append` filters (e.g. `{{ 'x' | placeholder_svg_tag: ... | append: ... }}`) —
+`append` on the output of `placeholder_svg_tag` concatenates raw text (like the section ID) onto the
+rendered SVG and prints it as visible garbled text on the page. If you use `placeholder_svg_tag` at
+all, call it with exactly one plain string argument and nothing appended afterward. When in doubt,
+skip `placeholder_svg_tag` entirely and use the empty-styled-`<div>` fallback instead — it always
+renders cleanly with zero risk of leaking text. Apply the same rule consistently to EVERY
+image_picker in the section (all block icons AND the main section image) — never give one a clean
+fallback and another no fallback at all.
+
 OUTPUT FORMAT (STRICT)
 Output ONE thing only: a single, complete Shopify `.liquid` section file, wrapped in one ```liquid
 code fence and nothing else — no explanation before or after the fence.
@@ -112,6 +126,8 @@ SELF-CHECK BEFORE YOU SEND
   the layout.
 - If a MOBILE screenshot was provided, the 749px layout's element order/grouping matches it exactly
   (checked via CSS `order`, not by guessing).
+- Every image_picker (block icons AND section image) has a clean CSS-only empty-state fallback —
+  zero use of `placeholder_svg_tag` combined with `append` filters anywhere in the output.
 """
 
 
