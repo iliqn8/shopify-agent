@@ -277,7 +277,16 @@
       </div>
       <pre id="sec-output" style="background:#111;border:1px solid #222;border-radius:10px;padding:20px;color:#e0e0e0;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:400px;overflow-y:auto;font-family:monospace"></pre>
 
-      <button id="sec-publish-btn" onclick="secPublish()" style="margin-top:16px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
+      <div style="margin-top:20px;border-top:1px solid #222;padding-top:16px">
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">🔧 REQUEST CHANGES <span style="color:#555">(not happy with something above? describe the fix and re-generate)</span></label>
+        <textarea id="sec-edit-instructions" rows="2" placeholder="e.g. Make the heading smaller on mobile, change the button color to blue, move the icon to the left..." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+        <button id="sec-edit-btn" onclick="secApplyEdit()" style="margin-top:10px;width:100%;background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:12px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer">
+          🔧 Apply Changes
+        </button>
+        <div id="sec-edit-status" style="display:none;margin-top:10px;font-size:13px;text-align:center;color:#aaa"></div>
+      </div>
+
+      <button id="sec-publish-btn" onclick="secPublish()" style="margin-top:20px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
         🛍️ Add to Theme Library
       </button>
       <div id="sec-publish-status" style="display:none;margin-top:10px;font-size:13px;text-align:center"></div>
@@ -1056,6 +1065,64 @@ function secCopy() {
     btn.textContent = '✅ Copied!';
     setTimeout(() => btn.textContent = '📋 Copy code', 2000);
   });
+}
+
+async function secApplyEdit() {
+  const editInstructions = document.getElementById('sec-edit-instructions').value.trim();
+  const currentCode = document.getElementById('sec-output').textContent;
+  if (!editInstructions) { alert('Describe what to change'); return; }
+  if (!currentCode) return;
+
+  const btn = document.getElementById('sec-edit-btn');
+  const statusEl = document.getElementById('sec-edit-status');
+  const outputEl = document.getElementById('sec-output');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Applying...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = '🔧 Applying your changes...';
+
+  try {
+    const res = await fetch('/api/section-edit-start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        current_code: currentCode,
+        edit_instructions: editInstructions,
+        reference_url: _secReferenceUrl,
+        section_name: document.getElementById('sec-final-name').value.trim(),
+        image_desktop: secImages.desktop ? {b64: secImages.desktop.b64, filename: secImages.desktop.filename, media_type: secImages.desktop.media_type} : null,
+        image_mobile: secImages.mobile ? {b64: secImages.mobile.b64, filename: secImages.mobile.filename, media_type: secImages.mobile.media_type} : null,
+        video_frames: secVideoFrames || null
+      })
+    });
+    const {job_id} = await res.json();
+
+    let since = 0;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/section-build-poll/${job_id}?since=${since}`);
+        const data = await r.json();
+        since += data.events.length;
+        for (const ev of data.events) {
+          if (ev.type === 'status') statusEl.textContent = ev.text;
+          if (ev.type === 'done') {
+            clearInterval(poll);
+            btn.disabled = false;
+            btn.textContent = '🔧 Apply Changes';
+            statusEl.style.display = 'none';
+            outputEl.textContent = ev.reply || '';
+            if (ev.suggested_name) document.getElementById('sec-final-name').value = ev.suggested_name;
+            document.getElementById('sec-edit-instructions').value = '';
+          }
+        }
+      } catch(e) { console.error('poll error', e); }
+    }, 1500);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🔧 Apply Changes';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
 }
 
 async function secPublish() {

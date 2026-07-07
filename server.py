@@ -492,6 +492,44 @@ def section_build_poll(job_id):
     return jsonify({"events": events, "total": len(job["events"]), "done": done})
 
 
+@app.route("/api/section-edit-start", methods=["POST"])
+def section_edit_start():
+    import uuid as _uuid6
+    data = request.json or {}
+    current_code = data.get("current_code", "").strip()
+    edit_instructions = data.get("edit_instructions", "").strip()
+    reference_url = data.get("reference_url", "").strip() or None
+    section_name = data.get("section_name", "").strip() or None
+    image_desktop = data.get("image_desktop")
+    image_mobile = data.get("image_mobile")
+    video_frames = data.get("video_frames") or None
+
+    if not current_code:
+        return jsonify({"error": "No existing code to edit"}), 400
+    if not edit_instructions:
+        return jsonify({"error": "Describe what to change"}), 400
+
+    job_id = str(_uuid6.uuid4())
+    _section_jobs[job_id] = {"events": [], "done": False}
+
+    def run():
+        try:
+            import section_builder
+            for event in section_builder.edit_stream(
+                current_code, edit_instructions, reference_url, image_desktop, image_mobile,
+                video_frames, section_name
+            ):
+                _section_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    _section_jobs[job_id]["done"] = True
+        except Exception as e:
+            _section_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
+            _section_jobs[job_id]["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/section-publish", methods=["POST"])
 def section_publish():
     import section_builder

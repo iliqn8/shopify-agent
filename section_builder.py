@@ -376,3 +376,84 @@ def build_stream(reference_url, image_desktop, image_mobile=None, section_name=N
         yield {"type": "done", "reply": liquid_code, "suggested_name": suggested_name}
     except Exception as e:
         yield {"type": "done", "reply": f"Error: {e}", "suggested_name": section_name or "Custom Section"}
+
+
+EDIT_PROMPT_TEMPLATE = """ROLE
+You are the same expert Shopify Theme developer who generated the custom section below. The
+merchant reviewed it and now wants specific corrections applied — this is a targeted revision,
+not a from-scratch rebuild.
+
+CURRENT SECTION CODE
+```liquid
+[CURRENT_CODE]
+```
+
+REQUESTED CHANGES (apply these precisely)
+[EDIT_INSTRUCTIONS]
+
+RULES FOR THIS REVISION (STRICT)
+- Apply ONLY the requested changes above. Preserve every other setting, block, class name, and
+  design decision exactly as-is unless a requested change requires touching it.
+- Do not regress any of the section's existing quality rules while editing:
+  - Every background/text color that should follow the merchant's theme still uses
+    rgb(var(--color-background)) / rgb(var(--color-foreground)) — never hardcoded hex.
+  - Every distinct accent color (buttons, highlights, icons, bubbles) still has its own
+    `"type": "color"` schema setting — never collapse one back into a hardcoded literal.
+  - Headings/body text still use font-family: var(--font-heading-family) / var(--font-body-family).
+  - Every image_picker still has a clean CSS-only empty-state fallback (never
+    `placeholder_svg_tag` chained with `append`).
+  - Responsive breakpoints (989px / 749px) still work exactly as before unless the change targets
+    them specifically.
+- If reference screenshots are attached below, use them only to verify the requested change looks
+  right — do not use them to re-derive parts of the design that weren't asked to change.
+
+OUTPUT FORMAT (STRICT)
+Output ONE thing only: the COMPLETE revised `.liquid` section file (not a diff, not just the
+changed lines), wrapped in one ```liquid code fence and nothing else — no explanation before or
+after the fence.
+"""
+
+
+def edit_stream(current_code, edit_instructions, reference_url=None, image_desktop=None,
+                 image_mobile=None, video_frames=None, section_name=None):
+    """Generator yielding {type: status/done} events. Revises an already-generated section's
+    liquid code based on the merchant's follow-up correction instructions."""
+    yield {"type": "status", "text": "🔧 Applying your changes..."}
+
+    prompt = (EDIT_PROMPT_TEMPLATE
+              .replace("[CURRENT_CODE]", current_code)
+              .replace("[EDIT_INSTRUCTIONS]", edit_instructions.strip()))
+
+    content = []
+    if image_desktop:
+        content += [
+            {"type": "text", "text": "DESKTOP SCREENSHOT (for reference while verifying the change):"},
+            {"type": "image", "source": {"type": "base64", "media_type": image_desktop["media_type"], "data": image_desktop["b64"]}},
+        ]
+    if image_mobile:
+        content += [
+            {"type": "text", "text": "MOBILE SCREENSHOT (for reference while verifying the change):"},
+            {"type": "image", "source": {"type": "base64", "media_type": image_mobile["media_type"], "data": image_mobile["b64"]}},
+        ]
+    if video_frames:
+        for i, frame in enumerate(video_frames):
+            content += [
+                {"type": "text", "text": f"ANIMATION FRAME {i + 1}/{len(video_frames)} (chronological order):"},
+                {"type": "image", "source": {"type": "base64", "media_type": frame["media_type"], "data": frame["b64"]}},
+            ]
+    content.append({"type": "text", "text": prompt})
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=8000,
+            messages=[{"role": "user", "content": content}],
+            timeout=180.0,
+        )
+        raw = response.content[0].text
+        liquid_code = _extract_liquid(raw)
+        liquid_code = _enforce_heading_alignment(liquid_code)
+        suggested_name = _extract_schema_name(liquid_code) or section_name or "Custom Section"
+        yield {"type": "done", "reply": liquid_code, "suggested_name": suggested_name}
+    except Exception as e:
+        yield {"type": "done", "reply": f"Error: {e}", "suggested_name": section_name or "Custom Section"}
