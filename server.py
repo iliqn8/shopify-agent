@@ -584,6 +584,26 @@ def delete_custom_section(sid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/custom-sections/<int:sid>/republish", methods=["POST"])
+def republish_custom_section(sid):
+    import shopify_client as sc
+    data = request.json or {}
+    liquid_code = data.get("liquid_code", "").strip()
+    if not liquid_code:
+        return jsonify({"error": "Missing liquid_code"}), 400
+
+    row = kb.get_custom_section(sid)
+    if not row:
+        return jsonify({"error": "Section not found"}), 404
+
+    try:
+        sc.update_theme_file(row["theme_id"], row["asset_key"], liquid_code)
+        kb.update_custom_section_code(sid, liquid_code)
+        return jsonify({"ok": True, "asset_key": row["asset_key"]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/set-local-agent", methods=["POST"])
 def set_local_agent():
     url = request.json.get("url", "")

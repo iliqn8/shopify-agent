@@ -247,6 +247,13 @@ def delete_custom_section(section_id):
     conn.close()
 
 
+def update_custom_section_code(section_id, liquid_code):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE custom_sections SET liquid_code = ? WHERE id = ?", (liquid_code, section_id))
+    conn.commit()
+    conn.close()
+
+
 def save_message(role, content):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("INSERT INTO chat_history (role, content) VALUES (?, ?)", (role, content))

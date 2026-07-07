@@ -1163,6 +1163,9 @@ async function secPublish() {
   }
 }
 
+let secHistoryCode = {};
+let secHistoryMeta = {};
+
 async function secLoadHistory() {
   const container = document.getElementById('sec-history');
   try {
@@ -1172,6 +1175,10 @@ async function secLoadHistory() {
       container.innerHTML = '<div style="color:#555;font-size:13px">No sections yet.</div>';
       return;
     }
+    items.forEach(s => {
+      secHistoryCode[s.id] = s.liquid_code || '';
+      secHistoryMeta[s.id] = {reference_url: s.reference_url || '', section_name: s.section_name || ''};
+    });
     container.innerHTML = items.map(s => `
       <div style="background:#161616;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden">
         <div onclick="secToggleHistory(${s.id})" style="display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;user-select:none">
@@ -1186,7 +1193,19 @@ async function secLoadHistory() {
           ${s.reference_url ? `<a href="${s.reference_url}" target="_blank" onclick="event.stopPropagation()" style="color:#6366f1;font-size:12px;white-space:nowrap">Source →</a>` : ''}
           <button onclick="event.stopPropagation();secDeleteHistory(${s.id})" style="background:none;border:none;color:#444;cursor:pointer;font-size:14px;padding:2px 6px" title="Delete">✕</button>
         </div>
-        <div id="sh-body-${s.id}" style="display:none;border-top:1px solid #222;padding:16px;color:#ccc;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:400px;overflow-y:auto;font-family:monospace">${escHtml(s.liquid_code || '')}</div>
+        <div id="sh-body-${s.id}" style="display:none;border-top:1px solid #222;padding:16px">
+          <pre id="sh-code-${s.id}" style="margin:0;color:#ccc;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:400px;overflow-y:auto;font-family:monospace">${escHtml(s.liquid_code || '')}</pre>
+
+          <div style="margin-top:16px;border-top:1px solid #222;padding-top:12px">
+            <label style="color:#aaa;font-size:11px;display:block;margin-bottom:6px">🔧 REQUEST CHANGES</label>
+            <textarea id="sh-edit-${s.id}" rows="2" placeholder="e.g. Change the button color to blue..." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button id="sh-edit-btn-${s.id}" onclick="secHistoryApplyEdit(${s.id})" style="flex:1;background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">🔧 Apply Changes</button>
+              <button id="sh-republish-btn-${s.id}" onclick="secHistoryRepublish(${s.id})" style="flex:1;background:#16a34a;border:none;color:#fff;padding:10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">🛍️ Republish to Theme</button>
+            </div>
+            <div id="sh-edit-status-${s.id}" style="display:none;margin-top:8px;font-size:12px;text-align:center;color:#aaa"></div>
+          </div>
+        </div>
       </div>`).join('');
   } catch(e) {
     container.innerHTML = '<div style="color:#f87171;font-size:13px">Failed to load history.</div>';
@@ -1205,6 +1224,91 @@ async function secDeleteHistory(id) {
   if (!confirm('Delete this section? This will also remove it from the live theme.')) return;
   await fetch('/api/custom-sections/' + id, {method: 'DELETE'});
   secLoadHistory();
+}
+
+async function secHistoryApplyEdit(id) {
+  const editInstructions = document.getElementById('sh-edit-' + id).value.trim();
+  if (!editInstructions) { alert('Describe what to change'); return; }
+
+  const btn = document.getElementById('sh-edit-btn-' + id);
+  const statusEl = document.getElementById('sh-edit-status-' + id);
+  const codeEl = document.getElementById('sh-code-' + id);
+  const meta = secHistoryMeta[id] || {};
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Applying...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = '🔧 Applying your changes...';
+
+  try {
+    const res = await fetch('/api/section-edit-start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        current_code: secHistoryCode[id],
+        edit_instructions: editInstructions,
+        reference_url: meta.reference_url,
+        section_name: meta.section_name
+      })
+    });
+    const {job_id} = await res.json();
+
+    let since = 0;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/section-build-poll/${job_id}?since=${since}`);
+        const data = await r.json();
+        since += data.events.length;
+        for (const ev of data.events) {
+          if (ev.type === 'status') statusEl.textContent = ev.text;
+          if (ev.type === 'done') {
+            clearInterval(poll);
+            btn.disabled = false;
+            btn.textContent = '🔧 Apply Changes';
+            statusEl.style.display = 'none';
+            secHistoryCode[id] = ev.reply || secHistoryCode[id];
+            codeEl.textContent = secHistoryCode[id];
+            document.getElementById('sh-edit-' + id).value = '';
+          }
+        }
+      } catch(e) { console.error('poll error', e); }
+    }, 1500);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🔧 Apply Changes';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function secHistoryRepublish(id) {
+  const btn = document.getElementById('sh-republish-btn-' + id);
+  const statusEl = document.getElementById('sh-edit-status-' + id);
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Republishing...';
+  statusEl.style.display = 'block';
+  statusEl.style.color = '#aaa';
+  statusEl.textContent = 'Writing changes to the live theme...';
+
+  try {
+    const res = await fetch(`/api/custom-sections/${id}/republish`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({liquid_code: secHistoryCode[id]})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      statusEl.style.color = '#4ade80';
+      statusEl.textContent = `✅ Republished to ${data.asset_key}`;
+    } else {
+      throw new Error(data.error || 'Unknown error');
+    }
+  } catch(e) {
+    statusEl.style.color = '#f87171';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = '🛍️ Republish to Theme';
 }
 
 // ── Dev chat ──────────────────────────────────────────────────────────────
