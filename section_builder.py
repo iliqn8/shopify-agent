@@ -167,6 +167,8 @@ SELF-CHECK BEFORE YOU SEND
   × N + gaps + padding fits inside that breakpoint's viewport width — they won't silently wrap.
 - Wrapped headlines break on the same words as the screenshot at each breakpoint — sizes were
   chosen conservatively, not defaulted to a large generic hero size.
+- Any flex container centering a single number/icon/short text uses `align-items: center` (never
+  `baseline`, which visibly pushes the content toward the top of a circle/bubble).
 """
 
 
