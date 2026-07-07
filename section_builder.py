@@ -298,6 +298,19 @@ skip `placeholder_svg_tag` entirely and use the empty-styled-`<div>` fallback in
 renders cleanly with zero risk of leaking text. Apply the same rule consistently to EVERY
 image_picker in the section (all block icons AND the main section image) — never give one a clean
 fallback and another no fallback at all.
+CRITICAL — any `<div>` with no text content and no children (an empty placeholder box, a decorative
+border/highlight box, a spacer) MUST have `display: block;` explicitly set in its CSS rule. Dawn's
+own `assets/base.css` ships a global reset (`div:empty, section:empty, ... { display: none; }`) that
+silently hides EVERY empty div on the page — including ones you add on purpose for pure-CSS
+decoration. This is invisible in your own reasoning (nothing in the Liquid/CSS you write looks wrong)
+but breaks silently in the browser. Confirmed to have broken, in real published sections: an
+image-picker empty-state fallback (fully invisible instead of showing a light placeholder box), a
+decorative border/highlight box around a "featured" grid column (invisible border+fill, and worse —
+because the empty div was ALSO a grid item, its removal from layout by `display:none` collapsed the
+grid and shifted every column after it by one position), and a hero image placeholder. Any element
+you intend to be empty — a placeholder box, a spacer column, a decorative overlay/border div — needs
+`display: block;` (or `flex`/`grid` if that's what its layout role requires) stated explicitly in its
+own CSS rule, never left to the default.
 
 TYPOGRAPHY & SIZE FIDELITY (STRICT)
 The goal is a PIXEL-FAITHFUL match to the screenshot, not a generic Dawn-style approximation:
