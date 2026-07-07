@@ -109,6 +109,19 @@ The file MUST contain, in this order:
    visually via CSS) rather than by physically reordering the HTML. If NO mobile screenshot was
    provided, fall back to sensible Dawn-style single-column stacking in the same top-to-bottom
    order the elements appear in the desktop screenshot.
+   ROW-FITTING ARITHMETIC (STRICT): if the screenshot shows N repeated items (icons, stat bubbles,
+   badges, columns, etc.) sitting side-by-side on ONE row, your mobile/tablet CSS sizes for that
+   item MUST keep all N on one row at that breakpoint — do the arithmetic explicitly:
+   (item width × N) + (gap × (N-1)) + container horizontal padding must be ≤ the breakpoint's
+   viewport width (749px for mobile, 989px for tablet). If your first size choice doesn't fit,
+   shrink the item width/gap until it does — never default to a size that "looks nice" in
+   isolation and then let it silently wrap to fewer items per row than the screenshot shows.
+   LINE-BREAK MATCHING (STRICT): for any heading/headline that wraps across multiple lines in a
+   screenshot, choose a font-size (at that breakpoint) small enough that the SAME words fall on
+   the same line as shown — do not default to a large generic hero font-size that forces an extra
+   line break the reference doesn't have. When in doubt, size text conservatively (smaller) rather
+   than aggressively (larger), since oversized text breaking the reference's line groups is a
+   frequent, noticeable mismatch.
 4. A {% schema %} block containing STRICTLY VALID JSON (double-quoted keys/strings, no trailing
    commas, no comments) with:
    - "name": short human-readable name shown in the Add Section menu.
@@ -150,6 +163,10 @@ SELF-CHECK BEFORE YOU SEND
 - Font sizes and proportions were measured against the screenshot, not defaulted to a generic scale.
 - No text-align/flex-direction/structural change at any breakpoint unless the matching screenshot
   (mobile screenshot for 749px, desktop screenshot otherwise) actually shows that change.
+- For every group of N repeated items shown on one row in a screenshot, did the math: item width
+  × N + gaps + padding fits inside that breakpoint's viewport width — they won't silently wrap.
+- Wrapped headlines break on the same words as the screenshot at each breakpoint — sizes were
+  chosen conservatively, not defaulted to a large generic hero size.
 """
 
 
