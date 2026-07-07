@@ -1484,9 +1484,6 @@ async function secHistoryApplyEdit(id) {
           if (ev.type === 'status') statusEl.textContent = ev.text;
           if (ev.type === 'done') {
             clearInterval(poll);
-            btn.disabled = false;
-            btn.textContent = '🔧 Apply Changes';
-            statusEl.style.display = 'none';
             secHistoryCode[id] = ev.reply || secHistoryCode[id];
             codeEl.textContent = secHistoryCode[id];
             document.getElementById('sh-edit-' + id).value = '';
@@ -1494,6 +1491,28 @@ async function secHistoryApplyEdit(id) {
             secHistoryEditRenderThumbs(id);
             secHistoryEditVideoFrames[id] = null;
             document.getElementById('sh-edit-video-status-' + id).textContent = '';
+
+            statusEl.textContent = '🛍️ Writing changes to the live theme...';
+            try {
+              const pubRes = await fetch(`/api/custom-sections/${id}/republish`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({liquid_code: secHistoryCode[id]})
+              });
+              const pubData = await pubRes.json();
+              if (pubData.ok) {
+                statusEl.style.color = '#4ade80';
+                statusEl.textContent = `✅ Applied and republished to ${pubData.asset_key}`;
+              } else {
+                throw new Error(pubData.error || 'Unknown error');
+              }
+            } catch(e) {
+              statusEl.style.color = '#f87171';
+              statusEl.textContent = 'Edited but failed to publish to live theme: ' + e.message + ' — use "Republish to Theme" to retry.';
+            }
+
+            btn.disabled = false;
+            btn.textContent = '🔧 Apply Changes';
           }
         }
       } catch(e) { console.error('poll error', e); }
