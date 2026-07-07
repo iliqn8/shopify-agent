@@ -75,14 +75,34 @@ speaker icon, a play-button overlay, a UGC/testimonial-style vertical (9:16) asp
 timeline/progress bar. If you see these, that block's media setting MUST be
 `"type": "video"` (Shopify's native video picker, NOT `image_picker`). Render it with
 `{{ block.settings.video | video_tag: muted: true, autoplay: false, loop: true, controls: false,
-class: 'your-class' }}` (or equivalent explicit `<video>` markup sourced from
-`block.settings.video.sources`), and add a small absolutely-positioned mute/unmute toggle button
-matching the reference — this requires a single minimal inline `onclick` that toggles the
-adjacent `<video>` element's `.muted` property (this is a basic UI control, not an "animation", so
-it's fine to use a tiny inline handler here even though animations themselves must stay pure CSS).
-Give the block an `image_picker` fallback ONLY if the reference clearly shows a static photo card
-(no play/mute icon) — never guess; when unsure between image and video, prefer `video` if ANY
-play/mute affordance is visible.
+class: 'your-class' }}` — the `video_tag` filter ONLY, always. NEVER manually construct a `<video>`
+tag with a hand-picked `src="{{ block.settings.video.sources[N].url }}"` — indexing into `.sources`
+yourself is fragile (wrong index, wrong format, wrong MIME type) and frequently renders a broken,
+invisible video even when a file is correctly assigned. `video_tag` handles sources/poster/mime
+types correctly and is the only reliable way to render a Shopify-hosted video. Add a small
+absolutely-positioned mute/unmute toggle button matching the reference — this requires a single
+minimal inline `onclick` that toggles the adjacent `<video>` element's `.muted` property (this is a
+basic UI control, not an "animation", so it's fine to use a tiny inline handler here even though
+animations themselves must stay pure CSS). Give the block an `image_picker` fallback ONLY if the
+reference clearly shows a static photo card (no play/mute icon) — never guess; when unsure between
+image and video, prefer `video` if ANY play/mute affordance is visible.
+
+FEATURED / CENTER ITEM IN A CAROUSEL (STRICT)
+If the reference shows one card in a row visually emphasized (larger, centered, elevated) among
+otherwise-equal siblings, do NOT expose a separate numeric "which position is featured" setting
+(e.g. a `range` setting like `featured_index`) — merchants can't intuit what number to type, and it
+silently goes stale the moment blocks are added, removed, or reordered. Instead, compute the true
+middle position from the actual block count in Liquid and key the featured styling off that, e.g.:
+```
+{%- liquid
+  assign block_count = section.blocks.size
+  assign featured_position = block_count | plus: 1 | divided_by: 2
+-%}
+```
+then `{% if forloop.index == featured_position %}` for the featured class. This way, whichever
+block a merchant drags to the middle of the list (using Shopify's native block reordering, already
+enabled via `block.shopify_attributes`) automatically becomes the visually featured one — no
+separate setting to keep in sync, and reordering blocks is the ONLY control needed.
 
 HORIZONTAL SCROLL CAROUSELS (STRICT)
 If the screenshot shows a row of cards that is wider than the section (cards visibly cut off at
@@ -245,10 +265,14 @@ SELF-CHECK BEFORE YOU SEND
 - Any flex container centering a single number/icon/short text uses `align-items: center` (never
   `baseline`, which visibly pushes the content toward the top of a circle/bubble).
 - Any card showing a mute/play icon or a vertical UGC-style video uses a block `"type": "video"`
-  setting (never `image_picker`) with a real `<video>`/`video_tag` render and a working mute toggle.
+  setting (never `image_picker`), rendered ONLY via the `video_tag` filter — zero manually
+  constructed `src="{{ ...sources[N].url }}"` attributes anywhere.
 - Any row of cards wider than the section is a real horizontally-scrollable shelf
   (`overflow-x: auto` + `scroll-snap`), including EVERY card visible across the screenshot's full
   width — not a static row that clips extras with no way to reach them.
+- Any single visually-emphasized "featured" item among carousel siblings is keyed off a
+  Liquid-computed true middle position (`block_count | plus: 1 | divided_by: 2`), never a separate
+  manually-set numeric setting the merchant would have to keep in sync themselves.
 """
 
 
