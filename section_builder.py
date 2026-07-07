@@ -215,32 +215,51 @@ Requirements this engine depends on — get these exactly right or it won't work
   slides) — the script reads `root.children` directly, and click-to-center walks up from the click
   target to find which direct child was clicked, so it works no matter what's nested inside a slide
   (video, button, etc.) — clicking the mute button still also re-centers its slide, which is fine.
-- CSS (STRICT): grow the active slide with `transform: scale(...)`, NEVER `width`/`height`/`flex-basis`.
-  Animating width/height forces the browser to recompute layout on every frame, which visibly
-  shifts/pushes every sibling slide during the transition (confirmed by measurement: neighboring
-  slides physically move ~70px over the animation when width/height is used, vs. zero movement
-  with transform) — that sideways shove of the other cards is exactly the "jump" merchants notice.
-  `transform: scale()` is compositor-only: it resizes the slide visually without moving neighbors
-  or triggering layout at all. Pattern:
-  ```css
-  .slide { transition: transform 0.35s ease; transform: scale(1); }
-  .slide.is-active { transform: scale(1.35); z-index: 2; } /* ratio = desired-size / base-size */
+- CSS structure (STRICT — this is exactly how real reference carousels do it, verified by
+  inspecting a live Swiper implementation's actual computed styles): use TWO nested layers per
+  slide, not one:
+  ```html
+  <div class="SECTION_CLASS-slide" {{ block.shopify_attributes }}>   <!-- OUTER: fixed size, ALWAYS -->
+    <div class="SECTION_CLASS-slide-inner">                          <!-- INNER: this one scales -->
+      ...media/content...
+    </div>
+  </div>
   ```
-  Compute the scale ratio from your own base vs. featured sizes (e.g. base 218px, featured 300px →
-  scale(1.376)). This class is toggled entirely by the script above, so do NOT also add a Liquid
-  `{% if forloop.index == ... %}` featured-position check for this case; they'd conflict. Add
-  `.is-dragging { cursor: grabbing; user-select: none; }` and `cursor: grab;` on the track by default.
-- IMPORTANT: because `transform: scale()` never changes a slide's actual LAYOUT size (only its
-  visual rendered size), the track's own horizontal padding — used so the first/last slide CAN
-  reach the true center of the viewport when scrolled — must be calculated from the slide's BASE
-  (unscaled) width, e.g. `padding: 0 calc(50% - (BASE_SLIDE_WIDTH / 2));`. Do NOT compute this
-  padding from the enlarged/featured width (a common mistake when copying old width-based patterns)
-  — that stale, too-large padding leaves too much room and makes the enlarged slide visually
-  overlap deep into its neighbors' space instead of sitting with reasonable clearance. Recompute
-  this padding value separately for every breakpoint where the base slide width changes.
-  Keep the scale ratio moderate enough (e.g. featured ≈ 2–2.2× base, not 2.5×+) that the enlarged
-  slide doesn't swallow its neighbors' entire visible area, especially on mobile where the base
-  width is already small.
+  ```css
+  .SECTION_CLASS-slide {
+    flex: 0 0 auto;
+    width: 300px; /* ONE fixed width — the SAME value at every breakpoint, never changes */
+  }
+  .SECTION_CLASS-slide-inner {
+    transform: scale(0.73);
+    opacity: 0.9;
+    transition: transform 0.35s ease, opacity 0.35s ease;
+    transform-origin: center;
+  }
+  .SECTION_CLASS-slide.is-active .SECTION_CLASS-slide-inner {
+    transform: scale(1);
+    opacity: 1;
+  }
+  ```
+  The OUTER box's width NEVER changes — not with media queries, not with `.is-active`, ever. This
+  is the entire trick: because outer boxes are always identical and fixed, slides can never overlap
+  or push each other, and there is no "jump" or stale-padding class of bug to worry about at all.
+  All of the enlarge/shrink effect happens on the INNER wrapper via `transform: scale()` (measured
+  real-world values: inactive ≈ scale(0.73) + opacity 0.9, active = scale(1) + opacity 1) — since
+  the inner element's box model space is centered within its (constant-size) outer parent, the
+  shrunk inner content simply appears smaller within unchanged, non-overlapping outer slots. The
+  script above already toggles `is-active` on the OUTER slide element — nothing else to change.
+  Do NOT also add a Liquid `{% if forloop.index == ... %}` featured-position check for this case;
+  they'd conflict. Add `.is-dragging { cursor: grabbing; user-select: none; }` and `cursor: grab;`
+  on the track by default.
+- Track centering padding is now simple and can't go stale: `padding: 0 calc(50% - 150px);` (half
+  of the ONE constant outer slide width, 300px in this example) — the same formula at every
+  breakpoint since the outer width never changes between them.
+- Pick ONE outer slide width sized reasonably for the smallest viewport you support (Dawn's 320px
+  minimum) — since it no longer changes per breakpoint, don't make it so wide that mobile can't
+  show any neighbor peek at all. Matching the real reference: ~300px works fine even down to
+  ~360-390px mobile viewports (neighbors just show a smaller sliver on narrow screens, which is
+  the expected/correct look — do not try to shrink the outer box for mobile).
 - The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
@@ -417,14 +436,15 @@ SELF-CHECK BEFORE YOU SEND
   carousel libraries (Swiper etc.) actually behave.
 - If the reference has a dynamically-enlarging center slide, the exact CAROUSEL ENGINE script was
   included verbatim (only `SECTION_CLASS` renamed) — not a freehand reimplementation, and with
-  ZERO `setInterval`/auto-advance — with `id="{{ section_class }}-track"` on the row and no extra
-  wrapper div between the track and its slide children. The `.is-active` size change uses
-  `transform: scale(...)` — zero `width`/`height`/`flex-basis` transitions, which shove sibling
-  slides sideways during the animation. Clicking a non-active slide re-centers it (click-to-center
-  is part of the same engine, no extra code needed).
-- The track's centering `padding: calc(50% - Npx)` at every breakpoint uses HALF THE BASE
-  (unscaled) slide width for N — never half the enlarged/featured width — and the featured scale
-  ratio stays moderate (~2–2.2×) so the enlarged slide doesn't overlap deep into its neighbors.
+  ZERO `setInterval`/auto-advance — with `id="{{ section_class }}-track"` on the row. Each slide
+  uses the two-layer OUTER (fixed width, never changes, not even in `.is-active` or any media
+  query) + INNER (`transform: scale()`/`opacity` toggle between inactive and `.is-active`)
+  structure — never a single-layer slide with `width`/`height`/`flex-basis` transitions or scale
+  applied directly to the outer slide, both of which shove sibling slides sideways or make the
+  outer boxes overlap. Clicking a non-active slide re-centers it (click-to-center is part of the
+  same engine, no extra code needed).
+- The track's centering `padding: calc(50% - Npx)` uses HALF THE CONSTANT OUTER slide width for N
+  — the same formula at every breakpoint, since the outer width never changes between them.
 """
 
 
