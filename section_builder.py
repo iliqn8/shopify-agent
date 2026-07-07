@@ -69,6 +69,30 @@ WHAT TO BUILD
 Analyze ONLY the section visible in the screenshot (ignore header/footer/other sections unless they
 are literally inside the screenshot). Recreate it as a brand-new, custom Shopify section.
 
+VIDEO CONTENT (STRICT)
+Look carefully for signs that a card/tile is a VIDEO, not a static image: a small mute/unmute
+speaker icon, a play-button overlay, a UGC/testimonial-style vertical (9:16) aspect ratio, or a
+timeline/progress bar. If you see these, that block's media setting MUST be
+`"type": "video"` (Shopify's native video picker, NOT `image_picker`). Render it with
+`{{ block.settings.video | video_tag: muted: true, autoplay: false, loop: true, controls: false,
+class: 'your-class' }}` (or equivalent explicit `<video>` markup sourced from
+`block.settings.video.sources`), and add a small absolutely-positioned mute/unmute toggle button
+matching the reference — this requires a single minimal inline `onclick` that toggles the
+adjacent `<video>` element's `.muted` property (this is a basic UI control, not an "animation", so
+it's fine to use a tiny inline handler here even though animations themselves must stay pure CSS).
+Give the block an `image_picker` fallback ONLY if the reference clearly shows a static photo card
+(no play/mute icon) — never guess; when unsure between image and video, prefer `video` if ANY
+play/mute affordance is visible.
+
+HORIZONTAL SCROLL CAROUSELS (STRICT)
+If the screenshot shows a row of cards that is wider than the section (cards visibly cut off at
+the right edge, or a scrollbar is visible), this is a horizontally-scrollable shelf — NOT a static
+flex row that would silently clip the extra cards with no way to reach them. Build it as
+`display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: ...;` on the row container,
+with each card as `flex: 0 0 auto; scroll-snap-align: start;` and an explicit card width so the
+partial-next-card peek matches the screenshot. Include ALL items visible across the full width of
+the reference (don't stop at only as many as fit in one viewport) as separate blocks.
+
 NO INVENTED DECORATION (STRICT)
 Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
 floating bubbles, badges, or graphics that are not present in the reference image, even if you think
@@ -220,6 +244,11 @@ SELF-CHECK BEFORE YOU SEND
   chosen conservatively, not defaulted to a large generic hero size.
 - Any flex container centering a single number/icon/short text uses `align-items: center` (never
   `baseline`, which visibly pushes the content toward the top of a circle/bubble).
+- Any card showing a mute/play icon or a vertical UGC-style video uses a block `"type": "video"`
+  setting (never `image_picker`) with a real `<video>`/`video_tag` render and a working mute toggle.
+- Any row of cards wider than the section is a real horizontally-scrollable shelf
+  (`overflow-x: auto` + `scroll-snap`), including EVERY card visible across the screenshot's full
+  width — not a static row that clips extras with no way to reach them.
 """
 
 
