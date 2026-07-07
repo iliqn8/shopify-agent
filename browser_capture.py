@@ -1,5 +1,4 @@
 import base64
-import os
 
 from playwright.sync_api import sync_playwright
 
@@ -52,17 +51,6 @@ _COMPUTED_STYLE_JS = """
 """
 
 
-def _chromium_launch_kwargs():
-    """On Railway/Nix, PLAYWRIGHT_BROWSERS_PATH=0 + PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 means
-    Playwright expects a system Chromium. Locally (dev), let Playwright use its own downloaded
-    browser instead."""
-    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
-        chromium_path = os.environ.get("CHROMIUM_PATH", "/usr/bin/chromium")
-        if os.path.exists(chromium_path):
-            return {"executable_path": chromium_path}
-    return {}
-
-
 def capture_page(url, timeout_ms=30000):
     """Launch headless Chromium, load the page, scroll through it, and capture:
     desktop + mobile full-page screenshots, plus real computed styles/fonts for
@@ -70,7 +58,7 @@ def capture_page(url, timeout_ms=30000):
     an "error" key on failure so callers can fall back to manual screenshots."""
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(**_chromium_launch_kwargs())
+            browser = p.chromium.launch()
             try:
                 result = {"error": None}
 
