@@ -7,4 +7,4 @@ openai
 python-docx
 beautifulsoup4
 opencv-python-headless
-playwright
+playwright==1.48.0
