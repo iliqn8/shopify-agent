@@ -406,6 +406,12 @@ RULES FOR THIS REVISION (STRICT)
     them specifically.
 - If reference screenshots are attached below, use them only to verify the requested change looks
   right — do not use them to re-derive parts of the design that weren't asked to change.
+- If images labeled "REFERENCE IMAGE FOR THIS EDIT" are attached, they specifically illustrate the
+  requested change (e.g. a marked-up screenshot, a competitor example, or a photo of what the
+  merchant wants instead) — treat them as the primary visual ground truth for whatever aspect of
+  the design they show, overriding your own guess about what the instructions mean.
+- If images labeled "ANIMATION FRAME" are attached, they show the requested motion/animation in
+  chronological order — recreate it with CSS `@keyframes`/`transition` as usual (never JavaScript).
 
 OUTPUT FORMAT (STRICT)
 Output ONE thing only: the COMPLETE revised `.liquid` section file (not a diff, not just the
@@ -415,9 +421,12 @@ after the fence.
 
 
 def edit_stream(current_code, edit_instructions, reference_url=None, image_desktop=None,
-                 image_mobile=None, video_frames=None, section_name=None):
+                 image_mobile=None, video_frames=None, extra_images=None, section_name=None):
     """Generator yielding {type: status/done} events. Revises an already-generated section's
-    liquid code based on the merchant's follow-up correction instructions."""
+    liquid code based on the merchant's follow-up correction instructions.
+    extra_images = list of {b64, media_type} dicts attached specifically to illustrate this edit
+    (e.g. a marked-up screenshot or a different visual example) — distinct from the original
+    desktop/mobile reference screenshots."""
     yield {"type": "status", "text": "🔧 Applying your changes..."}
 
     prompt = (EDIT_PROMPT_TEMPLATE
@@ -435,6 +444,13 @@ def edit_stream(current_code, edit_instructions, reference_url=None, image_deskt
             {"type": "text", "text": "MOBILE SCREENSHOT (for reference while verifying the change):"},
             {"type": "image", "source": {"type": "base64", "media_type": image_mobile["media_type"], "data": image_mobile["b64"]}},
         ]
+    if extra_images:
+        for i, img in enumerate(extra_images):
+            content += [
+                {"type": "text", "text": f"REFERENCE IMAGE FOR THIS EDIT {i + 1}/{len(extra_images)} "
+                                          "(illustrates the requested change — treat as visual ground truth):"},
+                {"type": "image", "source": {"type": "base64", "media_type": img["media_type"], "data": img["b64"]}},
+            ]
     if video_frames:
         for i, frame in enumerate(video_frames):
             content += [

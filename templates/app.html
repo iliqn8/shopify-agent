@@ -280,6 +280,14 @@
       <div style="margin-top:20px;border-top:1px solid #222;padding-top:16px">
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">🔧 REQUEST CHANGES <span style="color:#555">(not happy with something above? describe the fix and re-generate)</span></label>
         <textarea id="sec-edit-instructions" rows="2" placeholder="e.g. Make the heading smaller on mobile, change the button color to blue, move the icon to the left..." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <input type="file" id="sec-edit-img-input" accept="image/*" multiple style="display:none" onchange="secEditHandleImages(this)">
+          <button onclick="document.getElementById('sec-edit-img-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">📎 Attach image(s)</button>
+          <input type="file" id="sec-edit-video-input" accept="video/*" style="display:none" onchange="secEditHandleVideo(this)">
+          <button onclick="document.getElementById('sec-edit-video-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">🎬 Attach video</button>
+          <div id="sec-edit-img-thumbs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        </div>
+        <div id="sec-edit-video-status" style="font-size:11px;color:#888;margin-top:4px"></div>
         <button id="sec-edit-btn" onclick="secApplyEdit()" style="margin-top:10px;width:100%;background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:12px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer">
           🔧 Apply Changes
         </button>
@@ -1067,6 +1075,54 @@ function secCopy() {
   });
 }
 
+let secEditImages = [];
+let secEditVideoFrames = null;
+
+function secEditHandleImages(input) {
+  Array.from(input.files).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const b64 = e.target.result.split(',')[1];
+      const ext = file.name.split('.').pop().toLowerCase();
+      const mimeMap = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'};
+      secEditImages.push({b64, filename: file.name, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result});
+      secEditRenderThumbs();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function secEditRenderThumbs() {
+  const el = document.getElementById('sec-edit-img-thumbs');
+  el.innerHTML = secEditImages.map((img, i) => `
+    <div style="position:relative;display:inline-block">
+      <img src="${img.dataUrl}" style="width:40px;height:40px;object-fit:cover;border-radius:6px;border:1px solid #333">
+      <button onclick="secEditImages.splice(${i},1);secEditRenderThumbs()" style="position:absolute;top:-5px;right:-5px;background:#333;border:none;color:#fff;border-radius:50%;width:14px;height:14px;font-size:9px;cursor:pointer;line-height:14px;padding:0">✕</button>
+    </div>`).join('');
+}
+
+async function secEditHandleVideo(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('sec-edit-video-status');
+  statusEl.textContent = '⏳ Extracting frames...';
+  secEditVideoFrames = null;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch('/api/section-video-frames', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (data.frames && data.frames.length) {
+      secEditVideoFrames = data.frames;
+      statusEl.textContent = `✅ ${data.frames.length} frames from "${file.name}"`;
+    } else {
+      statusEl.textContent = '❌ ' + (data.error || 'Could not read video');
+    }
+  } catch(e) { statusEl.textContent = '❌ Upload failed: ' + e.message; }
+  input.value = '';
+}
+
 async function secApplyEdit() {
   const editInstructions = document.getElementById('sec-edit-instructions').value.trim();
   const currentCode = document.getElementById('sec-output').textContent;
@@ -1093,7 +1149,8 @@ async function secApplyEdit() {
         section_name: document.getElementById('sec-final-name').value.trim(),
         image_desktop: secImages.desktop ? {b64: secImages.desktop.b64, filename: secImages.desktop.filename, media_type: secImages.desktop.media_type} : null,
         image_mobile: secImages.mobile ? {b64: secImages.mobile.b64, filename: secImages.mobile.filename, media_type: secImages.mobile.media_type} : null,
-        video_frames: secVideoFrames || null
+        extra_images: secEditImages.map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type})),
+        video_frames: secEditVideoFrames || null
       })
     });
     const {job_id} = await res.json();
@@ -1109,6 +1166,10 @@ async function secApplyEdit() {
           if (ev.type === 'done') {
             clearInterval(poll);
             btn.disabled = false;
+            secEditImages = [];
+            secEditRenderThumbs();
+            secEditVideoFrames = null;
+            document.getElementById('sec-edit-video-status').textContent = '';
             btn.textContent = '🔧 Apply Changes';
             statusEl.style.display = 'none';
             outputEl.textContent = ev.reply || '';
@@ -1165,6 +1226,55 @@ async function secPublish() {
 
 let secHistoryCode = {};
 let secHistoryMeta = {};
+let secHistoryEditImages = {};
+let secHistoryEditVideoFrames = {};
+
+function secHistoryEditHandleImages(id, input) {
+  if (!secHistoryEditImages[id]) secHistoryEditImages[id] = [];
+  Array.from(input.files).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const b64 = e.target.result.split(',')[1];
+      const ext = file.name.split('.').pop().toLowerCase();
+      const mimeMap = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'};
+      secHistoryEditImages[id].push({b64, filename: file.name, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result});
+      secHistoryEditRenderThumbs(id);
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function secHistoryEditRenderThumbs(id) {
+  const el = document.getElementById('sh-edit-img-thumbs-' + id);
+  const imgs = secHistoryEditImages[id] || [];
+  el.innerHTML = imgs.map((img, i) => `
+    <div style="position:relative;display:inline-block">
+      <img src="${img.dataUrl}" style="width:36px;height:36px;object-fit:cover;border-radius:6px;border:1px solid #333">
+      <button onclick="secHistoryEditImages[${id}].splice(${i},1);secHistoryEditRenderThumbs(${id})" style="position:absolute;top:-5px;right:-5px;background:#333;border:none;color:#fff;border-radius:50%;width:14px;height:14px;font-size:9px;cursor:pointer;line-height:14px;padding:0">✕</button>
+    </div>`).join('');
+}
+
+async function secHistoryEditHandleVideo(id, input) {
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('sh-edit-video-status-' + id);
+  statusEl.textContent = '⏳ Extracting frames...';
+  secHistoryEditVideoFrames[id] = null;
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch('/api/section-video-frames', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (data.frames && data.frames.length) {
+      secHistoryEditVideoFrames[id] = data.frames;
+      statusEl.textContent = `✅ ${data.frames.length} frames from "${file.name}"`;
+    } else {
+      statusEl.textContent = '❌ ' + (data.error || 'Could not read video');
+    }
+  } catch(e) { statusEl.textContent = '❌ Upload failed: ' + e.message; }
+  input.value = '';
+}
 
 async function secLoadHistory() {
   const container = document.getElementById('sec-history');
@@ -1178,6 +1288,8 @@ async function secLoadHistory() {
     items.forEach(s => {
       secHistoryCode[s.id] = s.liquid_code || '';
       secHistoryMeta[s.id] = {reference_url: s.reference_url || '', section_name: s.section_name || ''};
+      secHistoryEditImages[s.id] = [];
+      secHistoryEditVideoFrames[s.id] = null;
     });
     container.innerHTML = items.map(s => `
       <div style="background:#161616;border:1px solid #2a2a2a;border-radius:10px;overflow:hidden">
@@ -1199,6 +1311,14 @@ async function secLoadHistory() {
           <div style="margin-top:16px;border-top:1px solid #222;padding-top:12px">
             <label style="color:#aaa;font-size:11px;display:block;margin-bottom:6px">🔧 REQUEST CHANGES</label>
             <textarea id="sh-edit-${s.id}" rows="2" placeholder="e.g. Change the button color to blue..." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+              <input type="file" id="sh-edit-img-input-${s.id}" accept="image/*" multiple style="display:none" onchange="secHistoryEditHandleImages(${s.id}, this)">
+              <button onclick="document.getElementById('sh-edit-img-input-${s.id}').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:11px">📎 Attach image(s)</button>
+              <input type="file" id="sh-edit-video-input-${s.id}" accept="video/*" style="display:none" onchange="secHistoryEditHandleVideo(${s.id}, this)">
+              <button onclick="document.getElementById('sh-edit-video-input-${s.id}').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:11px">🎬 Attach video</button>
+              <div id="sh-edit-img-thumbs-${s.id}" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+            </div>
+            <div id="sh-edit-video-status-${s.id}" style="font-size:10px;color:#888;margin-top:4px"></div>
             <div style="display:flex;gap:8px;margin-top:8px">
               <button id="sh-edit-btn-${s.id}" onclick="secHistoryApplyEdit(${s.id})" style="flex:1;background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">🔧 Apply Changes</button>
               <button id="sh-republish-btn-${s.id}" onclick="secHistoryRepublish(${s.id})" style="flex:1;background:#16a34a;border:none;color:#fff;padding:10px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">🛍️ Republish to Theme</button>
@@ -1248,7 +1368,9 @@ async function secHistoryApplyEdit(id) {
         current_code: secHistoryCode[id],
         edit_instructions: editInstructions,
         reference_url: meta.reference_url,
-        section_name: meta.section_name
+        section_name: meta.section_name,
+        extra_images: (secHistoryEditImages[id] || []).map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type})),
+        video_frames: secHistoryEditVideoFrames[id] || null
       })
     });
     const {job_id} = await res.json();
@@ -1269,6 +1391,10 @@ async function secHistoryApplyEdit(id) {
             secHistoryCode[id] = ev.reply || secHistoryCode[id];
             codeEl.textContent = secHistoryCode[id];
             document.getElementById('sh-edit-' + id).value = '';
+            secHistoryEditImages[id] = [];
+            secHistoryEditRenderThumbs(id);
+            secHistoryEditVideoFrames[id] = null;
+            document.getElementById('sh-edit-video-status-' + id).textContent = '';
           }
         }
       } catch(e) { console.error('poll error', e); }

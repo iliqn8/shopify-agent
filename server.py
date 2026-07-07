@@ -503,6 +503,7 @@ def section_edit_start():
     image_desktop = data.get("image_desktop")
     image_mobile = data.get("image_mobile")
     video_frames = data.get("video_frames") or None
+    extra_images = data.get("extra_images") or None
 
     if not current_code:
         return jsonify({"error": "No existing code to edit"}), 400
@@ -517,7 +518,7 @@ def section_edit_start():
             import section_builder
             for event in section_builder.edit_stream(
                 current_code, edit_instructions, reference_url, image_desktop, image_mobile,
-                video_frames, section_name
+                video_frames, extra_images, section_name
             ):
                 _section_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":
