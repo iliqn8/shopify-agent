@@ -87,7 +87,10 @@ animations themselves must stay pure CSS). Give the block an `image_picker` fall
 reference clearly shows a static photo card (no play/mute icon) — never guess; when unsure between
 image and video, prefer `video` if ANY play/mute affordance is visible.
 
-FEATURED / CENTER ITEM IN A CAROUSEL (STRICT)
+FEATURED / CENTER ITEM IN A CAROUSEL (STRICT — static case only)
+This rule applies ONLY when the featured item is fixed/static (no autoplay, no motion between
+frames) — if the reference auto-advances and the enlarged slide changes over time, use the
+CAROUSEL ENGINE rule below instead, which handles this dynamically; do not apply both.
 If the reference shows one card in a row visually emphasized (larger, centered, elevated) among
 otherwise-equal siblings, do NOT expose a separate numeric "which position is featured" setting
 (e.g. a `range` setting like `featured_index`) — merchants can't intuit what number to type, and it
@@ -113,42 +116,111 @@ with each card as `flex: 0 0 auto; scroll-snap-align: start;` and an explicit ca
 partial-next-card peek matches the screenshot. Include ALL items visible across the full width of
 the reference (don't stop at only as many as fit in one viewport) as separate blocks.
 
-DESKTOP MOUSE DRAG-TO-SCROLL (STRICT)
-CSS `scroll-snap`/`overflow-x: auto` alone lets people scroll a carousel with a trackpad, mouse
-wheel, or touch swipe — but NOT by clicking and dragging with a mouse, which real carousel
-libraries (Swiper, Slick, etc. — what most reference sites actually use) support out of the box.
-Real visitors on desktop WILL try to click-and-drag the row, and if nothing happens it reads as
-broken. So every horizontal-scroll carousel MUST also include a small vanilla-JS pointer-drag
-handler — this is a basic interaction control (like the mute toggle button), not a decorative
-"animation", so a short inline `<script>` is required here even though animations themselves must
-stay pure CSS. Scope it to this exact section instance using `{{ section.id }}` so multiple copies
-of the section on one page never conflict, e.g.:
+CAROUSEL ENGINE — AUTOPLAY + CENTER-ACTIVE SLIDE + DRAG (STRICT)
+Real reference carousels (Swiper, Slick, etc.) usually do THREE things our CSS alone can't:
+(1) auto-advance to the next slide every few seconds with no user input, (2) dynamically enlarge
+whichever slide is CURRENTLY centered as it scrolls/auto-advances (not a fixed block position —
+the enlarged one changes continuously as the carousel moves), (3) let desktop users click-and-drag
+with a mouse to scroll (native `overflow-x` only responds to trackpad/wheel/touch, not mouse drag).
+Look at the screenshot(s)/notes/animation frames for signs of this (a card sitting in the middle
+looking bigger, motion between frames, a source carousel library evident in the real DOM
+structure) — if present, you MUST include the exact engine below verbatim, changing ONLY the
+literal string `SECTION_CLASS` throughout to this section's own `{{ section_class }}` Liquid
+variable (do not rewrite the logic yourself — this exact code is already tested and known to
+work; reinventing it from scratch is how subtle bugs creep in):
 ```html
 <script>
 (function() {
-  var track = document.getElementById('{{ section_class }}-track');
-  if (!track) return;
+  var root = document.getElementById('SECTION_CLASS-track');
+  if (!root) return;
+  var slides = Array.prototype.slice.call(root.children);
+  if (!slides.length) return;
+  var autoplayDelay = 3000;
+  var autoplayTimer = null;
   var isDown = false, startX = 0, scrollStart = 0;
-  track.addEventListener('mousedown', function(e) {
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function currentIndex() {
+    var rootRect = root.getBoundingClientRect();
+    var center = rootRect.left + rootRect.width / 2;
+    var idx = 0, closestDist = Infinity;
+    slides.forEach(function(slide, i) {
+      var r = slide.getBoundingClientRect();
+      var dist = Math.abs((r.left + r.width / 2) - center);
+      if (dist < closestDist) { closestDist = dist; idx = i; }
+    });
+    return idx;
+  }
+  function setActive() {
+    var idx = currentIndex();
+    slides.forEach(function(s, i) {
+      var active = i === idx;
+      s.classList.toggle('is-active', active);
+      var video = s.querySelector('video');
+      if (video) {
+        if (active) { video.play().catch(function() {}); }
+        else { video.pause(); }
+      }
+    });
+  }
+  function scrollToIndex(i, smooth) {
+    var slide = slides[i];
+    if (!slide) return;
+    var target = slide.offsetLeft - (root.clientWidth - slide.clientWidth) / 2;
+    root.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
+  }
+  function nextSlide() { scrollToIndex((currentIndex() + 1) % slides.length, true); }
+  function startAutoplay() {
+    stopAutoplay();
+    if (reduceMotion) return;
+    autoplayTimer = setInterval(nextSlide, autoplayDelay);
+  }
+  function stopAutoplay() {
+    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
+  }
+
+  root.addEventListener('scroll', function() { window.requestAnimationFrame(setActive); }, { passive: true });
+  root.addEventListener('mousedown', function(e) {
     isDown = true;
-    track.classList.add('is-dragging');
+    root.classList.add('is-dragging');
     startX = e.pageX;
-    scrollStart = track.scrollLeft;
+    scrollStart = root.scrollLeft;
+    stopAutoplay();
   });
   ['mouseup', 'mouseleave'].forEach(function(evt) {
-    track.addEventListener(evt, function() { isDown = false; track.classList.remove('is-dragging'); });
+    root.addEventListener(evt, function() {
+      if (isDown) { isDown = false; root.classList.remove('is-dragging'); startAutoplay(); }
+    });
   });
-  track.addEventListener('mousemove', function(e) {
+  root.addEventListener('mousemove', function(e) {
     if (!isDown) return;
     e.preventDefault();
-    track.scrollLeft = scrollStart - (e.pageX - startX);
+    root.scrollLeft = scrollStart - (e.pageX - startX);
   });
+
+  setActive();
+  startAutoplay();
 })();
 </script>
 ```
-(give the scrollable track element an `id="{{ section_class }}-track"` so this can select it).
-Add `.is-dragging { cursor: grabbing; user-select: none; }` and a default `cursor: grab;` on the
-track in the CSS so it's visually obvious it's draggable.
+Requirements this engine depends on — get these exactly right or it won't work:
+- The scrollable row element itself needs `id="{{ section_class }}-track"` (literally that ID,
+  matching what the script queries for).
+- Each direct child of that row is one slide (no extra wrapper div between the track and the
+  slides) — the script reads `root.children` directly.
+- CSS: give slides `transition: width 0.35s ease, height 0.35s ease;` (or transform/scale — your
+  choice of which property grows) and a `.is-active { ...larger size... }` rule — this class is
+  toggled entirely by the script above, so do NOT also add a Liquid `{% if forloop.index == ... %}`
+  featured-position check for this case; they'd conflict. Add `.is-dragging { cursor: grabbing;
+  user-select: none; }` and `cursor: grab;` on the track by default.
+- The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
+  this means only the centered video is ever actually playing, matching how these UGC carousels
+  really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
+  this reason — the script drives playback, not the HTML attribute.
+- If the reference does NOT show autoplay/dynamic-center behavior (just a plain draggable static
+  row, no size change over time), skip this whole engine and use the simpler static
+  Liquid-computed `featured_position` approach from the rule below instead — don't add autoplay
+  that isn't actually in the reference.
 
 NO INVENTED DECORATION (STRICT)
 Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
@@ -313,9 +385,13 @@ SELF-CHECK BEFORE YOU SEND
 - Any single visually-emphasized "featured" item among carousel siblings is keyed off a
   Liquid-computed true middle position (`block_count | plus: 1 | divided_by: 2`), never a separate
   manually-set numeric setting the merchant would have to keep in sync themselves.
-- Any horizontal-scroll carousel includes the mousedown/mousemove drag-to-scroll `<script>`
-  (scoped via `{{ section.id }}`) so desktop mouse users can click-and-drag it, not just
-  scroll-wheel/touch — matching how real carousel libraries (Swiper etc.) actually behave.
+- Any horizontal-scroll carousel includes the mousedown/mousemove drag-to-scroll behavior so
+  desktop mouse users can click-and-drag it, not just scroll-wheel/touch — matching how real
+  carousel libraries (Swiper etc.) actually behave.
+- If the reference auto-advances with a dynamically-enlarging center slide, the exact CAROUSEL
+  ENGINE script was included verbatim (only `SECTION_CLASS` renamed) — not a freehand
+  reimplementation — with `id="{{ section_class }}-track"` on the row and no extra wrapper div
+  between the track and its slide children.
 """
 
 
