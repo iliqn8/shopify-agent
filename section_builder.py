@@ -186,11 +186,21 @@ Requirements this engine depends on — get these exactly right or it won't work
   matching what the script queries for).
 - Each direct child of that row is one slide (no extra wrapper div between the track and the
   slides) — the script reads `root.children` directly.
-- CSS: give slides `transition: width 0.35s ease, height 0.35s ease;` (or transform/scale — your
-  choice of which property grows) and a `.is-active { ...larger size... }` rule — this class is
-  toggled entirely by the script above, so do NOT also add a Liquid `{% if forloop.index == ... %}`
-  featured-position check for this case; they'd conflict. Add `.is-dragging { cursor: grabbing;
-  user-select: none; }` and `cursor: grab;` on the track by default.
+- CSS (STRICT): grow the active slide with `transform: scale(...)`, NEVER `width`/`height`/`flex-basis`.
+  Animating width/height forces the browser to recompute layout on every frame, which visibly
+  shifts/pushes every sibling slide during the transition (confirmed by measurement: neighboring
+  slides physically move ~70px over the animation when width/height is used, vs. zero movement
+  with transform) — that sideways shove of the other cards is exactly the "jump" merchants notice.
+  `transform: scale()` is compositor-only: it resizes the slide visually without moving neighbors
+  or triggering layout at all. Pattern:
+  ```css
+  .slide { transition: transform 0.35s ease; transform: scale(1); }
+  .slide.is-active { transform: scale(1.35); z-index: 2; } /* ratio = desired-size / base-size */
+  ```
+  Compute the scale ratio from your own base vs. featured sizes (e.g. base 218px, featured 300px →
+  scale(1.376)). This class is toggled entirely by the script above, so do NOT also add a Liquid
+  `{% if forloop.index == ... %}` featured-position check for this case; they'd conflict. Add
+  `.is-dragging { cursor: grabbing; user-select: none; }` and `cursor: grab;` on the track by default.
 - The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
@@ -368,7 +378,9 @@ SELF-CHECK BEFORE YOU SEND
 - If the reference has a dynamically-enlarging center slide, the exact CAROUSEL ENGINE script was
   included verbatim (only `SECTION_CLASS` renamed) — not a freehand reimplementation, and with
   ZERO `setInterval`/auto-advance — with `id="{{ section_class }}-track"` on the row and no extra
-  wrapper div between the track and its slide children.
+  wrapper div between the track and its slide children. The `.is-active` size change uses
+  `transform: scale(...)` — zero `width`/`height`/`flex-basis` transitions, which shove sibling
+  slides sideways during the animation.
 """
 
 
