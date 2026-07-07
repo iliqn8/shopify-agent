@@ -116,16 +116,17 @@ with each card as `flex: 0 0 auto; scroll-snap-align: start;` and an explicit ca
 partial-next-card peek matches the screenshot. Include ALL items visible across the full width of
 the reference (don't stop at only as many as fit in one viewport) as separate blocks.
 
-CAROUSEL ENGINE — MANUAL DRAG + CENTER-ACTIVE SLIDE (STRICT, NEVER AUTOPLAY)
-Real reference carousels (Swiper, Slick, etc.) usually do TWO things our CSS alone can't:
+CAROUSEL ENGINE — MANUAL DRAG + CLICK-TO-CENTER + ACTIVE SLIDE (STRICT, NEVER AUTOPLAY)
+Real reference carousels (Swiper, Slick, etc.) usually do THREE things our CSS alone can't:
 (1) dynamically enlarge whichever slide is CURRENTLY centered as the merchant's visitor scrolls it
 (not a fixed block position — the enlarged one changes as the row moves), (2) let desktop users
 click-and-drag with a mouse to scroll (native `overflow-x` only responds to trackpad/wheel/touch,
-not mouse drag). NEVER add automatic/timed advancing (no `setInterval`, no auto-scroll on a timer)
-— the carousel must only move when the visitor actively drags/scrolls/swipes it themselves. Look
-at the screenshot(s)/notes for signs of a dynamically-enlarging center slide or a source carousel
-library evident in the real DOM structure — if present, you MUST include the exact engine below
-verbatim, changing ONLY the literal string `SECTION_CLASS` throughout to this section's own
+not mouse drag), (3) let visitors click directly on a neighboring (non-active) slide to bring IT to
+center, not just drag. NEVER add automatic/timed advancing (no `setInterval`, no auto-scroll on a
+timer) — the carousel must only move when the visitor actively drags/scrolls/clicks it themselves.
+Look at the screenshot(s)/notes for signs of a dynamically-enlarging center slide or a source
+carousel library evident in the real DOM structure — if present, you MUST include the exact engine
+below verbatim, changing ONLY the literal string `SECTION_CLASS` throughout to this section's own
 `{{ section_class }}` Liquid variable (do not rewrite the logic yourself — this exact code is
 already tested and known to work; reinventing it from scratch is how subtle bugs creep in):
 ```html
@@ -135,7 +136,7 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
   if (!root) return;
   var slides = Array.prototype.slice.call(root.children);
   if (!slides.length) return;
-  var isDown = false, startX = 0, scrollStart = 0;
+  var isDown = false, startX = 0, scrollStart = 0, moved = false;
 
   function currentIndex() {
     var rootRect = root.getBoundingClientRect();
@@ -160,21 +161,47 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
       }
     });
   }
+  function scrollToIndex(i, smooth) {
+    var slide = slides[i];
+    if (!slide) return;
+    var target = slide.offsetLeft - (root.clientWidth - slide.clientWidth) / 2;
+    root.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
+  }
+  function findSlideEl(el) {
+    while (el && el !== root) {
+      if (slides.indexOf(el) > -1) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
 
   root.addEventListener('scroll', function() { window.requestAnimationFrame(setActive); }, { passive: true });
   root.addEventListener('mousedown', function(e) {
     isDown = true;
+    moved = false;
     root.classList.add('is-dragging');
     startX = e.pageX;
     scrollStart = root.scrollLeft;
   });
-  ['mouseup', 'mouseleave'].forEach(function(evt) {
-    root.addEventListener(evt, function() { isDown = false; root.classList.remove('is-dragging'); });
+  root.addEventListener('mouseup', function(e) {
+    if (!isDown) return;
+    isDown = false;
+    root.classList.remove('is-dragging');
+    if (!moved) {
+      var slideEl = findSlideEl(e.target);
+      if (slideEl) scrollToIndex(slides.indexOf(slideEl), true);
+    }
+  });
+  root.addEventListener('mouseleave', function() {
+    isDown = false;
+    root.classList.remove('is-dragging');
   });
   root.addEventListener('mousemove', function(e) {
     if (!isDown) return;
     e.preventDefault();
-    root.scrollLeft = scrollStart - (e.pageX - startX);
+    var dx = e.pageX - startX;
+    if (Math.abs(dx) > 5) moved = true;
+    root.scrollLeft = scrollStart - dx;
   });
 
   setActive();
@@ -185,7 +212,9 @@ Requirements this engine depends on — get these exactly right or it won't work
 - The scrollable row element itself needs `id="{{ section_class }}-track"` (literally that ID,
   matching what the script queries for).
 - Each direct child of that row is one slide (no extra wrapper div between the track and the
-  slides) — the script reads `root.children` directly.
+  slides) — the script reads `root.children` directly, and click-to-center walks up from the click
+  target to find which direct child was clicked, so it works no matter what's nested inside a slide
+  (video, button, etc.) — clicking the mute button still also re-centers its slide, which is fine.
 - CSS (STRICT): grow the active slide with `transform: scale(...)`, NEVER `width`/`height`/`flex-basis`.
   Animating width/height forces the browser to recompute layout on every frame, which visibly
   shifts/pushes every sibling slide during the transition (confirmed by measurement: neighboring
@@ -201,6 +230,17 @@ Requirements this engine depends on — get these exactly right or it won't work
   scale(1.376)). This class is toggled entirely by the script above, so do NOT also add a Liquid
   `{% if forloop.index == ... %}` featured-position check for this case; they'd conflict. Add
   `.is-dragging { cursor: grabbing; user-select: none; }` and `cursor: grab;` on the track by default.
+- IMPORTANT: because `transform: scale()` never changes a slide's actual LAYOUT size (only its
+  visual rendered size), the track's own horizontal padding — used so the first/last slide CAN
+  reach the true center of the viewport when scrolled — must be calculated from the slide's BASE
+  (unscaled) width, e.g. `padding: 0 calc(50% - (BASE_SLIDE_WIDTH / 2));`. Do NOT compute this
+  padding from the enlarged/featured width (a common mistake when copying old width-based patterns)
+  — that stale, too-large padding leaves too much room and makes the enlarged slide visually
+  overlap deep into its neighbors' space instead of sitting with reasonable clearance. Recompute
+  this padding value separately for every breakpoint where the base slide width changes.
+  Keep the scale ratio moderate enough (e.g. featured ≈ 2–2.2× base, not 2.5×+) that the enlarged
+  slide doesn't swallow its neighbors' entire visible area, especially on mobile where the base
+  width is already small.
 - The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
@@ -380,7 +420,11 @@ SELF-CHECK BEFORE YOU SEND
   ZERO `setInterval`/auto-advance — with `id="{{ section_class }}-track"` on the row and no extra
   wrapper div between the track and its slide children. The `.is-active` size change uses
   `transform: scale(...)` — zero `width`/`height`/`flex-basis` transitions, which shove sibling
-  slides sideways during the animation.
+  slides sideways during the animation. Clicking a non-active slide re-centers it (click-to-center
+  is part of the same engine, no extra code needed).
+- The track's centering `padding: calc(50% - Npx)` at every breakpoint uses HALF THE BASE
+  (unscaled) slide width for N — never half the enlarged/featured width — and the featured scale
+  ratio stays moderate (~2–2.2×) so the enlarged slide doesn't overlap deep into its neighbors.
 """
 
 
