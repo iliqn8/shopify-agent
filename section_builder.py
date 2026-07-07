@@ -93,8 +93,22 @@ The file MUST contain, in this order:
    `rgb(var(--color-foreground))`, or `rgba(var(--color-foreground), 0.NN)` for muted variants —
    NEVER a literal hex/rgb value like `#f0faff` or `#333` for these. Hardcoded literal colors make
    the "Color Scheme" setting do nothing when the merchant changes it, which is a critical bug.
-   Only truly decorative accents that must stay constant across every scheme (rare) may use a
-   literal color, and only if there is no reasonable alternative.
+
+   ACCENT COLORS MUST BE EDITABLE TOO (STRICT): color_scheme only covers the section's overall
+   background/foreground — it does NOT give the merchant control over specific accent colors like
+   a button's background, a highlighted headline word, star-rating color, badge/icon color, or a
+   stat bubble's fill. For EVERY such distinct accent color you use, add its own
+   `"type": "color"` setting to the schema (e.g. `button_background_color`, `button_text_color`,
+   `heading_highlight_color`, `stat_bubble_color`, `stat_number_color`, `star_color` — name them for
+   what they control), with `"default"` set to the exact hex value you observed in the screenshot.
+   Apply each one by writing the Liquid variable directly into the CSS rule's value inside the
+   `<style>` block, e.g. `background-color: {{ section.settings.button_background_color }};` —
+   this renders server-side, so it works exactly like a hardcoded color visually while remaining
+   fully editable by the merchant afterward. NEVER leave an accent color as a bare, unexposed
+   literal hex in the CSS — if it's a real color decision (not pure structural CSS like border-radius
+   or spacing), it needs a setting. This applies to every accent color, on every element, without
+   exception — a merchant should be able to restyle any color in the section from the theme editor
+   alone, with zero code edits.
 3. Responsive breakpoints matching Dawn/OS 2.0 convention:
    - Unprefixed rules = desktop.
    - @media screen and (max-width: 989px) {{ ... }} = tablet adjustments.
@@ -150,6 +164,9 @@ SELF-CHECK BEFORE YOU SEND
 - Every scheme-following color in the CSS uses rgb(var(--color-background)) /
   rgb(var(--color-foreground)) / rgba(var(--color-foreground), 0.NN) — zero hardcoded hex colors
   for backgrounds or text.
+- Every distinct accent color (button, highlight, icon, bubble, star rating, etc.) has its own
+  `"type": "color"` schema setting with a default matching the screenshot, applied via
+  `{{ section.settings.xxx }}` directly in the CSS — zero bare unexposed hex accent colors anywhere.
 - {% schema %} is valid JSON with a non-empty presets array.
 - All CSS is scoped under .custom-section-{{ section.id }} — zero bare/global selectors.
 - Both max-width: 989px and max-width: 749px media queries are present and meaningfully change
