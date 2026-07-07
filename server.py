@@ -448,6 +448,7 @@ def section_auto_capture():
     import uuid as _uuid_cap
     data = request.json or {}
     url = data.get("url", "").strip()
+    section_hint = data.get("section_hint", "").strip() or None
     if not url:
         return jsonify({"error": "URL required"}), 400
 
@@ -458,7 +459,7 @@ def section_auto_capture():
         try:
             import browser_capture
             _section_jobs[job_id]["events"].append({"type": "status", "text": "🌐 Opening browser..."})
-            result = browser_capture.capture_page(url)
+            result = browser_capture.capture_page(url, section_hint)
             if result.get("error"):
                 _section_jobs[job_id]["events"].append({
                     "type": "done",
@@ -470,6 +471,7 @@ def section_auto_capture():
                     "screenshot_desktop_b64": result.get("screenshot_desktop_b64"),
                     "screenshot_mobile_b64": result.get("screenshot_mobile_b64"),
                     "page_context": result.get("computed_styles"),
+                    "section_matched": result.get("section_matched", False),
                 })
             _section_jobs[job_id]["done"] = True
         except Exception as e:

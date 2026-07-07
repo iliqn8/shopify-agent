@@ -5,8 +5,41 @@ from playwright.sync_api import sync_playwright
 DESKTOP_VIEWPORT = {"width": 1440, "height": 900}
 MOBILE_VIEWPORT = {"width": 390, "height": 844}
 
+_FIND_CONTAINER_JS_BODY = """
+  function findContainer(hint) {
+    if (!hint) return null;
+    const hintLower = hint.toLowerCase();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node, matchEl = null;
+    while (node = walker.nextNode()) {
+      if (node.textContent && node.textContent.toLowerCase().includes(hintLower)) {
+        matchEl = node.parentElement;
+        break;
+      }
+    }
+    if (!matchEl) return null;
+    let el = matchEl;
+    while (el && el !== document.body) {
+      const rect = el.getBoundingClientRect();
+      if (rect.height >= 150 && rect.height <= 1400 && rect.width >= 300) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+    return matchEl;
+  }
+"""
+
+_FIND_CONTAINER_JS = """
+(hint) => {
+""" + _FIND_CONTAINER_JS_BODY + """
+  return findContainer(hint);
+}
+"""
+
 _COMPUTED_STYLE_JS = """
-() => {
+(hint) => {
+""" + _FIND_CONTAINER_JS_BODY + """
   function pick(el) {
     if (!el) return null;
     const cs = getComputedStyle(el);
@@ -20,9 +53,10 @@ _COMPUTED_STYLE_JS = """
     };
   }
 
-  const heading = document.querySelector('h1, h2, h3');
-  const body = document.querySelector('p');
-  const button = document.querySelector('a.button, button, [class*="btn"], [class*="button"]');
+  const scope = findContainer(hint) || document;
+  const heading = scope.querySelector('h1, h2, h3');
+  const body = scope.querySelector('p');
+  const button = scope.querySelector('a.button, button, [class*="btn"], [class*="button"]');
 
   const fontLinks = Array.from(document.querySelectorAll('link[href*="fonts"]')).map(l => l.href);
   const fontFaceNames = new Set();
@@ -51,11 +85,30 @@ _COMPUTED_STYLE_JS = """
 """
 
 
-def capture_page(url, timeout_ms=30000):
+def _capture_screenshot(page, section_hint):
+    """Screenshot just the matched section container if section_hint locates one,
+    otherwise fall back to a full-page screenshot."""
+    if section_hint:
+        try:
+            handle = page.evaluate_handle(_FIND_CONTAINER_JS, section_hint)
+            element = handle.as_element()
+            if element:
+                return element.screenshot(type="jpeg", quality=85), True
+        except Exception:
+            pass
+    return page.screenshot(full_page=True, type="jpeg", quality=85), False
+
+
+def capture_page(url, section_hint=None, timeout_ms=30000):
     """Launch headless Chromium, load the page, scroll through it, and capture:
-    desktop + mobile full-page screenshots, plus real computed styles/fonts for
-    heading/body/button representative elements. Never raises — returns a dict with
-    an "error" key on failure so callers can fall back to manual screenshots."""
+    desktop + mobile screenshots, plus real computed styles/fonts for heading/body/button
+    representative elements. Never raises — returns a dict with an "error" key on failure
+    so callers can fall back to manual screenshots.
+
+    section_hint: an optional short exact phrase of text visible in the target section
+    (e.g. a headline). When provided, the browser locates the smallest reasonably-sized
+    container wrapping that text and screenshots ONLY that section instead of the whole
+    page. If the phrase isn't found, silently falls back to a full-page screenshot."""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -69,19 +122,18 @@ def capture_page(url, timeout_ms=30000):
                                                     "Chrome/120.0 Safari/537.36")
                 page.goto(url, wait_until="networkidle", timeout=timeout_ms)
                 _scroll_through(page)
-                result["screenshot_desktop_b64"] = base64.b64encode(
-                    page.screenshot(full_page=True, type="jpeg", quality=85)
-                ).decode()
-                result["computed_styles"] = page.evaluate(_COMPUTED_STYLE_JS)
+                screenshot_bytes, matched = _capture_screenshot(page, section_hint)
+                result["screenshot_desktop_b64"] = base64.b64encode(screenshot_bytes).decode()
+                result["section_matched"] = matched
+                result["computed_styles"] = page.evaluate(_COMPUTED_STYLE_JS, section_hint)
                 page.close()
 
                 # Mobile pass: just the screenshot (styles already captured above)
                 mobile_page = browser.new_page(viewport=MOBILE_VIEWPORT)
                 mobile_page.goto(url, wait_until="networkidle", timeout=timeout_ms)
                 _scroll_through(mobile_page)
-                result["screenshot_mobile_b64"] = base64.b64encode(
-                    mobile_page.screenshot(full_page=True, type="jpeg", quality=85)
-                ).decode()
+                mobile_screenshot_bytes, _ = _capture_screenshot(mobile_page, section_hint)
+                result["screenshot_mobile_b64"] = base64.b64encode(mobile_screenshot_bytes).decode()
                 mobile_page.close()
 
                 return result

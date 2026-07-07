@@ -226,6 +226,7 @@
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">REFERENCE URL *</label>
         <input id="sec-url" type="text" placeholder="https://competitor.com/products/example" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+        <input id="sec-section-hint" type="text" placeholder="Which section? Paste a short exact phrase from it, e.g. its headline (leave blank to capture the whole page)" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;margin-top:8px">
         <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
           <button id="sec-autocapture-btn" onclick="secAutoCapture()" style="background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px">🔍 Auto-capture from URL</button>
           <span id="sec-autocapture-status" style="font-size:11px;color:#888"></span>
@@ -969,6 +970,7 @@ let _secReferenceUrl = '';
 
 async function secAutoCapture() {
   const url = document.getElementById('sec-url').value.trim();
+  const sectionHint = document.getElementById('sec-section-hint').value.trim();
   if (!url) { alert('Enter a reference URL first'); return; }
 
   const btn = document.getElementById('sec-autocapture-btn');
@@ -981,7 +983,7 @@ async function secAutoCapture() {
     const res = await fetch('/api/section-auto-capture', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url})
+      body: JSON.stringify({url, section_hint: sectionHint})
     });
     const {job_id} = await res.json();
 
@@ -1006,7 +1008,13 @@ async function secAutoCapture() {
             secPageContext = ev.page_context || null;
             document.getElementById('sec-img-thumb-desktop').innerHTML = `<img src="${secImages.desktop.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`;
             document.getElementById('sec-img-thumb-mobile').innerHTML = `<img src="${secImages.mobile.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`;
-            statusEl.textContent = '✅ Captured screenshots + real fonts/colors from the live page';
+            if (sectionHint && !ev.section_matched) {
+              statusEl.textContent = '⚠️ Captured the whole page — couldn\'t find that exact phrase, try a shorter/exact snippet.';
+            } else if (ev.section_matched) {
+              statusEl.textContent = '✅ Captured just that section + real fonts/colors from the live page';
+            } else {
+              statusEl.textContent = '✅ Captured full page + real fonts/colors from the live page';
+            }
           }
         }
       } catch(e) { console.error('poll error', e); }
