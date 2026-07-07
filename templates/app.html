@@ -227,11 +227,17 @@
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">REFERENCE URL *</label>
         <input id="sec-url" type="text" placeholder="https://competitor.com/products/example" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
         <input id="sec-section-hint" type="text" placeholder="Which section? Paste a short exact phrase from it, e.g. its headline (leave blank to capture the whole page)" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;box-sizing:border-box;margin-top:8px">
+        <div style="text-align:center;color:#555;font-size:11px;margin:6px 0">— or —</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="file" id="sec-template-input" accept="image/*" style="display:none" onchange="secHandleTemplate(this)">
+          <button onclick="document.getElementById('sec-template-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">📎 Upload a screenshot of that section</button>
+          <div id="sec-template-thumb"></div>
+        </div>
         <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
           <button id="sec-autocapture-btn" onclick="secAutoCapture()" style="background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px">🔍 Auto-capture from URL</button>
           <span id="sec-autocapture-status" style="font-size:11px;color:#888"></span>
         </div>
-        <div style="font-size:11px;color:#555;margin-top:4px">Opens the page in a real browser to grab screenshots + the site's actual fonts/colors automatically. Optional — you can still attach your own screenshots below instead or as well.</div>
+        <div style="font-size:11px;color:#555;margin-top:4px">Opens the page in a real browser to grab screenshots + the site's actual fonts/colors automatically. A screenshot upload (if given) takes priority over the text phrase for locating the right section. Optional — you can still attach your own screenshots below instead or as well.</div>
       </div>
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SECTION NAME <span style="color:#555">(optional — Claude will suggest one)</span></label>
@@ -966,7 +972,27 @@ async function pbDeleteHistory(id) {
 let secImages = {desktop: null, mobile: null};
 let secVideoFrames = null;
 let secPageContext = null;
+let secTemplateImage = null;
 let _secReferenceUrl = '';
+
+function secHandleTemplate(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const b64 = e.target.result.split(',')[1];
+    const ext = file.name.split('.').pop().toLowerCase();
+    const mimeMap = {jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',webp:'image/webp'};
+    secTemplateImage = {b64, media_type: mimeMap[ext]||'image/jpeg', dataUrl: e.target.result};
+    document.getElementById('sec-template-thumb').innerHTML = `
+      <div style="position:relative;display:inline-block">
+        <img src="${secTemplateImage.dataUrl}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid #333">
+        <button onclick="secTemplateImage=null;document.getElementById('sec-template-thumb').innerHTML=''" style="position:absolute;top:-6px;right:-6px;background:#333;border:none;color:#fff;border-radius:50%;width:16px;height:16px;font-size:10px;cursor:pointer;line-height:16px;padding:0">✕</button>
+      </div>`;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
 
 async function secAutoCapture() {
   const url = document.getElementById('sec-url').value.trim();
@@ -977,13 +1003,17 @@ async function secAutoCapture() {
   const statusEl = document.getElementById('sec-autocapture-status');
   btn.disabled = true;
   btn.textContent = '⏳ Capturing...';
-  statusEl.textContent = '🌐 Opening browser...';
+  statusEl.textContent = secTemplateImage ? '🌐 Opening browser + locating your screenshot...' : '🌐 Opening browser...';
 
   try {
     const res = await fetch('/api/section-auto-capture', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url, section_hint: sectionHint})
+      body: JSON.stringify({
+        url,
+        section_hint: sectionHint,
+        template_image: secTemplateImage ? {b64: secTemplateImage.b64, media_type: secTemplateImage.media_type} : null
+      })
     });
     const {job_id} = await res.json();
 
@@ -1008,10 +1038,13 @@ async function secAutoCapture() {
             secPageContext = ev.page_context || null;
             document.getElementById('sec-img-thumb-desktop').innerHTML = `<img src="${secImages.desktop.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`;
             document.getElementById('sec-img-thumb-mobile').innerHTML = `<img src="${secImages.mobile.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`;
-            if (sectionHint && !ev.section_matched) {
-              statusEl.textContent = '⚠️ Captured the whole page — couldn\'t find that exact phrase, try a shorter/exact snippet.';
+            if ((sectionHint || secTemplateImage) && !ev.section_matched) {
+              statusEl.textContent = secTemplateImage
+                ? '⚠️ Captured the whole page — couldn\'t visually match that screenshot, try a tighter crop or the text field instead.'
+                : '⚠️ Captured the whole page — couldn\'t find that exact phrase, try a shorter/exact snippet.';
             } else if (ev.section_matched) {
               statusEl.textContent = '✅ Captured just that section + real fonts/colors from the live page';
+              if (ev.matched_text) document.getElementById('sec-section-hint').value = ev.matched_text;
             } else {
               statusEl.textContent = '✅ Captured full page + real fonts/colors from the live page';
             }

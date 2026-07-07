@@ -1,5 +1,7 @@
 import base64
 
+import cv2
+import numpy as np
 from playwright.sync_api import sync_playwright
 
 DESKTOP_VIEWPORT = {"width": 1440, "height": 900}
@@ -34,6 +36,21 @@ _FIND_CONTAINER_JS = """
 (hint) => {
 """ + _FIND_CONTAINER_JS_BODY + """
   return findContainer(hint);
+}
+"""
+
+_LOCATE_AT_POINT_JS = """
+([x, y]) => {
+  let el = document.elementFromPoint(x, y);
+  if (!el) return null;
+  while (el && el !== document.body) {
+    const rect = el.getBoundingClientRect();
+    if (rect.height >= 150 && rect.height <= 1400 && rect.width >= 300) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return el;
 }
 """
 
@@ -99,40 +116,115 @@ def _capture_screenshot(page, section_hint):
     return page.screenshot(full_page=True, type="jpeg", quality=85), False
 
 
-def capture_page(url, section_hint=None, timeout_ms=30000):
+def _decode_image_bytes(raw_bytes):
+    arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
+def _locate_template(full_img, template_img, min_confidence=0.45):
+    """Multi-scale template matching (the uploaded screenshot may have been captured at a
+    different width/zoom than our viewport). Returns {x, y, width, height, confidence} in
+    full_img's pixel space, or None if no sufficiently confident match was found."""
+    if full_img is None or template_img is None:
+        return None
+    full_gray = cv2.cvtColor(full_img, cv2.COLOR_BGR2GRAY)
+    tmpl_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
+    th, tw = tmpl_gray.shape[:2]
+    fh, fw = full_gray.shape[:2]
+
+    best = None  # (score, x, y, w, h)
+    for scale in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5):
+        sw, sh = int(tw * scale), int(th * scale)
+        if sw < 20 or sh < 20 or sw > fw or sh > fh:
+            continue
+        resized = cv2.resize(tmpl_gray, (sw, sh))
+        result = cv2.matchTemplate(full_gray, resized, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if best is None or max_val > best[0]:
+            best = (max_val, max_loc[0], max_loc[1], sw, sh)
+
+    if best is None or best[0] < min_confidence:
+        return None
+    score, x, y, w, h = best
+    return {"x": x, "y": y, "width": w, "height": h, "confidence": float(score)}
+
+
+def _capture_by_image(page, template_b64):
+    """Try to locate the uploaded reference screenshot within the live page via multi-scale
+    template matching, then screenshot the containing DOM element and derive a short text
+    snippet from it (reused to locate the same section on the mobile viewport).
+    Returns (screenshot_bytes_or_None, matched_bool, derived_text_hint_or_None)."""
+    try:
+        full_bytes = page.screenshot(full_page=True, type="png")
+        full_img = _decode_image_bytes(full_bytes)
+        template_img = _decode_image_bytes(base64.b64decode(template_b64))
+        box = _locate_template(full_img, template_img)
+        if not box:
+            return None, False, None
+
+        cx = box["x"] + box["width"] // 2
+        cy = box["y"] + box["height"] // 2
+
+        page.evaluate("(y) => window.scrollTo(0, Math.max(0, y - 150))", cy)
+        scroll_y = page.evaluate("() => window.scrollY")
+
+        handle = page.evaluate_handle(_LOCATE_AT_POINT_JS, [cx, cy - scroll_y])
+        element = handle.as_element()
+        if not element:
+            return None, False, None
+
+        screenshot_bytes = element.screenshot(type="jpeg", quality=85)
+        text = (element.text_content() or "").strip()
+        text = " ".join(text.split())[:60] or None
+        return screenshot_bytes, True, text
+    except Exception:
+        return None, False, None
+
+
+def capture_page(url, section_hint=None, template_b64=None, timeout_ms=30000):
     """Launch headless Chromium, load the page, scroll through it, and capture:
     desktop + mobile screenshots, plus real computed styles/fonts for heading/body/button
     representative elements. Never raises — returns a dict with an "error" key on failure
     so callers can fall back to manual screenshots.
 
     section_hint: an optional short exact phrase of text visible in the target section
-    (e.g. a headline). When provided, the browser locates the smallest reasonably-sized
-    container wrapping that text and screenshots ONLY that section instead of the whole
-    page. If the phrase isn't found, silently falls back to a full-page screenshot."""
+    (e.g. a headline). template_b64: an optional base64 screenshot of the desired section —
+    if given, takes priority over section_hint and locates the section visually via
+    multi-scale template matching against a full-page screenshot, deriving a text hint from
+    the matched element for reuse on the mobile viewport. If neither locates a section,
+    falls back to a full-page screenshot."""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
                 result = {"error": None}
 
-                # Desktop pass: screenshot + computed styles
+                # Desktop pass
                 page = browser.new_page(viewport=DESKTOP_VIEWPORT,
                                          user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                                                     "Chrome/120.0 Safari/537.36")
                 page.goto(url, wait_until="networkidle", timeout=timeout_ms)
                 _scroll_through(page)
-                screenshot_bytes, matched = _capture_screenshot(page, section_hint)
+
+                screenshot_bytes, matched, derived_hint = None, False, None
+                if template_b64:
+                    screenshot_bytes, matched, derived_hint = _capture_by_image(page, template_b64)
+
+                if screenshot_bytes is None:
+                    screenshot_bytes, matched = _capture_screenshot(page, section_hint)
+
                 result["screenshot_desktop_b64"] = base64.b64encode(screenshot_bytes).decode()
                 result["section_matched"] = matched
-                result["computed_styles"] = page.evaluate(_COMPUTED_STYLE_JS, section_hint)
+                result["matched_text"] = derived_hint
+                result["computed_styles"] = page.evaluate(_COMPUTED_STYLE_JS, derived_hint or section_hint)
                 page.close()
 
-                # Mobile pass: just the screenshot (styles already captured above)
+                # Mobile pass: reuse the derived/given text hint to locate the same section
                 mobile_page = browser.new_page(viewport=MOBILE_VIEWPORT)
                 mobile_page.goto(url, wait_until="networkidle", timeout=timeout_ms)
                 _scroll_through(mobile_page)
-                mobile_screenshot_bytes, _ = _capture_screenshot(mobile_page, section_hint)
+                mobile_screenshot_bytes, _ = _capture_screenshot(mobile_page, derived_hint or section_hint)
                 result["screenshot_mobile_b64"] = base64.b64encode(mobile_screenshot_bytes).decode()
                 mobile_page.close()
 

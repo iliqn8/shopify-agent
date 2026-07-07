@@ -7,4 +7,5 @@ openai
 python-docx
 beautifulsoup4
 opencv-python-headless
+numpy
 playwright==1.48.0

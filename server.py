@@ -449,6 +449,8 @@ def section_auto_capture():
     data = request.json or {}
     url = data.get("url", "").strip()
     section_hint = data.get("section_hint", "").strip() or None
+    template_image = data.get("template_image")
+    template_b64 = template_image.get("b64") if template_image else None
     if not url:
         return jsonify({"error": "URL required"}), 400
 
@@ -459,7 +461,7 @@ def section_auto_capture():
         try:
             import browser_capture
             _section_jobs[job_id]["events"].append({"type": "status", "text": "🌐 Opening browser..."})
-            result = browser_capture.capture_page(url, section_hint)
+            result = browser_capture.capture_page(url, section_hint, template_b64)
             if result.get("error"):
                 _section_jobs[job_id]["events"].append({
                     "type": "done",
@@ -472,6 +474,7 @@ def section_auto_capture():
                     "screenshot_mobile_b64": result.get("screenshot_mobile_b64"),
                     "page_context": result.get("computed_styles"),
                     "section_matched": result.get("section_matched", False),
+                    "matched_text": result.get("matched_text"),
                 })
             _section_jobs[job_id]["done"] = True
         except Exception as e:
