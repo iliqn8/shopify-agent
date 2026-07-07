@@ -226,6 +226,11 @@
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">REFERENCE URL *</label>
         <input id="sec-url" type="text" placeholder="https://competitor.com/products/example" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <button id="sec-autocapture-btn" onclick="secAutoCapture()" style="background:#1e1e1e;border:1px solid #6366f1;color:#a5b4fc;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px">🔍 Auto-capture from URL</button>
+          <span id="sec-autocapture-status" style="font-size:11px;color:#888"></span>
+        </div>
+        <div style="font-size:11px;color:#555;margin-top:4px">Opens the page in a real browser to grab screenshots + the site's actual fonts/colors automatically. Optional — you can still attach your own screenshots below instead or as well.</div>
       </div>
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">SECTION NAME <span style="color:#555">(optional — Claude will suggest one)</span></label>
@@ -959,7 +964,59 @@ async function pbDeleteHistory(id) {
 
 let secImages = {desktop: null, mobile: null};
 let secVideoFrames = null;
+let secPageContext = null;
 let _secReferenceUrl = '';
+
+async function secAutoCapture() {
+  const url = document.getElementById('sec-url').value.trim();
+  if (!url) { alert('Enter a reference URL first'); return; }
+
+  const btn = document.getElementById('sec-autocapture-btn');
+  const statusEl = document.getElementById('sec-autocapture-status');
+  btn.disabled = true;
+  btn.textContent = '⏳ Capturing...';
+  statusEl.textContent = '🌐 Opening browser...';
+
+  try {
+    const res = await fetch('/api/section-auto-capture', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url})
+    });
+    const {job_id} = await res.json();
+
+    let since = 0;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/section-build-poll/${job_id}?since=${since}`);
+        const data = await r.json();
+        since += data.events.length;
+        for (const ev of data.events) {
+          if (ev.type === 'status') statusEl.textContent = ev.text;
+          if (ev.type === 'done') {
+            clearInterval(poll);
+            btn.disabled = false;
+            btn.textContent = '🔍 Auto-capture from URL';
+            if (ev.error) {
+              statusEl.textContent = '❌ ' + ev.error + ' — attach screenshots manually instead.';
+              return;
+            }
+            secImages.desktop = {b64: ev.screenshot_desktop_b64, filename: 'auto-desktop.jpg', media_type: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,' + ev.screenshot_desktop_b64};
+            secImages.mobile = {b64: ev.screenshot_mobile_b64, filename: 'auto-mobile.jpg', media_type: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,' + ev.screenshot_mobile_b64};
+            secPageContext = ev.page_context || null;
+            document.getElementById('sec-img-thumb-desktop').innerHTML = `<img src="${secImages.desktop.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`;
+            document.getElementById('sec-img-thumb-mobile').innerHTML = `<img src="${secImages.mobile.dataUrl}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`;
+            statusEl.textContent = '✅ Captured screenshots + real fonts/colors from the live page';
+          }
+        }
+      } catch(e) { console.error('poll error', e); }
+    }, 1500);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '🔍 Auto-capture from URL';
+    statusEl.textContent = '❌ ' + e.message;
+  }
+}
 
 async function secHandleVideo(input) {
   const file = input.files[0];
@@ -1034,7 +1091,8 @@ async function secGenerate() {
         notes: document.getElementById('sec-notes').value.trim(),
         image_desktop: {b64: secImages.desktop.b64, filename: secImages.desktop.filename, media_type: secImages.desktop.media_type},
         image_mobile: secImages.mobile ? {b64: secImages.mobile.b64, filename: secImages.mobile.filename, media_type: secImages.mobile.media_type} : null,
-        video_frames: secVideoFrames || null
+        video_frames: secVideoFrames || null,
+        page_context: secPageContext || null
       })
     });
     const {job_id} = await res.json();

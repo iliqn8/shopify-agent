@@ -443,6 +443,43 @@ def section_video_frames():
     return jsonify({"frames": frames})
 
 
+@app.route("/api/section-auto-capture", methods=["POST"])
+def section_auto_capture():
+    import uuid as _uuid_cap
+    data = request.json or {}
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "URL required"}), 400
+
+    job_id = str(_uuid_cap.uuid4())
+    _section_jobs[job_id] = {"events": [], "done": False}
+
+    def run():
+        try:
+            import browser_capture
+            _section_jobs[job_id]["events"].append({"type": "status", "text": "🌐 Opening browser..."})
+            result = browser_capture.capture_page(url)
+            if result.get("error"):
+                _section_jobs[job_id]["events"].append({
+                    "type": "done",
+                    "error": result["error"],
+                })
+            else:
+                _section_jobs[job_id]["events"].append({
+                    "type": "done",
+                    "screenshot_desktop_b64": result.get("screenshot_desktop_b64"),
+                    "screenshot_mobile_b64": result.get("screenshot_mobile_b64"),
+                    "page_context": result.get("computed_styles"),
+                })
+            _section_jobs[job_id]["done"] = True
+        except Exception as e:
+            _section_jobs[job_id]["events"].append({"type": "done", "error": str(e)})
+            _section_jobs[job_id]["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/section-build-start", methods=["POST"])
 def section_build_start():
     import uuid as _uuid5
@@ -453,6 +490,7 @@ def section_build_start():
     image_desktop = data.get("image_desktop")
     image_mobile = data.get("image_mobile")
     video_frames = data.get("video_frames") or None
+    page_context = data.get("page_context") or None
 
     if not reference_url:
         return jsonify({"error": "Reference URL required"}), 400
@@ -466,7 +504,8 @@ def section_build_start():
         try:
             import section_builder
             for event in section_builder.build_stream(
-                reference_url, image_desktop, image_mobile, section_name, notes, video_frames
+                reference_url, image_desktop, image_mobile, section_name, notes, video_frames,
+                page_context
             ):
                 _section_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":
@@ -504,6 +543,7 @@ def section_edit_start():
     image_mobile = data.get("image_mobile")
     video_frames = data.get("video_frames") or None
     extra_images = data.get("extra_images") or None
+    page_context = data.get("page_context") or None
 
     if not current_code:
         return jsonify({"error": "No existing code to edit"}), 400
@@ -518,7 +558,7 @@ def section_edit_start():
             import section_builder
             for event in section_builder.edit_stream(
                 current_code, edit_instructions, reference_url, image_desktop, image_mobile,
-                video_frames, extra_images, section_name
+                video_frames, extra_images, section_name, page_context
             ):
                 _section_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":

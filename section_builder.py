@@ -52,6 +52,19 @@ section's own class — never with JavaScript. Wrap continuous/looping animation
 disable it. If no animation frames are attached, do not invent any motion/animation that isn't
 visible in the static screenshots.
 
+REAL EXTRACTED STYLES (STRICT, only when provided — ground truth, not a guess)
+[PAGE_CONTEXT]
+The values above (if present) were read directly from the live page's computed CSS via a real
+browser — not estimated from a screenshot. Where they overlap with what you'd otherwise visually
+estimate (font-family, font-size, color, background-color), USE THESE EXACT VALUES instead of
+approximating from pixels. This is the single most reliable signal you have for typography and
+color fidelity — prioritize it over your own visual judgement whenever both are available. If a
+"font_face_names"/"font_links" list is present, that is the real font the site loads — reference
+the same font name in your `font-family` declarations (falling back to
+`var(--font-heading-family)`/`var(--font-body-family)` is still required per the rule below, but
+knowing the real name helps you judge size/weight/spacing accurately even when the merchant's own
+theme font differs).
+
 WHAT TO BUILD
 Analyze ONLY the section visible in the screenshot (ignore header/footer/other sections unless they
 are literally inside the screenshot). Recreate it as a brand-new, custom Shopify section.
@@ -329,10 +342,37 @@ def unique_asset_key(section_name):
     return key
 
 
-def build_stream(reference_url, image_desktop, image_mobile=None, section_name=None, notes=None, video_frames=None):
+def _format_page_context(page_context):
+    """Turn a browser_capture.capture_page()-style computed_styles dict into readable text
+    for the prompt. Returns a placeholder message if nothing was captured."""
+    if not page_context:
+        return "(none provided — no live browser capture was run for this generation)"
+
+    lines = []
+    for key, label in [("heading", "Heading element"), ("body", "Body text element"), ("button", "Button element")]:
+        el = page_context.get(key)
+        if el:
+            lines.append(
+                f"- {label} (<{el.get('tag')}>): font-family: {el.get('font_family')}; "
+                f"font-size: {el.get('font_size')}; font-weight: {el.get('font_weight')}; "
+                f"color: {el.get('color')}; background-color: {el.get('background_color')}"
+            )
+    if page_context.get("page_background"):
+        lines.append(f"- Page background-color: {page_context['page_background']}")
+    if page_context.get("font_face_names"):
+        lines.append(f"- Custom @font-face names loaded by the page: {', '.join(page_context['font_face_names'])}")
+    if page_context.get("font_links"):
+        lines.append(f"- Font stylesheet links: {', '.join(page_context['font_links'])}")
+
+    return "\n".join(lines) if lines else "(browser capture ran but found no usable computed styles)"
+
+
+def build_stream(reference_url, image_desktop, image_mobile=None, section_name=None, notes=None,
+                  video_frames=None, page_context=None):
     """Generator yielding {type: status/done} events.
     image_desktop / image_mobile = {b64, filename, media_type} dicts (image_mobile optional).
-    video_frames = list of {b64, media_type} dicts extracted from an optional animation video."""
+    video_frames = list of {b64, media_type} dicts extracted from an optional animation video.
+    page_context = optional computed_styles dict from browser_capture.capture_page()."""
     yield {"type": "status", "text": "🌐 Fetching reference page..."}
     title, page_text = fetch_page_text(reference_url)
 
@@ -342,7 +382,8 @@ def build_stream(reference_url, image_desktop, image_mobile=None, section_name=N
     prompt = (SECTION_PROMPT_TEMPLATE
               .replace("[REFERENCE_URL]", reference_url)
               .replace("[PAGE_TEXT]", page_text or "(no page text could be fetched)")
-              .replace("[MERCHANT_NOTES]", notes.strip() if notes and notes.strip() else "(none provided)"))
+              .replace("[MERCHANT_NOTES]", notes.strip() if notes and notes.strip() else "(none provided)")
+              .replace("[PAGE_CONTEXT]", _format_page_context(page_context)))
 
     content = [
         {"type": "text", "text": "DESKTOP SCREENSHOT (reference for the desktop layout):"},
@@ -413,6 +454,9 @@ RULES FOR THIS REVISION (STRICT)
 - If images labeled "ANIMATION FRAME" are attached, they show the requested motion/animation in
   chronological order — recreate it with CSS `@keyframes`/`transition` as usual (never JavaScript).
 
+REAL EXTRACTED STYLES (only when provided — ground truth, not a guess)
+[PAGE_CONTEXT]
+
 OUTPUT FORMAT (STRICT)
 Output ONE thing only: the COMPLETE revised `.liquid` section file (not a diff, not just the
 changed lines), wrapped in one ```liquid code fence and nothing else — no explanation before or
@@ -421,17 +465,20 @@ after the fence.
 
 
 def edit_stream(current_code, edit_instructions, reference_url=None, image_desktop=None,
-                 image_mobile=None, video_frames=None, extra_images=None, section_name=None):
+                 image_mobile=None, video_frames=None, extra_images=None, section_name=None,
+                 page_context=None):
     """Generator yielding {type: status/done} events. Revises an already-generated section's
     liquid code based on the merchant's follow-up correction instructions.
     extra_images = list of {b64, media_type} dicts attached specifically to illustrate this edit
     (e.g. a marked-up screenshot or a different visual example) — distinct from the original
-    desktop/mobile reference screenshots."""
+    desktop/mobile reference screenshots.
+    page_context = optional computed_styles dict from browser_capture.capture_page()."""
     yield {"type": "status", "text": "🔧 Applying your changes..."}
 
     prompt = (EDIT_PROMPT_TEMPLATE
               .replace("[CURRENT_CODE]", current_code)
-              .replace("[EDIT_INSTRUCTIONS]", edit_instructions.strip()))
+              .replace("[EDIT_INSTRUCTIONS]", edit_instructions.strip())
+              .replace("[PAGE_CONTEXT]", _format_page_context(page_context)))
 
     content = []
     if image_desktop:

@@ -7,3 +7,4 @@ openai
 python-docx
 beautifulsoup4
 opencv-python-headless
+playwright
