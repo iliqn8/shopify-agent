@@ -286,7 +286,7 @@ def capture_page(url, section_hint=None, template_b64=None, timeout_ms=30000):
                                          user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                                                     "Chrome/120.0 Safari/537.36")
-                page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                _goto_robust(page, url, timeout_ms)
                 _scroll_through(page)
 
                 screenshot_bytes, matched, derived_hint = None, False, None
@@ -304,7 +304,7 @@ def capture_page(url, section_hint=None, template_b64=None, timeout_ms=30000):
 
                 # Mobile pass: reuse the derived/given text hint to locate the same section
                 mobile_page = browser.new_page(viewport=MOBILE_VIEWPORT)
-                mobile_page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+                _goto_robust(mobile_page, url, timeout_ms)
                 _scroll_through(mobile_page)
                 mobile_screenshot_bytes, _ = _capture_screenshot(mobile_page, derived_hint or section_hint)
                 result["screenshot_mobile_b64"] = base64.b64encode(mobile_screenshot_bytes).decode()
@@ -315,6 +315,19 @@ def capture_page(url, section_hint=None, template_b64=None, timeout_ms=30000):
                 browser.close()
     except Exception as e:
         return {"error": str(e)}
+
+
+def _goto_robust(page, url, timeout_ms):
+    """Navigate with a wait strategy that tolerates real-world e-commerce pages: many sites
+    never reach true "networkidle" because of chat widgets/analytics/tracking pixels polling
+    continuously in the background, which made that wait strategy time out constantly. "load"
+    (the page's load event) is far more reliable, plus a short settle pause for above-the-fold
+    JS rendering to catch up before we start scrolling/screenshotting."""
+    try:
+        page.goto(url, wait_until="load", timeout=timeout_ms)
+    except Exception:
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    page.wait_for_timeout(1500)
 
 
 def _scroll_through(page, step=400, pause_ms=120):

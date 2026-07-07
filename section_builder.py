@@ -113,6 +113,43 @@ with each card as `flex: 0 0 auto; scroll-snap-align: start;` and an explicit ca
 partial-next-card peek matches the screenshot. Include ALL items visible across the full width of
 the reference (don't stop at only as many as fit in one viewport) as separate blocks.
 
+DESKTOP MOUSE DRAG-TO-SCROLL (STRICT)
+CSS `scroll-snap`/`overflow-x: auto` alone lets people scroll a carousel with a trackpad, mouse
+wheel, or touch swipe — but NOT by clicking and dragging with a mouse, which real carousel
+libraries (Swiper, Slick, etc. — what most reference sites actually use) support out of the box.
+Real visitors on desktop WILL try to click-and-drag the row, and if nothing happens it reads as
+broken. So every horizontal-scroll carousel MUST also include a small vanilla-JS pointer-drag
+handler — this is a basic interaction control (like the mute toggle button), not a decorative
+"animation", so a short inline `<script>` is required here even though animations themselves must
+stay pure CSS. Scope it to this exact section instance using `{{ section.id }}` so multiple copies
+of the section on one page never conflict, e.g.:
+```html
+<script>
+(function() {
+  var track = document.getElementById('{{ section_class }}-track');
+  if (!track) return;
+  var isDown = false, startX = 0, scrollStart = 0;
+  track.addEventListener('mousedown', function(e) {
+    isDown = true;
+    track.classList.add('is-dragging');
+    startX = e.pageX;
+    scrollStart = track.scrollLeft;
+  });
+  ['mouseup', 'mouseleave'].forEach(function(evt) {
+    track.addEventListener(evt, function() { isDown = false; track.classList.remove('is-dragging'); });
+  });
+  track.addEventListener('mousemove', function(e) {
+    if (!isDown) return;
+    e.preventDefault();
+    track.scrollLeft = scrollStart - (e.pageX - startX);
+  });
+})();
+</script>
+```
+(give the scrollable track element an `id="{{ section_class }}-track"` so this can select it).
+Add `.is-dragging { cursor: grabbing; user-select: none; }` and a default `cursor: grab;` on the
+track in the CSS so it's visually obvious it's draggable.
+
 NO INVENTED DECORATION (STRICT)
 Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
 floating bubbles, badges, or graphics that are not present in the reference image, even if you think
@@ -221,7 +258,10 @@ The file MUST contain, in this order:
      "image_picker" for images, "text" for short strings, "richtext"/"textarea" for longer
      copy, "color_scheme" for the section's colors (use section.settings.color_scheme with
      a color-{{ section.settings.color_scheme }} class — do NOT hardcode colors that should
-     follow the merchant's theme), and "url" for any button/link targets.
+     follow the merchant's theme), and "url" for any button/link targets. The `color_scheme`
+     setting's `"default"` MUST be `"scheme-1"` — that is the universal Dawn/OS 2.0 convention
+     (every theme ships scheme-1 through at least scheme-5); never invent a different default
+     name like "background-1", which doesn't exist and breaks the section when added.
    - "blocks": if there are ANY repeated items (icon rows, feature cards, testimonials, logos,
      steps), define block "type" entries each with their own "name" and "settings". In the
      Liquid body loop with {% for block in section.blocks %} and put {{ block.shopify_attributes }}
@@ -273,6 +313,9 @@ SELF-CHECK BEFORE YOU SEND
 - Any single visually-emphasized "featured" item among carousel siblings is keyed off a
   Liquid-computed true middle position (`block_count | plus: 1 | divided_by: 2`), never a separate
   manually-set numeric setting the merchant would have to keep in sync themselves.
+- Any horizontal-scroll carousel includes the mousedown/mousemove drag-to-scroll `<script>`
+  (scoped via `{{ section.id }}`) so desktop mouse users can click-and-drag it, not just
+  scroll-wheel/touch — matching how real carousel libraries (Swiper etc.) actually behave.
 """
 
 
