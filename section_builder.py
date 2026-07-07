@@ -88,9 +88,9 @@ reference clearly shows a static photo card (no play/mute icon) — never guess;
 image and video, prefer `video` if ANY play/mute affordance is visible.
 
 FEATURED / CENTER ITEM IN A CAROUSEL (STRICT — static case only)
-This rule applies ONLY when the featured item is fixed/static (no autoplay, no motion between
-frames) — if the reference auto-advances and the enlarged slide changes over time, use the
-CAROUSEL ENGINE rule below instead, which handles this dynamically; do not apply both.
+This rule applies ONLY when the featured item is permanently fixed regardless of scroll position
+(no dynamic enlarge-on-scroll behavior) — if the reference dynamically enlarges whichever slide the
+visitor scrolls to the center, use the CAROUSEL ENGINE rule below instead; do not apply both.
 If the reference shows one card in a row visually emphasized (larger, centered, elevated) among
 otherwise-equal siblings, do NOT expose a separate numeric "which position is featured" setting
 (e.g. a `range` setting like `featured_index`) — merchants can't intuit what number to type, and it
@@ -116,18 +116,18 @@ with each card as `flex: 0 0 auto; scroll-snap-align: start;` and an explicit ca
 partial-next-card peek matches the screenshot. Include ALL items visible across the full width of
 the reference (don't stop at only as many as fit in one viewport) as separate blocks.
 
-CAROUSEL ENGINE — AUTOPLAY + CENTER-ACTIVE SLIDE + DRAG (STRICT)
-Real reference carousels (Swiper, Slick, etc.) usually do THREE things our CSS alone can't:
-(1) auto-advance to the next slide every few seconds with no user input, (2) dynamically enlarge
-whichever slide is CURRENTLY centered as it scrolls/auto-advances (not a fixed block position —
-the enlarged one changes continuously as the carousel moves), (3) let desktop users click-and-drag
-with a mouse to scroll (native `overflow-x` only responds to trackpad/wheel/touch, not mouse drag).
-Look at the screenshot(s)/notes/animation frames for signs of this (a card sitting in the middle
-looking bigger, motion between frames, a source carousel library evident in the real DOM
-structure) — if present, you MUST include the exact engine below verbatim, changing ONLY the
-literal string `SECTION_CLASS` throughout to this section's own `{{ section_class }}` Liquid
-variable (do not rewrite the logic yourself — this exact code is already tested and known to
-work; reinventing it from scratch is how subtle bugs creep in):
+CAROUSEL ENGINE — MANUAL DRAG + CENTER-ACTIVE SLIDE (STRICT, NEVER AUTOPLAY)
+Real reference carousels (Swiper, Slick, etc.) usually do TWO things our CSS alone can't:
+(1) dynamically enlarge whichever slide is CURRENTLY centered as the merchant's visitor scrolls it
+(not a fixed block position — the enlarged one changes as the row moves), (2) let desktop users
+click-and-drag with a mouse to scroll (native `overflow-x` only responds to trackpad/wheel/touch,
+not mouse drag). NEVER add automatic/timed advancing (no `setInterval`, no auto-scroll on a timer)
+— the carousel must only move when the visitor actively drags/scrolls/swipes it themselves. Look
+at the screenshot(s)/notes for signs of a dynamically-enlarging center slide or a source carousel
+library evident in the real DOM structure — if present, you MUST include the exact engine below
+verbatim, changing ONLY the literal string `SECTION_CLASS` throughout to this section's own
+`{{ section_class }}` Liquid variable (do not rewrite the logic yourself — this exact code is
+already tested and known to work; reinventing it from scratch is how subtle bugs creep in):
 ```html
 <script>
 (function() {
@@ -135,10 +135,7 @@ work; reinventing it from scratch is how subtle bugs creep in):
   if (!root) return;
   var slides = Array.prototype.slice.call(root.children);
   if (!slides.length) return;
-  var autoplayDelay = 3000;
-  var autoplayTimer = null;
   var isDown = false, startX = 0, scrollStart = 0;
-  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function currentIndex() {
     var rootRect = root.getBoundingClientRect();
@@ -163,21 +160,6 @@ work; reinventing it from scratch is how subtle bugs creep in):
       }
     });
   }
-  function scrollToIndex(i, smooth) {
-    var slide = slides[i];
-    if (!slide) return;
-    var target = slide.offsetLeft - (root.clientWidth - slide.clientWidth) / 2;
-    root.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
-  }
-  function nextSlide() { scrollToIndex((currentIndex() + 1) % slides.length, true); }
-  function startAutoplay() {
-    stopAutoplay();
-    if (reduceMotion) return;
-    autoplayTimer = setInterval(nextSlide, autoplayDelay);
-  }
-  function stopAutoplay() {
-    if (autoplayTimer) { clearInterval(autoplayTimer); autoplayTimer = null; }
-  }
 
   root.addEventListener('scroll', function() { window.requestAnimationFrame(setActive); }, { passive: true });
   root.addEventListener('mousedown', function(e) {
@@ -185,12 +167,9 @@ work; reinventing it from scratch is how subtle bugs creep in):
     root.classList.add('is-dragging');
     startX = e.pageX;
     scrollStart = root.scrollLeft;
-    stopAutoplay();
   });
   ['mouseup', 'mouseleave'].forEach(function(evt) {
-    root.addEventListener(evt, function() {
-      if (isDown) { isDown = false; root.classList.remove('is-dragging'); startAutoplay(); }
-    });
+    root.addEventListener(evt, function() { isDown = false; root.classList.remove('is-dragging'); });
   });
   root.addEventListener('mousemove', function(e) {
     if (!isDown) return;
@@ -199,7 +178,6 @@ work; reinventing it from scratch is how subtle bugs creep in):
   });
 
   setActive();
-  startAutoplay();
 })();
 </script>
 ```
@@ -217,10 +195,9 @@ Requirements this engine depends on — get these exactly right or it won't work
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
   this reason — the script drives playback, not the HTML attribute.
-- If the reference does NOT show autoplay/dynamic-center behavior (just a plain draggable static
-  row, no size change over time), skip this whole engine and use the simpler static
-  Liquid-computed `featured_position` approach from the rule below instead — don't add autoplay
-  that isn't actually in the reference.
+- If the reference does NOT show a dynamically-enlarging center slide at all (just a plain static
+  draggable row, no size change on any slide), skip this whole engine and use the simpler static
+  Liquid-computed `featured_position` approach from the rule above instead.
 
 NO INVENTED DECORATION (STRICT)
 Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
@@ -388,10 +365,10 @@ SELF-CHECK BEFORE YOU SEND
 - Any horizontal-scroll carousel includes the mousedown/mousemove drag-to-scroll behavior so
   desktop mouse users can click-and-drag it, not just scroll-wheel/touch — matching how real
   carousel libraries (Swiper etc.) actually behave.
-- If the reference auto-advances with a dynamically-enlarging center slide, the exact CAROUSEL
-  ENGINE script was included verbatim (only `SECTION_CLASS` renamed) — not a freehand
-  reimplementation — with `id="{{ section_class }}-track"` on the row and no extra wrapper div
-  between the track and its slide children.
+- If the reference has a dynamically-enlarging center slide, the exact CAROUSEL ENGINE script was
+  included verbatim (only `SECTION_CLASS` renamed) — not a freehand reimplementation, and with
+  ZERO `setInterval`/auto-advance — with `id="{{ section_class }}-track"` on the row and no extra
+  wrapper div between the track and its slide children.
 """
 
 
