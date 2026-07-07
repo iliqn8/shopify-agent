@@ -497,7 +497,7 @@ def build_stream(reference_url, image_desktop, image_mobile=None, section_name=N
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-8",
             max_tokens=8000,
             messages=[{"role": "user", "content": content}],
             timeout=180.0,
@@ -600,7 +600,7 @@ def edit_stream(current_code, edit_instructions, reference_url=None, image_deskt
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-8",
             max_tokens=8000,
             messages=[{"role": "user", "content": content}],
             timeout=180.0,
