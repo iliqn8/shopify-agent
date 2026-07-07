@@ -417,6 +417,45 @@ def _format_page_context(page_context):
     if page_context.get("font_links"):
         lines.append(f"- Font stylesheet links: {', '.join(page_context['font_links'])}")
 
+    structure = page_context.get("structure")
+    if structure:
+        container = structure.get("container", {})
+        lines.append("")
+        lines.append("REAL DOM STRUCTURE OF THE MATCHED SECTION (read directly from the live page — exact facts, not a guess):")
+        lines.append(
+            f"- Item row container: display={container.get('display')}, "
+            f"flex-direction={container.get('flex_direction')}, "
+            f"grid-template-columns={container.get('grid_template_columns')}, gap={container.get('gap')}, "
+            f"overflow-x={container.get('overflow_x')}, scroll-snap-type={container.get('scroll_snap_type')}, "
+            f"is_horizontally_scrollable={container.get('is_horizontally_scrollable')} "
+            f"(scrollWidth={container.get('scroll_width')} vs clientWidth={container.get('client_width')})"
+        )
+        lines.append(f"- Exact number of direct child items in that row: {structure.get('children_count')}")
+        children = structure.get("children_summary") or []
+        if children:
+            lines.append("- Each child item, in order, exactly as it exists in the real DOM:")
+            for i, c in enumerate(children):
+                media = "VIDEO" if c.get("has_video") else ("image" if c.get("has_image") else "no media")
+                lines.append(f"  {i + 1}. <{c.get('tag')}> {c.get('width')}x{c.get('height')}px, contains: {media}")
+        media_elements = structure.get("media_elements") or []
+        if media_elements:
+            lines.append(f"- Real media elements found ({len(media_elements)} total) — use these to know the EXACT "
+                          f"count and type (video vs image) of media, not what you'd guess from the screenshot alone:")
+            for m in media_elements[:10]:
+                lines.append(f"  - <{m.get('tag')}> {m.get('width')}x{m.get('height')}px"
+                              + (f", autoplay={m.get('autoplay')}, muted={m.get('muted')}, loop={m.get('loop')}"
+                                 if m.get("tag") == "video" else ""))
+        excerpt = structure.get("outer_html_excerpt")
+        if excerpt:
+            lines.append("- Raw HTML excerpt of the section (for structural reference only — do NOT copy classes/JS, "
+                          "just use it to understand real structure/attributes/alt text):")
+            lines.append(excerpt[:3000])
+        lines.append(
+            "Trust this structural data over your own visual estimate whenever they'd otherwise conflict — e.g. "
+            "if it says 7 children and you only counted 5 in the screenshot, build 7 blocks; if a child contains "
+            "a VIDEO element, use the video schema/video_tag rules, never image_picker for that one."
+        )
+
     return "\n".join(lines) if lines else "(browser capture ran but found no usable computed styles)"
 
 

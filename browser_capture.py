@@ -54,9 +54,89 @@ _LOCATE_AT_POINT_JS = """
 }
 """
 
+_STRUCTURE_JS_BODY = """
+  function describeContainer(el) {
+    const cs = getComputedStyle(el);
+    const scrollable = (cs.overflowX === 'auto' || cs.overflowX === 'scroll')
+                        && el.scrollWidth > el.clientWidth + 4;
+    return {
+      display: cs.display,
+      flex_direction: cs.flexDirection,
+      grid_template_columns: cs.gridTemplateColumns,
+      justify_content: cs.justifyContent,
+      align_items: cs.alignItems,
+      gap: cs.gap,
+      overflow_x: cs.overflowX,
+      scroll_snap_type: cs.scrollSnapType,
+      is_horizontally_scrollable: scrollable,
+      scroll_width: el.scrollWidth,
+      client_width: el.clientWidth,
+    };
+  }
+
+  function findScrollContainer(root) {
+    const all = [root, ...root.querySelectorAll('*')];
+    let best = null;
+    let bestCount = 1;
+    for (const el of all) {
+      const cs = getComputedStyle(el);
+      const isRow = cs.display === 'flex' && cs.flexDirection.indexOf('row') === 0;
+      const isGrid = cs.display === 'grid';
+      if ((isRow || isGrid) && el.children.length > bestCount) {
+        best = el;
+        bestCount = el.children.length;
+      }
+    }
+    return best || root;
+  }
+
+  function describeMedia(root) {
+    const out = [];
+    root.querySelectorAll('video, img').forEach((el) => {
+      if (out.length >= 20) return;
+      const rect = el.getBoundingClientRect();
+      out.push({
+        tag: el.tagName.toLowerCase(),
+        src: el.currentSrc || el.getAttribute('src') || null,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        autoplay: !!el.autoplay,
+        muted: !!el.muted,
+        loop: !!el.loop,
+        controls: !!el.controls,
+      });
+    });
+    return out;
+  }
+
+  function describeStructure(section) {
+    const scrollContainer = findScrollContainer(section);
+    const children = Array.from(scrollContainer.children).slice(0, 20).map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        tag: el.tagName.toLowerCase(),
+        classes: (el.className || '').toString().slice(0, 80),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        has_video: !!el.querySelector('video'),
+        has_image: !!el.querySelector('img'),
+      };
+    });
+    let html = section.outerHTML || '';
+    if (html.length > 6000) html = html.slice(0, 6000) + '... [truncated]';
+    return {
+      outer_html_excerpt: html,
+      container: describeContainer(scrollContainer),
+      children_count: scrollContainer.children.length,
+      children_summary: children,
+      media_elements: describeMedia(section),
+    };
+  }
+"""
+
 _COMPUTED_STYLE_JS = """
 (hint) => {
-""" + _FIND_CONTAINER_JS_BODY + """
+""" + _FIND_CONTAINER_JS_BODY + _STRUCTURE_JS_BODY + """
   function pick(el) {
     if (!el) return null;
     const cs = getComputedStyle(el);
@@ -70,7 +150,8 @@ _COMPUTED_STYLE_JS = """
     };
   }
 
-  const scope = findContainer(hint) || document;
+  const section = findContainer(hint);
+  const scope = section || document;
   const heading = scope.querySelector('h1, h2, h3');
   const body = scope.querySelector('p');
   const button = scope.querySelector('a.button, button, [class*="btn"], [class*="button"]');
@@ -97,6 +178,7 @@ _COMPUTED_STYLE_JS = """
     page_background: getComputedStyle(document.body).backgroundColor,
     font_links: fontLinks,
     font_face_names: Array.from(fontFaceNames),
+    structure: section ? describeStructure(section) : null,
   };
 }
 """
