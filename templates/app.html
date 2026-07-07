@@ -247,6 +247,18 @@
           <div id="sec-img-thumb-mobile"></div>
         </div>
       </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">ANIMATION VIDEO <span style="color:#555">(optional — for hover effects, carousels, transitions that a still image can't show)</span></label>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <input type="file" id="sec-video-input" accept="video/*" style="display:none" onchange="secHandleVideo(this)">
+          <button onclick="document.getElementById('sec-video-input').click()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">🎬 Attach video</button>
+          <div id="sec-video-status" style="color:#888;font-size:12px"></div>
+        </div>
+      </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">NOTES FOR CLAUDE <span style="color:#555">(optional — explain in words anything the screenshots don't make obvious)</span></label>
+        <textarea id="sec-notes" rows="3" placeholder="e.g. The button should say 'Add to Cart' instead of the label shown, and the icons rotate slowly on hover..." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+      </div>
     </div>
 
     <button id="sec-gen-btn" onclick="secGenerate()" style="margin-top:24px;width:100%;background:#6366f1;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
@@ -929,7 +941,32 @@ async function pbDeleteHistory(id) {
 // ── Section Builder ──────────────────────────────────────────────────────
 
 let secImages = {desktop: null, mobile: null};
+let secVideoFrames = null;
 let _secReferenceUrl = '';
+
+async function secHandleVideo(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('sec-video-status');
+  statusEl.textContent = '⏳ Extracting frames...';
+  secVideoFrames = null;
+
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch('/api/section-video-frames', {method: 'POST', body: fd});
+    const data = await res.json();
+    if (data.frames && data.frames.length) {
+      secVideoFrames = data.frames;
+      statusEl.textContent = `✅ ${data.frames.length} frames extracted from "${file.name}"`;
+    } else {
+      statusEl.textContent = '❌ ' + (data.error || 'Could not read this video');
+    }
+  } catch (e) {
+    statusEl.textContent = '❌ Upload failed: ' + e.message;
+  }
+  input.value = '';
+}
 
 function secHandleImage(input, device) {
   const file = input.files[0];
@@ -977,8 +1014,10 @@ async function secGenerate() {
       body: JSON.stringify({
         reference_url: referenceUrl,
         section_name: sectionName,
+        notes: document.getElementById('sec-notes').value.trim(),
         image_desktop: {b64: secImages.desktop.b64, filename: secImages.desktop.filename, media_type: secImages.desktop.media_type},
-        image_mobile: secImages.mobile ? {b64: secImages.mobile.b64, filename: secImages.mobile.filename, media_type: secImages.mobile.media_type} : null
+        image_mobile: secImages.mobile ? {b64: secImages.mobile.b64, filename: secImages.mobile.filename, media_type: secImages.mobile.media_type} : null,
+        video_frames: secVideoFrames || null
       })
     });
     const {job_id} = await res.json();

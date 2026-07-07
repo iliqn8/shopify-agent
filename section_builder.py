@@ -1,7 +1,10 @@
 import os
 import re
 import json
+import base64
+import tempfile
 import requests
+import cv2
 from bs4 import BeautifulSoup
 import anthropic
 import knowledge_base as kb
@@ -30,6 +33,24 @@ visibly present in the screenshot. Use the page text ONLY to source exact wordin
 copy, button labels) for the specific section shown in the screenshot; never invent or paraphrase
 copy that contradicts the fetched text. If the page text looks empty, garbled, or unrelated to the
 screenshot (e.g. a bot-block/JS-challenge page), fall back to reading text directly off the screenshot.
+
+MERCHANT'S WRITTEN NOTES
+The merchant may have added written clarifications about what to build or change — these are their
+own words and take priority over your own visual interpretation whenever they conflict:
+---NOTES START---
+[MERCHANT_NOTES]
+---NOTES END---
+
+ANIMATION REFERENCE FRAMES
+If frame images labeled "ANIMATION FRAME" are attached, they were extracted in chronological order
+from a short screen recording of an animated/moving part of the reference section (e.g. a hover
+effect, an auto-rotating carousel, a fade/slide transition, a marquee). Study how the element's
+position/opacity/size changes ACROSS the frames in sequence, then recreate that motion with native
+CSS (`@keyframes` + `animation`, or `transition` for hover/interaction states) scoped under the
+section's own class — never with JavaScript. Wrap continuous/looping animations in
+`@media (prefers-reduced-motion: reduce) { animation: none; }` so motion-sensitive visitors can
+disable it. If no animation frames are attached, do not invent any motion/animation that isn't
+visible in the static screenshots.
 
 WHAT TO BUILD
 Analyze ONLY the section visible in the screenshot (ignore header/footer/other sections unless they
@@ -210,6 +231,41 @@ def fetch_page_text(url, max_chars=15000):
     return title, "\n".join(lines)[:max_chars]
 
 
+def extract_video_frames(video_bytes, max_frames=6):
+    """Extract up to max_frames evenly-spaced JPEG frames from raw video bytes.
+    Returns a list of {b64, media_type} dicts, oldest-first. Never raises — returns [] on failure."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total <= 0:
+            cap.release()
+            return []
+
+        count = min(max_frames, total)
+        indices = [int(i * (total - 1) / max(count - 1, 1)) for i in range(count)]
+        frames = []
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok2:
+                frames.append({"b64": base64.b64encode(buf.tobytes()).decode(), "media_type": "image/jpeg"})
+        cap.release()
+        return frames
+    except Exception:
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 def _extract_liquid(text):
     m = re.search(r"```(?:liquid)?\s*\n(.*?)```", text, re.DOTALL)
     return m.group(1).strip() if m else text.strip()
@@ -273,9 +329,10 @@ def unique_asset_key(section_name):
     return key
 
 
-def build_stream(reference_url, image_desktop, image_mobile=None, section_name=None):
+def build_stream(reference_url, image_desktop, image_mobile=None, section_name=None, notes=None, video_frames=None):
     """Generator yielding {type: status/done} events.
-    image_desktop / image_mobile = {b64, filename, media_type} dicts (image_mobile optional)."""
+    image_desktop / image_mobile = {b64, filename, media_type} dicts (image_mobile optional).
+    video_frames = list of {b64, media_type} dicts extracted from an optional animation video."""
     yield {"type": "status", "text": "🌐 Fetching reference page..."}
     title, page_text = fetch_page_text(reference_url)
 
@@ -284,7 +341,8 @@ def build_stream(reference_url, image_desktop, image_mobile=None, section_name=N
     yield {"type": "status", "text": status_text}
     prompt = (SECTION_PROMPT_TEMPLATE
               .replace("[REFERENCE_URL]", reference_url)
-              .replace("[PAGE_TEXT]", page_text or "(no page text could be fetched)"))
+              .replace("[PAGE_TEXT]", page_text or "(no page text could be fetched)")
+              .replace("[MERCHANT_NOTES]", notes.strip() if notes and notes.strip() else "(none provided)"))
 
     content = [
         {"type": "text", "text": "DESKTOP SCREENSHOT (reference for the desktop layout):"},
@@ -296,6 +354,12 @@ def build_stream(reference_url, image_desktop, image_mobile=None, section_name=N
                                       "match this element order/stacking precisely, do not guess):"},
             {"type": "image", "source": {"type": "base64", "media_type": image_mobile["media_type"], "data": image_mobile["b64"]}},
         ]
+    if video_frames:
+        for i, frame in enumerate(video_frames):
+            content += [
+                {"type": "text", "text": f"ANIMATION FRAME {i + 1}/{len(video_frames)} (chronological order):"},
+                {"type": "image", "source": {"type": "base64", "media_type": frame["media_type"], "data": frame["b64"]}},
+            ]
     content.append({"type": "text", "text": prompt})
 
     try:

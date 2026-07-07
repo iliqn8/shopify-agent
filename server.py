@@ -431,14 +431,28 @@ def product_build_poll(job_id):
 _section_jobs = {}
 
 
+@app.route("/api/section-video-frames", methods=["POST"])
+def section_video_frames():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file"}), 400
+    import section_builder
+    frames = section_builder.extract_video_frames(f.read())
+    if not frames:
+        return jsonify({"error": "Could not read frames from this video"}), 400
+    return jsonify({"frames": frames})
+
+
 @app.route("/api/section-build-start", methods=["POST"])
 def section_build_start():
     import uuid as _uuid5
     data = request.json or {}
     reference_url = data.get("reference_url", "").strip()
     section_name = data.get("section_name", "").strip() or None
+    notes = data.get("notes", "").strip() or None
     image_desktop = data.get("image_desktop")
     image_mobile = data.get("image_mobile")
+    video_frames = data.get("video_frames") or None
 
     if not reference_url:
         return jsonify({"error": "Reference URL required"}), 400
@@ -451,7 +465,9 @@ def section_build_start():
     def run():
         try:
             import section_builder
-            for event in section_builder.build_stream(reference_url, image_desktop, image_mobile, section_name):
+            for event in section_builder.build_stream(
+                reference_url, image_desktop, image_mobile, section_name, notes, video_frames
+            ):
                 _section_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":
                     _section_jobs[job_id]["done"] = True
