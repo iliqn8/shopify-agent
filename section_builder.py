@@ -215,9 +215,7 @@ Requirements this engine depends on — get these exactly right or it won't work
   slides) — the script reads `root.children` directly, and click-to-center walks up from the click
   target to find which direct child was clicked, so it works no matter what's nested inside a slide
   (video, button, etc.) — clicking the mute button still also re-centers its slide, which is fine.
-- CSS structure (STRICT — this is exactly how real reference carousels do it, verified by
-  inspecting a live Swiper implementation's actual computed styles): use TWO nested layers per
-  slide, not one:
+- CSS structure (STRICT): use TWO nested layers per slide, not one:
   ```html
   <div class="SECTION_CLASS-slide" {{ block.shopify_attributes }}>   <!-- OUTER: fixed size, ALWAYS -->
     <div class="SECTION_CLASS-slide-inner">                          <!-- INNER: this one scales -->
@@ -228,38 +226,48 @@ Requirements this engine depends on — get these exactly right or it won't work
   ```css
   .SECTION_CLASS-slide {
     flex: 0 0 auto;
-    width: 300px; /* ONE fixed width — the SAME value at every breakpoint, never changes */
+    width: 230px; /* ONE fixed width = the NEUTRAL/resting size — the SAME value at every
+                     breakpoint and every slide, active or not, never changes */
+    z-index: 1;
+  }
+  .SECTION_CLASS-slide.is-active {
+    z-index: 2; /* so the enlarged slide paints above its neighbors, never below */
   }
   .SECTION_CLASS-slide-inner {
-    transform: scale(0.73);
+    width: 100%;
+    height: 100%;
+    transform: scale(1);
     opacity: 0.9;
     transition: transform 0.35s ease, opacity 0.35s ease;
     transform-origin: center;
   }
   .SECTION_CLASS-slide.is-active .SECTION_CLASS-slide-inner {
-    transform: scale(1);
+    transform: scale(1.3); /* ratio = desired-active-width / outer-width, e.g. 300/230 = 1.304 */
     opacity: 1;
   }
   ```
-  The OUTER box's width NEVER changes — not with media queries, not with `.is-active`, ever. This
-  is the entire trick: because outer boxes are always identical and fixed, slides can never overlap
-  or push each other, and there is no "jump" or stale-padding class of bug to worry about at all.
-  All of the enlarge/shrink effect happens on the INNER wrapper via `transform: scale()` (measured
-  real-world values: inactive ≈ scale(0.73) + opacity 0.9, active = scale(1) + opacity 1) — since
-  the inner element's box model space is centered within its (constant-size) outer parent, the
-  shrunk inner content simply appears smaller within unchanged, non-overlapping outer slots. The
-  script above already toggles `is-active` on the OUTER slide element — nothing else to change.
-  Do NOT also add a Liquid `{% if forloop.index == ... %}` featured-position check for this case;
-  they'd conflict. Add `.is-dragging { cursor: grabbing; user-select: none; }` and `cursor: grab;`
-  on the track by default.
-- Track centering padding is now simple and can't go stale: `padding: 0 calc(50% - 150px);` (half
-  of the ONE constant outer slide width, 300px in this example) — the same formula at every
+  The OUTER box's width NEVER changes — not with media queries, not with `.is-active`, ever, so
+  slides can never push/reflow each other and there is no "jump" or stale-padding bug class.
+  CRITICAL — scale UP for the active slide, do NOT scale DOWN the inactive ones: pick the OUTER
+  width to match the slide's RESTING/neutral size, and grow the active slide past it with
+  `scale() > 1`, relying on `z-index` so it paints over its neighbors without shifting them
+  (transform never affects layout, at any ratio, so this is always safe). The opposite approach —
+  making the outer box match the ENLARGED size and shrinking inactive slides with `scale() < 1` —
+  looks identical for the single active slide, but leaves every RESTING slide sitting inside a
+  box far bigger than its shrunk visible content, which shows up as a huge dead-looking gap
+  between every neighboring pair of thumbnails (confirmed by measurement: a 300px outer box with
+  inactive scaled to 0.73 left ~86px of empty space between two resting slides, even with the
+  actual `gap` property set to only a few px — reducing `gap` alone does nothing to fix this,
+  because the empty space is inside each slide's own box, not between the boxes). Since only one
+  slide is ever active at a time, optimize the CSS for how it looks at REST (tight, close
+  thumbnails) and let the active slide's growth+overlap be the deliberate "pop out" effect.
+- Track centering padding is now simple and can't go stale: `padding: 0 calc(50% - 115px);` (half
+  of the ONE constant outer slide width, 230px in this example) — the same formula at every
   breakpoint since the outer width never changes between them.
 - Pick ONE outer slide width sized reasonably for the smallest viewport you support (Dawn's 320px
   minimum) — since it no longer changes per breakpoint, don't make it so wide that mobile can't
-  show any neighbor peek at all. Matching the real reference: ~300px works fine even down to
-  ~360-390px mobile viewports (neighbors just show a smaller sliver on narrow screens, which is
-  the expected/correct look — do not try to shrink the outer box for mobile).
+  show several neighbors. A gap of ~8-12px between resting thumbnails reads as "close together";
+  much more than that looks broken/sparse.
 - The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
@@ -437,12 +445,15 @@ SELF-CHECK BEFORE YOU SEND
 - If the reference has a dynamically-enlarging center slide, the exact CAROUSEL ENGINE script was
   included verbatim (only `SECTION_CLASS` renamed) — not a freehand reimplementation, and with
   ZERO `setInterval`/auto-advance — with `id="{{ section_class }}-track"` on the row. Each slide
-  uses the two-layer OUTER (fixed width, never changes, not even in `.is-active` or any media
-  query) + INNER (`transform: scale()`/`opacity` toggle between inactive and `.is-active`)
-  structure — never a single-layer slide with `width`/`height`/`flex-basis` transitions or scale
-  applied directly to the outer slide, both of which shove sibling slides sideways or make the
-  outer boxes overlap. Clicking a non-active slide re-centers it (click-to-center is part of the
-  same engine, no extra code needed).
+  uses the two-layer OUTER (fixed width = the NEUTRAL/resting size, never changes, not even in
+  `.is-active` or any media query) + INNER (`transform: scale()`/`opacity` toggle) structure —
+  never a single-layer slide with `width`/`height`/`flex-basis` transitions or scale applied
+  directly to the outer slide (shoves siblings sideways / overlaps outer boxes). The inner wrapper
+  SCALES UP for `.is-active` (never scales down the inactive ones to fit a bigger box) — sizing
+  the outer box to match the enlarged state and shrinking everything else inside it leaves a big
+  dead gap around every resting thumbnail, which looks broken and doesn't respond to changing the
+  track's `gap` property at all. Clicking a non-active slide re-centers it (click-to-center is
+  part of the same engine, no extra code needed).
 - The track's centering `padding: calc(50% - Npx)` uses HALF THE CONSTANT OUTER slide width for N
   — the same formula at every breakpoint, since the outer width never changes between them.
 """
