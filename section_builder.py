@@ -268,6 +268,17 @@ Requirements this engine depends on — get these exactly right or it won't work
   minimum) — since it no longer changes per breakpoint, don't make it so wide that mobile can't
   show several neighbors. A gap of ~8-12px between resting thumbnails reads as "close together";
   much more than that looks broken/sparse.
+- CRITICAL — the track's VERTICAL padding must be big enough to fit the scaled-up active slide, or
+  its top/bottom get silently clipped. A track with `overflow-x: auto` and no explicit `overflow-y`
+  still clips vertical overflow: per the CSS spec, if one axis is non-`visible`, the browser forces
+  the other axis to behave as `auto` too (mixing `auto` X with true `visible` Y isn't allowed), so
+  anything taller than the track's own padded box — like a slide that just grew via `scale(1.1+)`
+  — gets cut off top and bottom even though nothing in the CSS says `overflow-y: hidden`. You cannot
+  fix this by setting `overflow-y: visible` (browsers won't honor it while overflow-x is auto).
+  The real fix: give the track's own top/bottom padding enough extra room for the growth, e.g.
+  `vertical_padding ≈ base_card_height * (active_scale - 1) / 2` plus a little breathing space —
+  never leave it at some small arbitrary value like `20px` if the active-scale card is noticeably
+  taller than that once grown.
 - The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
