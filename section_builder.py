@@ -312,6 +312,23 @@ you intend to be empty — a placeholder box, a spacer column, a decorative over
 `display: block;` (or `flex`/`grid` if that's what its layout role requires) stated explicitly in its
 own CSS rule, never left to the default.
 
+TEXT INSIDE FLEX/GRID CONTAINERS MUST NOT OVERFLOW ITS BOX (STRICT)
+Any text element (heading, label, title) that sits inside a `display: flex` container — especially
+`flex-direction: column` cards/columns with `align-items: center` — needs `min-width: 0;` on itself
+AND on any flex-item ancestor between it and the constrained parent. Flex children default to
+`min-width: auto`, which lets them refuse to shrink below their own max-content width even when the
+container is narrower — the text silently overflows past its padding, or past a sibling
+decoration (a border box, a highlight outline) sitting at that same width, instead of wrapping
+properly. This is easy to miss because it renders fine on wide/desktop layouts and only overflows
+once the column gets narrow (tablet/mobile breakpoints), and it looks fine in your own reasoning
+since nothing about the Liquid/CSS looks wrong on paper. Confirmed on a real published section: a
+column title wrapped to 3 lines on mobile and its widest line measured wider than the space
+actually available inside its own padded parent, leaving only ~1px of clearance before a decorative
+border around that column — invisible-thin margin that reads as "text touching/crossing the
+border" the moment font rendering differs even slightly. Add `min-width: 0; max-width: 100%;` to
+the text element, and `min-width: 0;` to its flex-container ancestor, any time text lives inside a
+narrowing flex column.
+
 TYPOGRAPHY & SIZE FIDELITY (STRICT)
 The goal is a PIXEL-FAITHFUL match to the screenshot, not a generic Dawn-style approximation:
 - NEVER let text fall back to the browser's default font. Explicitly set
