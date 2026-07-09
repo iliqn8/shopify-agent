@@ -116,27 +116,83 @@ with each card as `flex: 0 0 auto; scroll-snap-align: start;` and an explicit ca
 partial-next-card peek matches the screenshot. Include ALL items visible across the full width of
 the reference (don't stop at only as many as fit in one viewport) as separate blocks.
 
-CAROUSEL ENGINE — MANUAL DRAG + CLICK-TO-CENTER + ACTIVE SLIDE (STRICT, NEVER AUTOPLAY)
-Real reference carousels (Swiper, Slick, etc.) usually do THREE things our CSS alone can't:
+CAROUSEL ENGINE — MANUAL DRAG + CLICK-TO-CENTER + ACTIVE SLIDE + ARROWS + DOTS + INFINITE LOOP
+(STRICT, NEVER AUTOPLAY)
+Real reference carousels (Swiper, Slick, etc.) usually do several things our CSS alone can't:
 (1) dynamically enlarge whichever slide is CURRENTLY centered as the merchant's visitor scrolls it
 (not a fixed block position — the enlarged one changes as the row moves), (2) let desktop users
 click-and-drag with a mouse to scroll (native `overflow-x` only responds to trackpad/wheel/touch,
 not mouse drag), (3) let visitors click directly on a neighboring (non-active) slide to bring IT to
-center, not just drag. NEVER add automatic/timed advancing (no `setInterval`, no auto-scroll on a
-timer) — the carousel must only move when the visitor actively drags/scrolls/clicks it themselves.
+center, not just drag, (4) prev/next arrow buttons, (5) dot indicators below the row, (6) an
+infinite-loop illusion so there's always a slide peeking on BOTH sides, even at the very first/last
+real slide. NEVER add automatic/timed advancing (no `setInterval`, no auto-scroll on a timer) — the
+carousel must only move when the visitor actively drags/scrolls/clicks/taps it themselves.
 Look at the screenshot(s)/notes for signs of a dynamically-enlarging center slide or a source
 carousel library evident in the real DOM structure — if present, you MUST include the exact engine
 below verbatim, changing ONLY the literal string `SECTION_CLASS` throughout to this section's own
 `{{ section_class }}` Liquid variable (do not rewrite the logic yourself — this exact code is
-already tested and known to work; reinventing it from scratch is how subtle bugs creep in):
+already tested and known to work across multiple real sections; reinventing it from scratch is how
+subtle bugs creep back in):
+```html
+<div class="SECTION_CLASS-inner">                                    <!-- see max-width rule below -->
+  <div class="SECTION_CLASS-carousel">
+    <button type="button" class="SECTION_CLASS-arrow SECTION_CLASS-arrow-prev" aria-label="Previous" data-dir="-1">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+    </button>
+    <div class="SECTION_CLASS-track" id="SECTION_CLASS-track">
+      <!-- one direct-child slide per block, see structure rules below -->
+    </div>
+    <button type="button" class="SECTION_CLASS-arrow SECTION_CLASS-arrow-next" aria-label="Next" data-dir="1">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+    </button>
+  </div>
+  <div class="SECTION_CLASS-dots" id="SECTION_CLASS-dots" aria-hidden="true">
+    {%- for block in section.blocks -%}
+      <span class="SECTION_CLASS-dot" data-index="{{ forloop.index0 }}"></span>
+    {%- endfor -%}
+  </div>
+</div>
+```
 ```html
 <script>
 (function() {
   var root = document.getElementById('SECTION_CLASS-track');
   if (!root) return;
+  var realSlides = Array.prototype.slice.call(root.children);
+  var realCount = realSlides.length;
+  if (!realCount) return;
+  var dotsWrap = document.getElementById('SECTION_CLASS-dots');
+  var dots = dotsWrap ? Array.prototype.slice.call(dotsWrap.children) : [];
+
+  // Loop illusion: clone a couple of slides onto each end so there's always real-looking
+  // content peeking on BOTH sides, even when the first/last real slide is centered.
+  var cloneCount = Math.min(2, realCount - 1);
+  cloneCount = cloneCount < 0 ? 0 : cloneCount;
+  if (cloneCount > 0) {
+    var prepend = [];
+    var append = [];
+    for (var i = 0; i < cloneCount; i++) {
+      var srcPrepend = realSlides[realCount - cloneCount + i];
+      var clonePrepend = srcPrepend.cloneNode(true);
+      clonePrepend.setAttribute('data-clone', 'true');
+      clonePrepend.setAttribute('aria-hidden', 'true');
+      prepend.push(clonePrepend);
+
+      var srcAppend = realSlides[i];
+      var cloneAppend = srcAppend.cloneNode(true);
+      cloneAppend.setAttribute('data-clone', 'true');
+      cloneAppend.setAttribute('aria-hidden', 'true');
+      append.push(cloneAppend);
+    }
+    // NOTE: insertBefore(node, root.firstChild) in a forward loop reverses the visual order of
+    // whatever you insert (each insert becomes the new firstChild) - iterate the prepend list in
+    // REVERSE so the final DOM order is correct. appendChild does NOT have this problem.
+    prepend.slice().reverse().forEach(function(c) { root.insertBefore(c, root.firstChild); });
+    append.forEach(function(c) { root.appendChild(c); });
+  }
+
   var slides = Array.prototype.slice.call(root.children);
-  if (!slides.length) return;
-  var isDown = false, startX = 0, scrollStart = 0, moved = false;
+  var isDown = false, startX = 0, scrollStart = 0, moved = false, isJumping = false;
 
   function currentIndex() {
     var rootRect = root.getBoundingClientRect();
@@ -149,6 +205,9 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
     });
     return idx;
   }
+  function realIndexFor(idx) {
+    return ((idx - cloneCount) % realCount + realCount) % realCount;
+  }
   function setActive() {
     var idx = currentIndex();
     slides.forEach(function(s, i) {
@@ -160,12 +219,17 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
         else { video.pause(); }
       }
     });
+    var real = realIndexFor(idx);
+    dots.forEach(function(d, i) { d.classList.toggle('is-active', i === real); });
   }
   function scrollToIndex(i, smooth) {
     var slide = slides[i];
     if (!slide) return;
     var target = slide.offsetLeft - (root.clientWidth - slide.clientWidth) / 2;
     root.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
+  }
+  function scrollToReal(realIdx, smooth) {
+    scrollToIndex(cloneCount + realIdx, smooth);
   }
   function findSlideEl(el) {
     while (el && el !== root) {
@@ -174,8 +238,28 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
     }
     return null;
   }
+  function maybeLoopJump() {
+    // CRITICAL: never jump while the visitor is still actively dragging (isDown), or it desyncs
+    // scrollStart from the real scrollLeft mid-drag and produces a visible teleport/glitch.
+    if (!cloneCount || isJumping || isDown) return;
+    var idx = currentIndex();
+    if (idx < cloneCount) {
+      isJumping = true;
+      scrollToIndex(idx + realCount, false);
+      isJumping = false;
+    } else if (idx >= cloneCount + realCount) {
+      isJumping = true;
+      scrollToIndex(idx - realCount, false);
+      isJumping = false;
+    }
+  }
 
-  root.addEventListener('scroll', function() { window.requestAnimationFrame(setActive); }, { passive: true });
+  var scrollEndTimer = null;
+  root.addEventListener('scroll', function() {
+    window.requestAnimationFrame(setActive);
+    if (scrollEndTimer) clearTimeout(scrollEndTimer);
+    scrollEndTimer = setTimeout(function() { maybeLoopJump(); setActive(); }, 120);
+  }, { passive: true });
   root.addEventListener('mousedown', function(e) {
     isDown = true;
     moved = false;
@@ -190,6 +274,9 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
     if (!moved) {
       var slideEl = findSlideEl(e.target);
       if (slideEl) scrollToIndex(slides.indexOf(slideEl), true);
+    } else {
+      if (scrollEndTimer) clearTimeout(scrollEndTimer);
+      scrollEndTimer = setTimeout(function() { maybeLoopJump(); setActive(); }, 120);
     }
   });
   root.addEventListener('mouseleave', function() {
@@ -204,17 +291,41 @@ already tested and known to work; reinventing it from scratch is how subtle bugs
     root.scrollLeft = scrollStart - dx;
   });
 
+  dots.forEach(function(d, i) {
+    d.addEventListener('click', function() { scrollToReal(i, true); });
+  });
+
+  var arrows = root.parentElement.querySelectorAll('.SECTION_CLASS-arrow');
+  Array.prototype.forEach.call(arrows, function(btn) {
+    btn.addEventListener('click', function() {
+      var dir = parseInt(btn.getAttribute('data-dir'), 10) || 1;
+      scrollToIndex(currentIndex() + dir, true);
+    });
+  });
+
+  scrollToIndex(cloneCount, false);
   setActive();
 })();
 </script>
 ```
 Requirements this engine depends on — get these exactly right or it won't work:
 - The scrollable row element itself needs `id="{{ section_class }}-track"` (literally that ID,
-  matching what the script queries for).
+  matching what the script queries for). The dots wrapper needs `id="{{ section_class }}-dots"`.
 - Each direct child of that row is one slide (no extra wrapper div between the track and the
   slides) — the script reads `root.children` directly, and click-to-center walks up from the click
   target to find which direct child was clicked, so it works no matter what's nested inside a slide
   (video, button, etc.) — clicking the mute button still also re-centers its slide, which is fine.
+- If the reference doesn't show arrows or dots, you may omit those two pieces of markup (and the
+  corresponding `dots`/`arrows` script wiring becomes inert automatically — `dotsWrap`/`arrows` will
+  just be empty), but ALWAYS include the infinite-loop clone logic and the drag/click-to-center
+  logic regardless, since those are the core interaction every reference of this kind relies on.
+- CRITICAL — wrap the whole carousel (arrows + track + dots) in an element with
+  `max-width: 1200px; margin: 0 auto;` (matching Dawn's standard content width). Never let the
+  `.carousel`/`.track` span the full unconstrained section/viewport width — on a wide monitor this
+  makes the track's own centering padding (`calc(50% - halfSlideWidth)`) balloon to hundreds of
+  pixels, which shows up as a huge, obviously-wrong empty gap next to the arrows before the first
+  slide is reached (confirmed by measurement: an unconstrained ~1900px-wide track needed ~780px of
+  padding just to let the first slide center, versus ~400px once properly constrained to 1200px).
 - CSS structure (STRICT): use TWO nested layers per slide, not one:
   ```html
   <div class="SECTION_CLASS-slide" {{ block.shopify_attributes }}>   <!-- OUTER: fixed size, ALWAYS -->
@@ -298,6 +409,31 @@ Requirements this engine depends on — get these exactly right or it won't work
 - If the reference does NOT show a dynamically-enlarging center slide at all (just a plain static
   draggable row, no size change on any slide), skip this whole engine and use the simpler static
   Liquid-computed `featured_position` approach from the rule above instead.
+
+MANUAL SPACING SETTINGS — SEPARATE DESKTOP + MOBILE CONTROL (STRICT)
+Merchants reliably ask to fine-tune vertical spacing after a section is built (space above/below a
+heading, above/below dot indicators, around a carousel track, overall section padding), and the
+right amount on desktop is almost never the right amount on mobile. Build this in from the start
+instead of hardcoding spacing and waiting for a follow-up request:
+- For every meaningful vertical gap in the section (section top/bottom padding, heading/title
+  top+bottom margin, a carousel track's own vertical padding, dot-row top+bottom margin), expose a
+  `"type": "range"` setting AND a second, separate `xxx_mobile` range setting — e.g.
+  `section_padding_top` + `section_padding_top_mobile`, `heading_padding_bottom` +
+  `heading_padding_bottom_mobile`. Apply the base setting unprefixed (desktop/tablet) and the
+  `_mobile` one inside the `@media screen and (max-width: 749px)` block, overriding the same CSS
+  property. Never share one setting across both breakpoints for a spacing value — confirmed
+  repeatedly that a gap which looks right on desktop becomes either way too large or clips content
+  on mobile, and the merchant has no way to fix just one side without this split.
+- If a carousel's active slide grows via `transform: scale()` (per the CAROUSEL ENGINE above), its
+  vertical track padding on mobile needs its OWN setting too (`track_vertical_padding` +
+  `track_vertical_padding_mobile`) — the safe minimum differs between breakpoints only if the slide
+  width or active scale ratio differs there, but merchants still expect to tune each independently.
+- CRITICAL (Shopify schema validation): a range setting's `"default"` value MUST land exactly on a
+  `min + k*step` boundary or Shopify's Admin API rejects the WHOLE asset save with a 422 error
+  ("default must be a step in the range"). If you're picking a default to match some real measured
+  pixel value (e.g. matching what a mobile breakpoint used to hardcode), round it to the nearest
+  valid step first — e.g. `min: 0, step: 4` means valid defaults are 0, 4, 8, 12... never pick an
+  unrounded value like `30` or `58` if it doesn't land on that grid.
 
 NO INVENTED DECORATION (STRICT)
 Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
@@ -509,6 +645,17 @@ SELF-CHECK BEFORE YOU SEND
   part of the same engine, no extra code needed).
 - The track's centering `padding: calc(50% - Npx)` uses HALF THE CONSTANT OUTER slide width for N
   — the same formula at every breakpoint, since the outer width never changes between them.
+- The carousel (arrows + track + dots) is wrapped in a `max-width: 1200px; margin: 0 auto;`
+  container — never left to span the full unconstrained section width.
+- If arrows/dots are shown in the reference, the infinite-loop clone logic (`cloneCount`,
+  `realIndexFor`, `scrollToReal`, the reversed-prepend `insertBefore` loop) and the
+  `maybeLoopJump`/`isDown` drag-guard are present verbatim, not reinvented.
+- Every vertical spacing value that a merchant would plausibly want to tune (section top/bottom
+  padding, heading top/bottom margin, dots top/bottom margin, carousel track vertical padding) has
+  BOTH a base setting and a separate `_mobile` setting, each applied at its own breakpoint — never
+  one shared value forced onto both.
+- Every range setting's `"default"` lands exactly on a `min + k*step` boundary — never an unrounded
+  pixel value that would 422 on save.
 """
 
 
