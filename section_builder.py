@@ -279,6 +279,18 @@ Requirements this engine depends on — get these exactly right or it won't work
   `vertical_padding ≈ base_card_height * (active_scale - 1) / 2` plus a little breathing space —
   never leave it at some small arbitrary value like `20px` if the active-scale card is noticeably
   taller than that once grown.
+- If the enlarging card/slide has a `box-shadow` with a non-zero y-offset (e.g. `0 8px 24px ...`),
+  the needed clearance is NOT symmetric: the top only needs `blur - offsetY`, but the bottom needs
+  `blur + offsetY` (a shadow offset downward reaches further below the box than above it). Using
+  one padding value for both top and bottom will silently under-protect the bottom by `2 * offsetY`
+  and clip the shadow there first — confirmed by measurement, an easy mistake to repeat. Simplest
+  robust fix: prefer a symmetric shadow with no offset (`box-shadow: 0 0 16px rgba(...)`) — smaller,
+  cleaner, and the clearance math becomes identical on every side. Do NOT try to "hide" an
+  under-protected shadow by overlapping a heading/dots element on top of it with negative margin +
+  higher z-index — this only works if that element is the ONLY thing at that height; in a carousel,
+  neighboring slides are visible at the exact same height and are NOT covered by a narrow
+  heading/dots box, so the shadow clipping is still visible beside it. If a shadow needs more room
+  than looks good, shrink the shadow itself rather than adding compensating layout hacks around it.
 - The engine also calls `.play()`/`.pause()` on whichever slide's `<video>` is currently active —
   this means only the centered video is ever actually playing, matching how these UGC carousels
   really behave (side thumbnails stay static/paused). Set `autoplay: false` in `video_tag` for
