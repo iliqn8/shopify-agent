@@ -531,6 +531,37 @@ left). Build it exactly like this:
   so it needs no CSS `order` at all), the negative margin is reset to `margin: 0 auto;`, and both
   columns' features go back to `flex-direction: row;` with left-aligned text.
 
+ACCORDIONS: USE <details>/<summary>, AND KNOW HOW BROWSERS COLLAPSE THEM (STRICT)
+Footers and FAQ-style sections routinely show plain columns on desktop but collapsible accordions on
+mobile. Build this with native `<details>` + `<summary>` — it needs ZERO JavaScript, is keyboard and
+screen-reader accessible for free, and lets one single DOM serve both breakpoints (no duplicated
+markup for a "desktop version" and a "mobile version"). Do NOT put the `open` attribute in the
+markup to force the desktop state: `open` is a DOM attribute, so it would also leave every mobile
+accordion expanded, which is never what the reference shows.
+Force the desktop state in CSS instead, and write BOTH of these overrides, because browsers collapse
+`<details>` in two different ways:
+```
+/* desktop (unprefixed) — permanently expanded */
+.SECTION_CLASS .my-details::details-content { content-visibility: visible; block-size: auto; }
+.SECTION_CLASS .my-body { display: block; }
+```
+```
+/* inside the mobile media query — hand collapsing back to the browser */
+.SECTION_CLASS .my-details:not([open])::details-content { content-visibility: hidden; block-size: 0; }
+.SECTION_CLASS .my-details:not([open]) .my-body { display: none; }
+```
+Newer engines hide the content via the `::details-content` pseudo-element with
+`content-visibility: hidden`, which `display: block` alone does NOT override — confirmed live: the
+desktop link columns rendered their headings but every link was invisible, while
+`getComputedStyle(body).display` still reported `block`, so the bug is invisible to a display-only
+check. Older engines use `details > *:not(summary) { display: none }`, which the `display` rule does
+override. Engines that don't understand `::details-content` simply drop that rule and fall back to
+the display one, so writing both is safe everywhere and required for correctness.
+Also give `<summary>` `list-style: none` plus `::-webkit-details-marker { display: none }` to remove
+the native triangle, and on desktop `pointer-events: none; cursor: default;` so a permanently-open
+column doesn't look clickable. Put your own chevron in the summary, hidden on desktop, and rotate it
+with `[open] .chevron { transform: rotate(180deg); }` on mobile.
+
 REFERENCE FONT vs THEME FONT — FIX LINE BREAKS WITH WIDTH, NOT FONT-SIZE (STRICT)
 The reference site's font is almost never the merchant's theme font, and the substitute is often
 noticeably WIDER at the same px size (a real case: the reference's condensed body face vs the
@@ -689,6 +720,9 @@ SELF-CHECK BEFORE YOU SEND
 - Where the theme font is wider than the reference font, line breaks were corrected by widening the
   text box and compensating the container width (keeping icons/images on their exact reference
   coordinates) — never by shrinking the measured font-size.
+- Any accordion uses native `<details>`/`<summary>` with no `open` attribute in the markup, and the
+  desktop "always expanded" state is forced with BOTH `::details-content { content-visibility:
+  visible; block-size: auto; }` and `display: block`, with both undone inside the mobile query.
 - Any flex container centering a single number/icon/short text uses `align-items: center` (never
   `baseline`, which visibly pushes the content toward the top of a circle/bubble).
 - Any card showing a mute/play icon or a vertical UGC-style video uses a block `"type": "video"`
