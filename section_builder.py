@@ -434,6 +434,14 @@ instead of hardcoding spacing and waiting for a follow-up request:
   pixel value (e.g. matching what a mobile breakpoint used to hardcode), round it to the nearest
   valid step first — e.g. `min: 0, step: 4` means valid defaults are 0, 4, 8, 12... never pick an
   unrounded value like `30` or `58` if it doesn't land on that grid.
+- CRITICAL #2 (same 422, different cause): a range setting may have AT MOST 101 steps, i.e.
+  `(max - min) / step` must be <= 100. Shopify rejects the entire asset save with
+  "Range settings must have at most 101 steps" otherwise, and the error names only ONE setting even
+  when several are wrong. Confirmed live: `min: 240, max: 480, step: 2` = 121 steps -> 422. Every
+  time you write a range, do BOTH checks explicitly before moving on: (a) is `(max-min)/step <= 100`?
+  (b) is `(default-min)` an exact multiple of `step`? If a wide range needs a fine step, shrink the
+  `max` (usually the better fix, since the extra headroom is rarely used) rather than coarsening the
+  step past the precision the design actually needs.
 
 NO INVENTED DECORATION (STRICT)
 Only build elements that are actually visible in the screenshot. Do NOT add extra decorative icons,
@@ -487,6 +495,59 @@ border around that column — invisible-thin margin that reads as "text touching
 border" the moment font rendering differs even slightly. Add `min-width: 0; max-width: 100%;` to
 the text element, and `min-width: 0;` to its flex-container ancestor, any time text lives inside a
 narrowing flex column.
+
+FIXED-WIDTH FLEX CHILDREN MUST STILL BE ALLOWED TO SHRINK (STRICT)
+When you reproduce a reference layout with exact measured pixel widths (e.g. a 404px text column, a
+460px center image), it is tempting to lock them with `flex: 0 0 404px`. Do NOT. `flex-shrink: 0`
+means that at ANY viewport narrower than the sum of those fixed widths, the row overflows its
+container and the whole PAGE gets a horizontal scrollbar — and this happens in the dead zone between
+your desktop rules and your first media query (roughly 990-1280px), which is exactly the range you
+never look at while matching a 1440px screenshot. Always write `flex: 0 1 <measured>px;` plus
+`min-width: 0;` on such children instead: they render at the exact reference width whenever there is
+room (so the desktop match stays pixel-faithful) and shrink proportionally when there isn't, instead
+of breaking the page. Give the section wrapper `overflow: hidden;` as a second line of defence.
+Verify by reasoning through at least these widths: 1440, 1280, 1100, 990, 749, 390, 320.
+
+ICONS OVERLAPPING A CENTER IMAGE — MIRRORED TWO-COLUMN LAYOUT (STRICT)
+A very common reference pattern: a centered square image with a column of features on each side,
+where the icon circles visually sit ON TOP of the image's left and right edges, the left column's
+text is right-aligned (icon on its right) and the right column's text is left-aligned (icon on its
+left). Build it exactly like this:
+- Keep ONE identical DOM order inside every feature — icon element first, then the text wrapper —
+  for BOTH columns. Never duplicate the markup in a different order for the left column. Flip the
+  left column visually with `flex-direction: row-reverse;` and `text-align: right` /
+  `align-items: flex-end` on its text wrapper only. This matters because the mobile layout wants
+  every feature back in the SAME icon-left/text-right order, which then costs you one line
+  (`flex-direction: row;` inside the 749px query) instead of restructuring anything.
+- Create the overlap with a NEGATIVE HORIZONTAL MARGIN on the image wrapper
+  (`margin: 0 -<overlap>px;`), plus `position: relative; z-index: 9;` on the image and
+  `position: relative; z-index: 10;` on both columns so the icons paint above the image. Never fake
+  the overlap with absolute positioning — negative margin keeps the row a normal flex row that still
+  centers and still shrinks correctly.
+- Do the arithmetic explicitly and expose the container width as a setting so it stays consistent:
+  `column_width * 2 + image_size - overlap * 2 = content_max_width`. If you change any one of those
+  four numbers you MUST recompute the others, or the icons drift off the image edge.
+- Mobile/tablet: the columns stack as column-1 -> image -> column-2 (this is the natural DOM order,
+  so it needs no CSS `order` at all), the negative margin is reset to `margin: 0 auto;`, and both
+  columns' features go back to `flex-direction: row;` with left-aligned text.
+
+REFERENCE FONT vs THEME FONT — FIX LINE BREAKS WITH WIDTH, NOT FONT-SIZE (STRICT)
+The reference site's font is almost never the merchant's theme font, and the substitute is often
+noticeably WIDER at the same px size (a real case: the reference's condensed body face vs the
+theme's Poppins). The visible symptom is that the reference's 3-line description wraps to 4 lines,
+or a heading pushes one extra word onto the first line. Two rules:
+- Do NOT "fix" this by shrinking `font-size` below the size you measured in the reference — that
+  breaks the measured typography fidelity to patch a wrapping artifact.
+- Instead widen the text box, and compensate elsewhere so the ANCHOR ELEMENTS (icons, images,
+  anything whose position is visually load-bearing) stay on their exact reference coordinates. In
+  the mirrored-columns pattern above that means: increase `text_width` (and therefore
+  `column_width`) by the same amount, and increase `content_max_width` by twice that amount — the
+  overlap and image size are untouched, so the icons and the image land on precisely the same x
+  positions as the reference while only the text blocks extend further outward.
+- Apply the same reasoning to the heading: pick `heading_max_width` so the wrap falls on the same
+  word as the reference IN THE THEME'S FONT. A max-width tuned for the reference font will usually
+  be too generous for a wider substitute — narrowing the heading's max-width is the correct fix,
+  not lowering its font-size.
 
 TYPOGRAPHY & SIZE FIDELITY (STRICT)
 The goal is a PIXEL-FAITHFUL match to the screenshot, not a generic Dawn-style approximation:
@@ -617,6 +678,17 @@ SELF-CHECK BEFORE YOU SEND
   × N + gaps + padding fits inside that breakpoint's viewport width — they won't silently wrap.
 - Wrapped headlines break on the same words as the screenshot at each breakpoint — sizes were
   chosen conservatively, not defaulted to a large generic hero size.
+- Every `"type": "range"` setting passes BOTH schema checks: `(max-min)/step <= 100` AND
+  `(default-min)` is an exact multiple of `step`. (Either one failing 422s the entire save.)
+- No flex child is locked with `flex: 0 0 <px>` — measured fixed widths use `flex: 0 1 <px>` plus
+  `min-width: 0`, so widths between 990px and 1280px shrink instead of overflowing the page.
+- If icons overlap a center image, the overlap comes from a negative horizontal margin plus
+  z-index (never absolute positioning), the two side columns share ONE DOM order flipped with
+  `flex-direction: row-reverse`, and `column_width*2 + image_size - overlap*2 = content_max_width`
+  actually adds up.
+- Where the theme font is wider than the reference font, line breaks were corrected by widening the
+  text box and compensating the container width (keeping icons/images on their exact reference
+  coordinates) — never by shrinking the measured font-size.
 - Any flex container centering a single number/icon/short text uses `align-items: center` (never
   `baseline`, which visibly pushes the content toward the top of a circle/bubble).
 - Any card showing a mute/play icon or a vertical UGC-style video uses a block `"type": "video"`
