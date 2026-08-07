@@ -205,6 +205,9 @@ transcript, and technical metadata.
 ## REFERENCE METADATA
 {metadata}
 
+## TARGET LENGTH
+{target}
+
 ## REFERENCE TRANSCRIPT
 {transcript}
 
@@ -220,7 +223,7 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
   "format_analysis": "2-4 sentences: what format is this, why does it work, what is the hook mechanism",
   "product_identity": "one precise sentence naming what the product physically is, including its distinguishing visual features (colour, shape, markings). Read it off the frames.",
   "product_reference_frames": [<frame indices, 2 to 4 of them, whose frames show the PRODUCT most clearly and unobstructed — prefer close, well-lit, front-or-three-quarter views. These exact frames get fed to the image model as ground truth for what the product looks like.>],
-  "total_duration": <number, seconds — match the reference within ~20%, UNLESS the user's instructions specify a length, which always wins>,
+  "total_duration": <number, seconds — MUST equal TARGET LENGTH below, and MUST equal the sum of your scene durations>,
   "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
   "scenes": [
     {{
@@ -242,17 +245,19 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
 
 1. SCENE COUNT AND TIMING MIRROR THE REFERENCE. If the reference cuts every 1.5s, your scenes are
    1.5s. If it holds a 6s shot, hold 6s. Read the cut rhythm off the frames — do not default to
-   uniform 5s scenes. If the user asked for a shorter total than the reference, keep the reference's
-   CUT RHYTHM and drop scenes to fit — do not stretch every scene out to pad the runtime.
+   uniform scene lengths, which is the single most common way this goes wrong. Your scene durations
+   MUST add up to TARGET LENGTH: if the target is shorter than the reference, keep the cut RHYTHM
+   and use fewer scenes; if longer, add scenes. Never stretch scenes to pad the runtime.
 2. THE FIRST SCENE IS THE HOOK. Whatever mechanism the reference uses in its first 3 seconds
    (question, bold claim, visual pattern-break, problem shown), use the SAME mechanism with the new
    product's angle.
 3. "avatar" IS ONLY FOR SHOTS WHERE A PERSON TALKS TO CAMERA. Everything else is "broll". If the
    reference is pure b-roll with voiceover, produce zero avatar scenes. If it is a UGC creator
    talking with cutaways, mirror that mix exactly.
-4. MINIMUM SCENE DURATION IS 4 SECONDS for generation purposes. If the reference cuts faster,
-   still write the true short duration — assembly trims the generated clip down to it. Never write
-   a duration below 0.8s.
+4. WRITE THE REFERENCE'S REAL SHOT LENGTHS. There is no minimum. If a shot holds for 1.2 seconds,
+   write 1.2. Video models have their own minimum clip length, but that is handled downstream by
+   generating a longer clip and trimming it — it is NOT a floor on what you write here, and padding
+   every scene out to a uniform 4 seconds is a bug, not a safe default. Only 0.8s is too short.
 5. IMAGE PROMPTS MUST NOT NAME REAL BRANDS, celebrities, or copyrighted characters, and must not
    describe the reference video's specific actors. Describe generic people by role and appearance.
    This does NOT apply to the product itself — keeping the product identical is the whole point.
@@ -309,7 +314,47 @@ def _extract_json(text):
     return json.loads(raw)
 
 
-def _normalise_recipe(recipe, meta):
+MIN_SCENE = 0.8
+
+
+def _fit_to_target(scenes, target):
+    """Scale scene durations so they sum to `target`, preserving the cut rhythm.
+
+    The prompt asks for this, but the model reliably drifts — it padded every
+    scene to a flat 4s on an 8s reference — so it is enforced here rather than
+    hoped for. Proportional scaling keeps the relative pacing intact; only the
+    0.8s floor can distort it, and then only for scenes already at the floor.
+    """
+    if not scenes or not target or target <= 0:
+        return None
+
+    current = sum(s["duration"] for s in scenes)
+    if current <= 0:
+        return None
+    if abs(current - target) <= max(0.5, target * 0.05):
+        return None      # close enough; leave the model's timing alone
+
+    factor = target / current
+    for s in scenes:
+        s["duration"] = max(MIN_SCENE, round(s["duration"] * factor, 2))
+
+    # The floor can push the sum back up; absorb the excess in the longest
+    # scenes, which have the most slack before the pacing visibly changes.
+    for _ in range(len(scenes)):
+        drift = round(sum(s["duration"] for s in scenes) - target, 2)
+        if abs(drift) <= 0.05:
+            break
+        adjustable = sorted((s for s in scenes if s["duration"] > MIN_SCENE),
+                            key=lambda s: -s["duration"])
+        if not adjustable:
+            break
+        head = adjustable[0]
+        head["duration"] = max(MIN_SCENE, round(head["duration"] - drift, 2))
+
+    return round(current, 2)
+
+
+def _normalise_recipe(recipe, meta, target_duration=None):
     """Fill in defaults and clamp anything the model may have got wrong."""
     recipe.setdefault("title", "Untitled video")
     recipe.setdefault("aspect_ratio", meta.get("aspect_ratio", "9:16"))
@@ -323,7 +368,7 @@ def _normalise_recipe(recipe, meta):
     for i, s in enumerate(scenes, start=1):
         s["index"] = i
         try:
-            s["duration"] = max(0.8, round(float(s.get("duration", 4)), 2))
+            s["duration"] = max(MIN_SCENE, round(float(s.get("duration", 4)), 2))
         except (TypeError, ValueError):
             s["duration"] = 4.0
         if s.get("kind") not in ("broll", "avatar"):
@@ -336,6 +381,9 @@ def _normalise_recipe(recipe, meta):
         s["shows_product"] = bool(s.get("shows_product")) and s["kind"] == "broll"
         clean.append(s)
     recipe["scenes"] = clean
+    was = _fit_to_target(clean, target_duration)
+    if was is not None:
+        recipe["duration_corrected_from"] = was
     recipe["total_duration"] = round(sum(s["duration"] for s in clean), 2)
     recipe.setdefault("product_identity", "")
     recipe.setdefault("product_reference_urls", [])
@@ -345,7 +393,7 @@ def _normalise_recipe(recipe, meta):
 # ── Phase 1: analysis ──────────────────────────────────────────────────────
 
 def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
-                   product_images=None):
+                   product_images=None, target_duration=None):
     """Yields {'type': 'status'|'done', ...}. Final event carries the recipe.
 
     `mode` is "same_product" (rebuild an ad for the product that appears in the
@@ -401,9 +449,18 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
         mode_block = (MODE_SAME_PRODUCT if mode == "same_product"
                       else MODE_MY_PRODUCT.format(
                           product=_format_product(product, len(product_images))))
+        # Default to the reference's own length. Left to free-text notes the
+        # model ignores "same length"; as an explicit number it does not have
+        # to infer anything, and the result is checked in code afterwards.
+        target = float(target_duration) if target_duration else meta["duration"]
+        target = max(2.0, round(target, 2))
+
         content.append({"type": "text", "text": ANALYSIS_PROMPT.format(
             mode_block=mode_block,
             metadata=json.dumps(meta),
+            target=(f"{target}s exactly. Your scene durations must add up to this. "
+                    + ("This matches the reference." if not target_duration
+                       else f"The user asked for this length; the reference is {meta['duration']}s.")),
             transcript=transcript or "(no audio / silent video)",
             notes=notes or "(none)",
         )})
@@ -415,9 +472,15 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
         )
         text = "".join(b.text for b in resp.content if b.type == "text")
 
-        recipe = _normalise_recipe(_extract_json(text), meta)
+        recipe = _normalise_recipe(_extract_json(text), meta, target_duration=target)
         recipe["source_duration"] = meta["duration"]
+        recipe["target_duration"] = target
         recipe["mode"] = mode
+
+        if recipe.get("duration_corrected_from"):
+            yield {"type": "status", "text": (
+                f"⏱️ Model wrote {recipe['duration_corrected_from']}s — rescaled scenes "
+                f"to the {target}s target")}
 
         # Anchor the product to real pixels. Text-to-image cannot reproduce a
         # specific physical object, so the shots that show it are built by
@@ -510,9 +573,12 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
     fal_usd = 0.0
     avatar_usd = 0.0
     for s in recipe.get("scenes", []):
-        billed = max(4.0, s.get("duration", 4))
+        # Models only offer fixed clip lengths and bill the whole one, even
+        # though assembly trims it down — a 2s scene still costs Kling's 5s
+        # minimum. Same helper as generation, so the two cannot drift apart.
+        billed = float(fal_client._billable_duration(s.get("duration", 4), spec["durations"]))
         if s.get("kind") == "avatar":
-            avatar_usd += billed * avatar_per_second
+            avatar_usd += max(4.0, s.get("duration", 4)) * avatar_per_second
         else:
             # Every b-roll shot needs a first frame — either restaged from the
             # product references, or generated from text.
@@ -648,11 +714,13 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                     yield from drain(label)
                     yield {"type": "status", "text": f"   {label} · first frame ready"}
 
+                # Pass the true scene length — the client rounds up to the
+                # model's nearest allowed duration, and assembly trims back down.
                 url = fal_client.generate_broll(
                     video_model,
                     image_url,
                     s.get("motion_prompt") or s.get("shot_description") or prompt,
-                    max(4.0, s["duration"]),
+                    s["duration"],
                     aspect_ratio=aspect,
                     on_status=status,
                 )

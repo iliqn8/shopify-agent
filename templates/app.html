@@ -431,6 +431,13 @@
       </div>
 
       <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">
+          TARGET LENGTH <span style="color:#555">(seconds — leave blank to match the reference)</span>
+        </label>
+        <input id="vid-target-duration" type="number" min="2" max="180" step="0.5" placeholder="Same as the reference clip" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
+      </div>
+
+      <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">NOTES <span style="color:#555">(optional)</span></label>
         <textarea id="vid-notes" rows="2" placeholder="e.g. keep it under 20s, make the hook about bloating, no talking head" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
       </div>
@@ -2066,6 +2073,7 @@ async function vidAnalyze() {
   fd.append('file', vidFile);
   fd.append('notes', document.getElementById('vid-notes').value);
   fd.append('mode', vidMode());
+  fd.append('target_duration', document.getElementById('vid-target-duration').value);
   const p = vidSelectedProduct();
   if (p) fd.append('product', JSON.stringify(p));
   for (const f of vidProductPhotos) fd.append('product_images', f);
@@ -2122,8 +2130,9 @@ async function vidRewrite() {
 function vidRenderRecipe() {
   const r = vidRecipe;
   document.getElementById('vid-recipe-box').style.display = 'block';
+  const src = r.source_duration ? ` (reference ${r.source_duration}s)` : '';
   document.getElementById('vid-recipe-summary').textContent =
-    `${r.scenes.length} scenes · ${r.total_duration}s · ${r.aspect_ratio} · voice: ${r.voice}`;
+    `${r.scenes.length} scenes · ${r.total_duration}s${src} · ${r.aspect_ratio} · voice: ${r.voice}`;
   document.getElementById('vid-format-analysis').textContent = r.format_analysis || '';
 
   // Show what the product shots will actually be built from — this is the

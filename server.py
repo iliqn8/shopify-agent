@@ -731,6 +731,14 @@ def video_analyze_start():
     if mode not in ("same_product", "my_product"):
         mode = "same_product"
 
+    target_duration = None
+    raw_target = (request.form.get("target_duration") or "").strip()
+    if raw_target:
+        try:
+            target_duration = max(2.0, min(180.0, float(raw_target)))
+        except ValueError:
+            target_duration = None
+
     import base64 as _b64
     product_images = []
     for f in request.files.getlist("product_images"):
@@ -747,7 +755,7 @@ def video_analyze_start():
 
     job_id = str(_uuid_v.uuid4())
     _run_video_job(job_id, lambda: video_cloner.analyze_stream(
-        video_bytes, product, notes, mode, product_images))
+        video_bytes, product, notes, mode, product_images, target_duration))
     return jsonify({"job_id": job_id})
 
 

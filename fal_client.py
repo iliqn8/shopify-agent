@@ -197,8 +197,18 @@ def download(url, timeout=600):
 
 # ── Payload builders (schemas differ per model family) ─────────────────────
 
-def _nearest_duration(seconds, allowed):
-    return min(allowed, key=lambda d: abs(float(d) - float(seconds)))
+def _billable_duration(seconds, allowed):
+    """Shortest allowed clip length that still covers the scene.
+
+    Must round UP, not to the nearest: a 7s scene on a model offering 5s and
+    10s would otherwise get a 5s clip and come back two seconds short, since
+    assembly can trim a long clip but cannot invent footage for a short one.
+    """
+    options = sorted(allowed, key=float)
+    for d in options:
+        if float(d) >= float(seconds) - 0.01:
+            return d
+    return options[-1]
 
 
 def generate_image(prompt, aspect_ratio="9:16", on_status=None):
@@ -247,7 +257,7 @@ def generate_broll(model_key, image_url, motion_prompt, seconds, aspect_ratio="9
     spec = VIDEO_MODELS.get(model_key)
     if not spec:
         raise FalError(f"Unknown video model '{model_key}'")
-    duration = _nearest_duration(seconds, spec["durations"])
+    duration = _billable_duration(seconds, spec["durations"])
 
     negative = ("blur, distort, warped hands, extra fingers, low quality, "
                 "watermark, text artifacts")
