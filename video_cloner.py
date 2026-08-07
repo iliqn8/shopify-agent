@@ -114,6 +114,94 @@ def extract_frames(video_bytes, max_frames=ANALYSIS_FRAMES):
             os.remove(tmp_path)
 
 
+def _layout_similarity(url_a, url_b):
+    """How much two images share a layout, 0..1. None if either can't be read.
+
+    Compares downscaled greyscale structure, deliberately ignoring colour: a
+    genuine product swap changes hue everywhere the product is, but must leave
+    the subject, horizon and framing where they were. A recomposed scene moves
+    all of that.
+    """
+    try:
+        import numpy as np
+        import requests as _rq
+
+        mats = []
+        for url in (url_a, url_b):
+            if url.startswith("data:"):
+                raw = base64.b64decode(url.split(",", 1)[1])
+            else:
+                raw = _rq.get(url, timeout=120).content
+            arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+            if arr is None:
+                return None
+            arr = cv2.resize(arr, (96, 96), interpolation=cv2.INTER_AREA).astype(np.float32)
+            # Edges track layout; raw brightness would punish lighting shifts.
+            arr = cv2.Laplacian(arr, cv2.CV_32F, ksize=3)
+            arr -= arr.mean()
+            norm = float(np.linalg.norm(arr))
+            if norm < 1e-6:
+                return None
+            mats.append(arr / norm)
+
+        return float(np.clip((mats[0] * mats[1]).sum(), 0.0, 1.0))
+    except Exception:
+        return None
+
+
+def _verify_swap(base_url, edited_url, product_urls):
+    """Ask the vision model whether the swap did what was asked.
+
+    Pixel heuristics cannot answer this. A whole-frame colour histogram scores
+    an untouched vest and a recoloured one within 0.002 of each other, because
+    the product is a small part of the frame. Layout is checkable in code;
+    "is this now the right product, in the same scene" is not, and a Claude
+    call costs cents against the ~$0.70 the video clip costs.
+
+    Returns (scene_kept, product_swapped, note). Fails open on error — a broken
+    check should not block generation.
+    """
+    try:
+        import requests as _rq
+
+        def block(url, label):
+            raw = _rq.get(url, timeout=120).content
+            return [
+                {"type": "text", "text": label},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.b64encode(raw).decode()}},
+            ]
+
+        content = block(base_url, "IMAGE A — the original frame:")
+        content += block(edited_url, "IMAGE B — the edited frame:")
+        for i, u in enumerate(product_urls[:3], start=1):
+            content += block(u, f"IMAGE C{i} — the replacement product:")
+        content.append({"type": "text", "text":
+            "B was meant to be A with only the product replaced by the product in the C images.\n\n"
+            "Judge the CONTENT of the scene, not the file. Ignore resolution, image size, "
+            "compression and small crop differences at the edges — those are expected and "
+            "harmless. What matters is whether the same moment is still depicted.\n\n"
+            "Answer with JSON only, no prose:\n"
+            '{"scene_kept": <true if B shows the SAME scene as A — same subject in the same '
+            'pose and position, same background and setting, same other objects in the same '
+            'places, same camera viewpoint. false only if the scene was restaged: the subject '
+            'moved or changed activity, the setting or background changed, objects moved, or '
+            'the camera viewpoint changed>, '
+            '"product_swapped": <true if the product in B is clearly the C product rather than '
+            'the one in A>, '
+            '"note": "<one short sentence on what differs>"}'})
+
+        resp = client.messages.create(model=MODEL, max_tokens=400,
+                                      messages=[{"role": "user", "content": content}])
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        data = _extract_json(text)
+        return (bool(data.get("scene_kept")), bool(data.get("product_swapped")),
+                str(data.get("note") or ""))
+    except Exception:
+        return True, True, "(verification unavailable)"
+
+
 def _encode_frame(frame, max_side=768, quality=82):
     h, w = frame.shape[:2]
     scale = max_side / max(h, w)
@@ -490,6 +578,60 @@ def _extract_json(text):
 
 
 MIN_SCENE = 0.8
+
+# Laplacian-correlation floor below which a "product swap" has really redrawn
+# the whole shot rather than edited it.
+COMPOSITION_MIN = 0.45
+
+
+def _swap_prompts(ref_count):
+    """Instructions for swapping a product into an existing frame, best first.
+
+    Each pairs with a rung of fal_client.EDIT_LADDER. The first uses Seedream's
+    Figure-referencing, which is built for "the thing in Figure 1 becomes the
+    thing in Figure 2". The second frames it as inpainting, which is what makes
+    Nano Banana actually perform the swap rather than quietly no-op.
+    """
+    figs = ("Figure 2" if ref_count == 1
+            else "Figures 2" + "".join(f", {i}" for i in range(3, ref_count + 2)))
+    others = "the image that follows" if ref_count == 1 else f"the {ref_count} images that follow"
+    return [
+        (
+            f"Figure 1 is a photograph. {figs} show a product on its own.\n\n"
+            f"Edit Figure 1 so that the product worn by or attached to the subject is replaced "
+            f"by the product from {figs}, matching its real colour, shape and markings.\n\n"
+            "Change nothing else in Figure 1. Keep the subject in the same pose and the same "
+            "position, keep the background, water, horizon and every other object exactly "
+            "where they are, keep the lighting and the camera viewpoint, and keep the same "
+            f"crop and framing. Do not use the background or setting from {figs} — those are "
+            "product photos, and only the product itself should be taken from them."
+        ),
+        (
+            "You are performing an inpainting edit, not generating a new picture.\n\n"
+            "IMAGE 1 is the ONLY image whose scene matters. Reproduce IMAGE 1 exactly. Then "
+            "paint over ONLY the product region — the item worn by or attached to the subject "
+            f"— replacing it with the product shown in {others}.\n\n"
+            "Every pixel outside that product region must be identical to IMAGE 1. The "
+            "subject stays in the same place in the same pose. The background, water depth, "
+            "shoreline, sky and every other object stay exactly as they are. The camera does "
+            "not move. The framing and crop do not change. The reference images contribute "
+            "the product's appearance and NOTHING ELSE — ignore their backgrounds entirely.\n\n"
+            "The replacement must be clearly visible: match the reference product's real "
+            "colour, shape and markings, not the colour of the product already in IMAGE 1."
+        ),
+        (
+            f"IMAGE 1 is a photograph to edit. {others.capitalize()} show a replacement "
+            "product, on its own, for reference only.\n\n"
+            "Return IMAGE 1 with one single change: the product worn by or shown with the "
+            "subject is replaced by the reference product, matching its real colour, shape "
+            "and markings.\n\n"
+            "Everything else in IMAGE 1 must be unchanged — the subject and its exact pose "
+            "and position, the background, the water, the horizon, every other object, the "
+            "lighting, the shadows, the camera angle, the crop and the framing. Do not move "
+            "anything. Do not re-stage or re-imagine the scene. Do not borrow the background "
+            "or camera angle from the reference images; they are product photos only."
+        ),
+    ]
 
 
 def _fit_to_target(scenes, target):
@@ -1070,18 +1212,50 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 # is the starting image, so composition, subject, location and
                 # framing are inherited rather than reinvented.
                 if product_refs and s.get("shows_product"):
-                    swap = (
-                        "Replace the product in this photo with the product shown in the "
-                        "other reference images. Keep EVERYTHING else exactly as it is: the "
-                        "same subject, pose, position, background, lighting, colours, camera "
-                        "angle and framing. Change nothing except the product itself, and "
-                        "match its real colours and markings from the reference images."
-                    )
-                    image_url = fal_client.edit_image(
-                        [s["base_image_url"]] + product_refs, swap,
-                        aspect_ratio=aspect, on_status=status)
-                    yield from drain(label)
-                    yield {"type": "status", "text": f"   {label} · product swapped into the original frame"}
+                    image_url = None
+                    prompts = _swap_prompts(len(product_refs))
+                    for attempt, rung in enumerate(fal_client.EDIT_LADDER, start=1):
+                        swap = prompts[min(attempt - 1, len(prompts) - 1)]
+                        # Pin the recipe's aspect. "auto" lets the model pick,
+                        # and it returns a differently-cropped frame that no
+                        # longer matches the rest of the cut.
+                        candidate = fal_client.edit_image(
+                            [s["base_image_url"]] + product_refs, swap,
+                            aspect_ratio=aspect, on_status=status,
+                            model_id=rung["id"], seed=attempt * 1000 + s["index"])
+                        yield from drain(label)
+
+                        # The edit model will happily compose a brand-new scene
+                        # out of all the inputs instead of editing the first
+                        # one — a floating dog in deep water came back standing
+                        # on a different beach. Cheap structural check first.
+                        score = _layout_similarity(s["base_image_url"], candidate)
+                        if score is not None and score < COMPOSITION_MIN:
+                            yield {"type": "status", "text": (
+                                f"   {label} · {rung['label']} redrew the scene "
+                                f"(layout match {score:.2f}) — escalating")}
+                            continue
+
+                        scene_ok, swapped, note = _verify_swap(
+                            s["base_image_url"], candidate, product_refs)
+                        if scene_ok and swapped:
+                            image_url = candidate
+                            yield {"type": "status", "text": (
+                                f"   {label} · {rung['label']}: product swapped in, scene intact"
+                                + (f" (layout {score:.2f})" if score is not None else ""))}
+                            break
+
+                        reason = ("the scene was redrawn" if not scene_ok
+                                  else "the product was left unchanged")
+                        yield {"type": "status", "text": (
+                            f"   {label} · {rung['label']} rejected — {reason}"
+                            + (f": {note}" if note else ""))}
+
+                    if image_url is None:
+                        image_url = s["base_image_url"]
+                        yield {"type": "status", "text": (
+                            f"   ⚠️ {label} · could not swap the product without redrawing the "
+                            "scene, so this shot keeps the original product")}
                 else:
                     image_url = s["base_image_url"]
                     yield {"type": "status", "text": f"   {label} · using the reference's own frame"}

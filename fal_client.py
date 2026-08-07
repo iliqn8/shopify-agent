@@ -94,7 +94,9 @@ AVATAR_MODELS = {
 
 # Flat-ish costs for the supporting calls, used by the estimator.
 USD_PER_IMAGE = 0.025
-USD_PER_EDIT = 0.04
+# A product swap averages more than one rung of EDIT_LADDER before it passes
+# both checks, and can reach $0.23 if it goes all the way to the top.
+USD_PER_EDIT = 0.08
 USD_PER_TTS_LINE = 0.02
 
 # Voices exposed by fal-ai/ai-avatar/single-text (ElevenLabs voice names).
@@ -110,6 +112,21 @@ IMAGE_MODEL = "fal-ai/flux/dev"
 # product no matter how precisely it is described, so every shot that has to
 # show the actual product goes through here instead.
 EDIT_MODEL = "fal-ai/nano-banana/edit"
+
+# Swapping a product into an existing frame without redrawing the scene is the
+# hardest step in the pipeline, and the cheap model succeeds only sometimes —
+# the same prompt on the same inputs alternates between a clean swap, a no-op,
+# and a wholly recomposed scene. So it is an escalating ladder, cheapest first,
+# each rung verified before it is accepted.
+EDIT_LADDER = [
+    # Built for exactly this: it understands "the product in Figure 1 becomes
+    # the one in Figure 2" as a spatial instruction across reference images.
+    {"id": "fal-ai/bytedance/seedream/v4.5/edit", "label": "Seedream 4.5 Edit", "usd": 0.04},
+    {"id": "fal-ai/nano-banana/edit", "label": "Nano Banana Edit", "usd": 0.04},
+    # Last resort: nearly 4x the price, but the strongest at following a
+    # "change only this" instruction.
+    {"id": "fal-ai/nano-banana-pro/edit", "label": "Nano Banana Pro Edit", "usd": 0.15},
+]
 TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
 
 
@@ -239,22 +256,35 @@ def generate_image(prompt, aspect_ratio="9:16", on_status=None):
     return images[0]["url"]
 
 
-def edit_image(image_urls, prompt, aspect_ratio="9:16", on_status=None):
-    """Build a new shot around real reference photos. Returns image URL.
+_SEEDREAM_SIZES = {
+    "9:16": "portrait_16_9",   # ByteDance names these by the long edge
+    "16:9": "landscape_16_9",
+    "1:1": "square_hd",
+}
 
-    `image_urls` are actual pictures of the product (frames lifted from the
-    reference video, or the Shopify product photos). The model keeps that
-    subject and restages it per `prompt`.
+
+def edit_image(image_urls, prompt, aspect_ratio="9:16", on_status=None,
+               model_id=None, seed=None):
+    """Build a shot around real reference photos. Returns image URL.
+
+    `image_urls` are actual pictures — a frame to edit, product photos, or
+    both. Which one is which is conveyed by the prompt.
     """
     if not image_urls:
         raise FalError("edit_image needs at least one reference image")
-    out = run(EDIT_MODEL, {
-        "prompt": prompt,
-        "image_urls": image_urls[:8],
-        "num_images": 1,
-        "aspect_ratio": aspect_ratio,
-        "output_format": "jpeg",
-    }, on_status=on_status, timeout=300)
+    model_id = model_id or EDIT_MODEL
+
+    payload = {"prompt": prompt, "image_urls": image_urls[:8], "num_images": 1}
+    if seed is not None:
+        payload["seed"] = seed
+
+    if "seedream" in model_id:
+        payload["image_size"] = _SEEDREAM_SIZES.get(aspect_ratio, "portrait_16_9")
+    else:
+        payload["aspect_ratio"] = aspect_ratio
+        payload["output_format"] = "jpeg"
+
+    out = run(model_id, payload, on_status=on_status, timeout=300)
     images = out.get("images") or []
     if not images:
         raise FalError(f"Edit model returned no images: {str(out)[:300]}")
