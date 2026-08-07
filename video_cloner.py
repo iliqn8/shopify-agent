@@ -469,6 +469,14 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 yield {"type": "done", "error": msg}
                 return
 
+        # Assembly runs last, so a broken ffmpeg would only surface after every
+        # scene has been billed. Prove the filter graph works first.
+        ok, msg = video_assembler.preflight(burn_subtitles)
+        if not ok:
+            yield {"type": "done", "error": msg}
+            return
+        yield {"type": "status", "text": f"🔧 {msg}"}
+
         clips = []
         total = len(scenes)
         # fal's on_status callback fires from inside a blocking call, so it can't
@@ -541,17 +549,59 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
             yield {"type": "scene", "index": s["index"], "url": url, "kind": s["kind"]}
 
         yield {"type": "status", "text": "✂️ Assembling final video…"}
-        filename = video_assembler.assemble(
-            clips,
-            aspect_ratio=aspect,
-            burn_subtitles=burn_subtitles,
-            output_dir=output_dir,
-        )
+        try:
+            filename = video_assembler.assemble(
+                clips,
+                aspect_ratio=aspect,
+                burn_subtitles=burn_subtitles,
+                output_dir=output_dir,
+            )
+        except Exception as e:
+            # The clips are already paid for — hand them back so assembly can be
+            # retried without regenerating anything.
+            yield {"type": "done", "error": f"{type(e).__name__}: {e}",
+                   "clips": _serialisable(clips)}
+            return
 
         yield {"type": "status", "text": "✅ Done"}
-        yield {"type": "done", "filename": filename, "scene_urls": [c["url"] for c in clips]}
+        yield {"type": "done", "filename": filename, "scene_urls": [c["url"] for c in clips],
+               "clips": _serialisable(clips)}
 
     except fal_client.FalError as e:
         yield {"type": "done", "error": str(e)}
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+def _serialisable(clips):
+    """Everything assembly needs to run again, without the generation cost."""
+    return [{"scene": c["scene"], "url": c["url"],
+             "voiceover_url": c.get("voiceover_url"),
+             "keep_full_length": c.get("keep_full_length", False)} for c in clips]
+
+
+def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_dir=None):
+    """Re-run assembly over already-generated clips. Costs nothing."""
+    try:
+        if not clips:
+            yield {"type": "done", "error": "This project has no saved clips to reassemble."}
+            return
+
+        ok, msg = video_assembler.preflight(burn_subtitles)
+        if not ok:
+            yield {"type": "done", "error": msg}
+            return
+
+        yield {"type": "status", "text": f"🔧 {msg}"}
+        yield {"type": "status", "text": f"✂️ Reassembling {len(clips)} clips…"}
+        filename = video_assembler.assemble(
+            clips,
+            aspect_ratio=aspect_ratio,
+            burn_subtitles=burn_subtitles,
+            output_dir=output_dir or video_assembler.OUTPUT_DIR,
+        )
+        yield {"type": "status", "text": "✅ Done"}
+        yield {"type": "done", "filename": filename,
+               "scene_urls": [c["url"] for c in clips], "clips": clips}
     except Exception as e:
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}

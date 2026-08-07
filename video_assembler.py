@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import tempfile
-import textwrap
 import subprocess
 
 import requests
@@ -71,46 +70,105 @@ def _font_file():
     return None
 
 
-def _escape_path(path):
-    """ffmpeg filter args need forward slashes and escaped drive colons."""
-    return path.replace("\\", "/").replace(":", r"\:")
+def _render_caption_png(text, width, height, dest):
+    """Draw a bottom-third caption to a transparent PNG. Returns dest, or None.
 
-
-def _drawtext_filter(text, width, height, tmpdir, tag):
-    """Bottom-third caption. Returns a filter string, or '' if unusable.
-
-    Each wrapped line gets its own drawtext so every line is individually
-    centred — the bundled ffmpeg's drawtext has no `text_align` option, and a
-    single multi-line draw would come out ragged-left inside a centred box.
+    Captions are rendered with Pillow and composited via ffmpeg's `overlay`
+    rather than drawn with `drawtext`: the static Linux ffmpeg that
+    imageio-ffmpeg ships is built without libfreetype, so `drawtext` does not
+    exist there at all (it does on the Windows build, which is why this only
+    shows up once deployed). `overlay` is a core filter present in every build.
     """
-    font = _font_file()
-    if not font or not text.strip():
-        return ""
+    if not text.strip():
+        return None
+    font_path = _font_file()
+    if not font_path:
+        return None
 
-    # Wrap by hand — drawtext has no word wrapping.
-    per_line = max(14, int(width / 42))
-    lines = textwrap.wrap(text.strip(), width=per_line)[:3]
-    if not lines:
-        return ""
+    from PIL import Image, ImageDraw, ImageFont
 
     size = max(28, int(width / 22))
-    line_h = int(size * 1.45)
-    bottom = int(height * 0.14)
-    top = height - bottom - line_h * len(lines)
+    try:
+        font = ImageFont.truetype(font_path, size)
+    except Exception:
+        return None
 
-    filters = []
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Wrap to the measured pixel width rather than a character count, so the
+    # box never runs off frame regardless of the font.
+    max_text_w = int(width * 0.82)
+    words = text.strip().split()
+    lines, current = [], ""
+    for w in words:
+        trial = f"{current} {w}".strip()
+        if draw.textlength(trial, font=font) <= max_text_w or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = w
+    if current:
+        lines.append(current)
+    lines = lines[:3]
+
+    pad_x, pad_y, gap = 20, 10, 8
+    line_h = size + pad_y * 2
+    total_h = line_h * len(lines) + gap * (len(lines) - 1)
+    top = height - int(height * 0.14) - total_h
+
     for i, line in enumerate(lines):
-        line_path = os.path.join(tmpdir, f"caption_{tag}_{i}.txt")
-        with open(line_path, "w", encoding="utf-8") as f:
-            f.write(line)
-        filters.append(
-            f"drawtext=fontfile='{_escape_path(font)}'"
-            f":textfile='{_escape_path(line_path)}'"
-            f":fontcolor=white:fontsize={size}"
-            f":box=1:boxcolor=black@0.55:boxborderw=14"
-            f":x=(w-text_w)/2:y={top + i * line_h}"
-        )
-    return ",".join(filters)
+        tw = draw.textlength(line, font=font)
+        box_w = tw + pad_x * 2
+        x0 = (width - box_w) / 2
+        y0 = top + i * (line_h + gap)
+        draw.rounded_rectangle([x0, y0, x0 + box_w, y0 + line_h],
+                               radius=10, fill=(0, 0, 0, 150))
+        draw.text((x0 + pad_x, y0 + pad_y), line, font=font, fill=(255, 255, 255, 255))
+
+    img.save(dest)
+    return dest
+
+
+def preflight(burn_subtitles=True):
+    """Exercise the real assembly path on a throwaway clip. Returns (ok, message).
+
+    Assembly runs last, so anything broken here is only discovered after every
+    scene has already been paid for. This reproduces the same filter graph on a
+    generated test source, which costs nothing, before generation starts.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="vidcloner_preflight_")
+    try:
+        try:
+            exe = ffmpeg_exe()
+        except AssemblyError as e:
+            return False, str(e)
+
+        src = os.path.join(tmpdir, "src.mp4")
+        code, err = _run([
+            "-y", "-f", "lavfi", "-i", "testsrc=size=320x568:rate=30:duration=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", src,
+        ], timeout=120)
+        if code != 0 or not os.path.exists(src):
+            return False, f"ffmpeg cannot encode video: {err[-300:]}"
+
+        caption = "Preflight caption check" if burn_subtitles else ""
+        try:
+            _normalise_segment(
+                src, os.path.join(tmpdir, "seg.mp4"),
+                duration=1.0, width=320, height=568,
+                caption=caption, voiceover_path=None, tmpdir=tmpdir, tag="pf",
+            )
+        except AssemblyError as e:
+            return False, f"Assembly preflight failed: {e}"
+
+        if caption and not _font_file():
+            return True, "ffmpeg OK, but no usable font found — captions will be skipped"
+        return True, f"ffmpeg OK ({os.path.basename(exe)})"
+    except Exception as e:
+        return False, f"Assembly preflight error: {type(e).__name__}: {e}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _download(url, dest):
@@ -131,32 +189,44 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
     `duration=None` keeps the source's own length — used for talking-head clips
     whose length is set by the script rather than by us.
     """
-    vf = [
-        f"scale={width}:{height}:force_original_aspect_ratio=increase",
-        f"crop={width}:{height}",
-        f"fps={FPS}",
-    ]
-    caption_filter = _drawtext_filter(caption, width, height, tmpdir, tag)
-    if caption_filter:
-        vf.append(caption_filter)
+    caption_png = _render_caption_png(
+        caption, width, height, os.path.join(tmpdir, f"caption_{tag}.png")
+    ) if caption else None
 
+    # Input indices have to be tracked by hand — the caption image and the
+    # audio source both shift them depending on what this segment needs.
     args = ["-y", "-i", src]
-    has_audio = _has_audio(src)
+    next_idx = 1
 
+    caption_idx = None
+    if caption_png:
+        args += ["-i", caption_png]
+        caption_idx = next_idx
+        next_idx += 1
+
+    has_audio = _has_audio(src)
     if voiceover_path:
         args += ["-i", voiceover_path]
-        audio_map = ["-map", "1:a:0"]
+        audio_map = f"{next_idx}:a:0"
+        next_idx += 1
     elif has_audio:
-        audio_map = ["-map", "0:a:0"]
+        audio_map = "0:a:0"
     else:
         args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
-        audio_map = ["-map", f"{1}:a:0"]
+        audio_map = f"{next_idx}:a:0"
+        next_idx += 1
 
-    args += ["-map", "0:v:0", *audio_map]
+    chain = (f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+             f"crop={width}:{height},fps={FPS}")
+    if caption_idx is not None:
+        chain += f"[base];[base][{caption_idx}:v]overlay=0:0:format=auto[v]"
+    else:
+        chain += "[v]"
+
+    args += ["-filter_complex", chain, "-map", "[v]", "-map", audio_map]
     if duration is not None:
         args += ["-t", f"{duration:.3f}"]
     args += [
-        "-vf", ",".join(vf),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",

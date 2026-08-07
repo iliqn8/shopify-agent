@@ -783,20 +783,73 @@ def video_generate_start():
             burn_subtitles=burn_subtitles,
         ):
             if event.get("type") == "done":
+                fields = {}
+                # Clips may be present even on failure (assembly died after the
+                # scenes were paid for) — persist them so a retry is free.
+                if event.get("clips"):
+                    fields["clips_json"] = json.dumps(event["clips"])
+                    fields["scene_urls"] = json.dumps([c["url"] for c in event["clips"]])
                 if event.get("error"):
-                    kb.update_video_project(project_id, status="failed")
+                    fields["status"] = "failed"
                 else:
-                    kb.update_video_project(
-                        project_id,
-                        status="done",
-                        filename=event.get("filename"),
-                        scene_urls=json.dumps(event.get("scene_urls") or []),
-                    )
+                    fields["status"] = "done"
+                    fields["filename"] = event.get("filename")
+                kb.update_video_project(project_id, **fields)
                 event["project_id"] = project_id
+                event["can_reassemble"] = bool(event.get("clips"))
+                event.pop("clips", None)   # keep the poll payload small
             yield event
 
     _run_video_job(job_id, factory)
     return jsonify({"job_id": job_id, "project_id": project_id})
+
+
+@app.route("/api/video-reassemble/<int:pid>", methods=["POST"])
+def video_reassemble(pid):
+    """Rebuild the final MP4 from clips already generated for this project."""
+    import uuid as _uuid_v4
+    import video_cloner
+
+    row = kb.get_video_project(pid)
+    if not row:
+        return jsonify({"error": "Project not found"}), 404
+
+    try:
+        clips = json.loads(row.get("clips_json") or "[]")
+    except ValueError:
+        clips = []
+    if not clips:
+        return jsonify({"error": "This project has no saved clips — it predates "
+                                 "clip retention, or generation failed before any "
+                                 "scene finished."}), 400
+
+    try:
+        recipe = json.loads(row.get("recipe_json") or "{}")
+    except ValueError:
+        recipe = {}
+
+    data = request.json or {}
+    burn_subtitles = data.get("burn_subtitles", True)
+    job_id = str(_uuid_v4.uuid4())
+
+    def factory():
+        for event in video_cloner.reassemble_stream(
+            clips,
+            aspect_ratio=recipe.get("aspect_ratio", "9:16"),
+            burn_subtitles=burn_subtitles,
+        ):
+            if event.get("type") == "done":
+                if event.get("error"):
+                    kb.update_video_project(pid, status="failed")
+                else:
+                    kb.update_video_project(pid, status="done",
+                                            filename=event.get("filename"))
+                event["project_id"] = pid
+                event.pop("clips", None)
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id, "project_id": pid})
 
 
 @app.route("/api/video-poll/<job_id>")
@@ -845,7 +898,13 @@ def video_upload_image():
 
 @app.route("/api/video-projects", methods=["GET"])
 def list_video_projects():
-    return jsonify(kb.list_video_projects())
+    rows = kb.list_video_projects()
+    for r in rows:
+        # The clip blob is only needed server-side; the list just needs to know
+        # whether a free retry is possible.
+        r["can_reassemble"] = bool(r.pop("clips_json", None))
+        r.pop("recipe_json", None)
+    return jsonify(rows)
 
 
 @app.route("/api/video-projects/<int:pid>", methods=["DELETE"])

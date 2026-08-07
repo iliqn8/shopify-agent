@@ -2170,10 +2170,44 @@ async function vidLoadHistory() {
           </div>
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${badge[0]};color:${badge[1]}">${p.status}</span>
           ${p.filename ? `<a class="btn-sm" style="text-decoration:none" href="/generated-videos/${p.filename}" target="_blank">▶︎</a>` : ''}
+          ${p.can_reassemble ? `<button class="btn-sm" onclick="vidReassemble(${p.id})" title="Rebuild the video from clips already generated — costs nothing">🔁 Reassemble</button>` : ''}
           <button class="btn-sm" onclick="vidDelete(${p.id})">🗑</button>
         </div>`;
     }).join('');
   } catch (e) { console.error('video history', e); }
+}
+
+// Rebuilds the MP4 from clips already paid for — no generation, no cost.
+async function vidReassemble(id) {
+  const log = document.getElementById('vid-gen-log');
+  log.style.display = 'block';
+  log.textContent = 'Reassembling from saved clips…';
+  document.getElementById('vid-result').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/video-reassemble/' + id, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ burn_subtitles: document.getElementById('vid-subs').checked })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
+      ev => {
+        if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
+        const src = '/generated-videos/' + ev.filename;
+        document.getElementById('vid-player').src = src;
+        const dl = document.getElementById('vid-download');
+        dl.href = src;
+        dl.setAttribute('download', ev.filename);
+        document.getElementById('vid-result').style.display = 'block';
+        vidLoadHistory();
+      });
+  } catch (e) {
+    log.textContent += '\n❌ ' + e.message;
+  }
 }
 
 async function vidDelete(id) {

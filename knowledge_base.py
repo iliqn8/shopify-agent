@@ -60,17 +60,20 @@ def init_db():
         video_model TEXT,
         filename TEXT,
         scene_urls TEXT,
+        clips_json TEXT,
         status TEXT NOT NULL DEFAULT 'recipe',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.commit()
-    for col, definition in [
-        ("category", "TEXT NOT NULL DEFAULT 'General'"),
-        ("content_type", "TEXT NOT NULL DEFAULT 'text'"),
-        ("file_path", "TEXT"),
+    for table, col, definition in [
+        ("knowledge", "category", "TEXT NOT NULL DEFAULT 'General'"),
+        ("knowledge", "content_type", "TEXT NOT NULL DEFAULT 'text'"),
+        ("knowledge", "file_path", "TEXT"),
+        # Added after video_projects shipped, so existing databases need it too.
+        ("video_projects", "clips_json", "TEXT"),
     ]:
         try:
-            conn.execute(f"ALTER TABLE knowledge ADD COLUMN {col} {definition}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
             conn.commit()
         except Exception:
             pass
@@ -283,7 +286,8 @@ def save_video_project(title, recipe_json, product_name=None, video_model=None,
 
 
 def update_video_project(project_id, **fields):
-    allowed = {"title", "recipe_json", "video_model", "filename", "scene_urls", "status"}
+    allowed = {"title", "recipe_json", "video_model", "filename", "scene_urls",
+               "clips_json", "status"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
         return
@@ -298,11 +302,11 @@ def update_video_project(project_id, **fields):
 def _video_row(r):
     return {"id": r[0], "title": r[1], "product_name": r[2], "recipe_json": r[3],
             "video_model": r[4], "filename": r[5], "scene_urls": r[6],
-            "status": r[7], "created_at": r[8]}
+            "clips_json": r[7], "status": r[8], "created_at": r[9]}
 
 
 _VIDEO_COLS = ("id, title, product_name, recipe_json, video_model, filename, "
-               "scene_urls, status, created_at")
+               "scene_urls, clips_json, status, created_at")
 
 
 def list_video_projects():
