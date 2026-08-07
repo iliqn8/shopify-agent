@@ -188,9 +188,13 @@ def _verify_swap(base_url, edited_url, product_urls):
             'places, same camera viewpoint. false only if the scene was restaged: the subject '
             'moved or changed activity, the setting or background changed, objects moved, or '
             'the camera viewpoint changed>, '
-            '"product_swapped": <true if the product in B is clearly the C product rather than '
-            'the one in A>, '
-            '"note": "<one short sentence on what differs>"}'})
+            '"product_swapped": <true ONLY if the product in B has been COMPLETELY replaced by '
+            'the C product. Check every part of it separately — body, panels, padding, straps, '
+            'trims, handles, attachments. If any part still has the original product\'s colour '
+            'or shape, this is false: a partial swap is a failure, and a leftover piece in the '
+            'old colour is the usual way it happens>, '
+            '"note": "<one short sentence on what differs; if the swap is partial, name the '
+            'part that was missed>"}'})
 
         resp = client.messages.create(model=MODEL, max_tokens=400,
                                       messages=[{"role": "user", "content": content}])
@@ -366,6 +370,8 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
   "title": "short name for this video project",
   "format_analysis": "2-3 sentences: what happens in this ad and why it works",
   "product_identity": "one precise sentence naming what the product physically is, including its distinguishing visual features. Read it off the frames.",
+  "product_parts": ["every separately-coloured or separately-shaped part of the product, named as it would be seen — e.g. 'main body panel', 'chin-rest float', 'fin spikes', 'buckle straps', 'grab handle'. This list is used to make sure a product swap replaces ALL of it, not just the largest part."],
+  "soundscape": "the diegetic sound this footage would really have, as a comma-separated list of sources, ordered loudest first — e.g. 'gentle water lapping against an inflatable board, light sea breeze, distant seabirds, occasional small splash'. Describe only sound that the pictured place and action would actually make. No music. No speech.",
   "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
   "scenes": [
     {{
@@ -583,8 +589,28 @@ MIN_SCENE = 0.8
 # the whole shot rather than edited it.
 COMPOSITION_MIN = 0.45
 
+# Below this, the reference had no real narration — a stray name or two — and
+# reading it aloud produces an obviously synthetic voice over silent footage.
+NARRATION_MIN_WORDS = 6
 
-def _swap_prompts(ref_count):
+
+def _parts_clause(parts):
+    """Spell out every component of the product.
+
+    Without this the model swaps the largest panel and leaves the rest — a
+    green chin-rest float survived on an otherwise blue vest, because the model
+    treats "the product" as the one obvious shape.
+    """
+    parts = [p for p in (parts or []) if isinstance(p, str) and p.strip()][:8]
+    if not parts:
+        return ""
+    listed = "; ".join(p.strip() for p in parts)
+    return (f"\n\nThe product is made of several distinct parts: {listed}. EVERY one of them "
+            "must be replaced. No part of the original product may remain — check especially "
+            "for a leftover piece in the original's colour, which is the usual failure.")
+
+
+def _swap_prompts(ref_count, parts=None):
     """Instructions for swapping a product into an existing frame, best first.
 
     Each pairs with a rung of fal_client.EDIT_LADDER. The first uses Seedream's
@@ -595,7 +621,8 @@ def _swap_prompts(ref_count):
     figs = ("Figure 2" if ref_count == 1
             else "Figures 2" + "".join(f", {i}" for i in range(3, ref_count + 2)))
     others = "the image that follows" if ref_count == 1 else f"the {ref_count} images that follow"
-    return [
+    pc = _parts_clause(parts)
+    return [p + pc for p in [
         (
             f"Figure 1 is a photograph. {figs} show a product on its own.\n\n"
             f"Edit Figure 1 so that the product worn by or attached to the subject is replaced "
@@ -631,7 +658,7 @@ def _swap_prompts(ref_count):
             "anything. Do not re-stage or re-imagine the scene. Do not borrow the background "
             "or camera angle from the reference images; they are product photos only."
         ),
-    ]
+    ]]
 
 
 def _fit_to_target(scenes, target):
@@ -811,6 +838,8 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
         recipe["mode"] = "recreate"
         recipe["source_duration"] = meta["duration"]
         recipe.setdefault("product_identity", "")
+        recipe.setdefault("product_parts", [])
+        recipe.setdefault("soundscape", "")
 
         if target_duration and abs(float(target_duration) - meta["duration"]) > 0.5:
             was = _fit_to_target(scenes, float(target_duration))
@@ -1101,7 +1130,8 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
 def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                     avatar_model=avatar_registry.DEFAULT_AVATAR_MODEL,
                     avatar_image_url=None, avatar_voice=None, product_image_url=None,
-                    burn_subtitles=True, output_dir=None):
+                    burn_subtitles=True, output_dir=None,
+                    narration="auto", narrator_voice=None, ambient=True):
     """Generate every scene on fal.ai, then assemble the final MP4.
 
     Yields {'type': 'status'|'scene'|'done', ...}. The final event carries
@@ -1213,7 +1243,7 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 # framing are inherited rather than reinvented.
                 if product_refs and s.get("shows_product"):
                     image_url = None
-                    prompts = _swap_prompts(len(product_refs))
+                    prompts = _swap_prompts(len(product_refs), recipe.get("product_parts"))
                     for attempt, rung in enumerate(fal_client.EDIT_LADDER, start=1):
                         swap = prompts[min(attempt - 1, len(prompts) - 1)]
                         # Pin the recipe's aspect. "auto" lets the model pick,
@@ -1325,14 +1355,24 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
             yield {"type": "scene", "index": s["index"], "url": url, "kind": s["kind"]}
 
         global_audio_url = None
-        if not per_scene_voice:
+        if narration != "off" and not per_scene_voice:
             script = " ".join(
                 (s.get("voiceover") or "").strip()
                 for s in scenes if s.get("kind") == "broll" and (s.get("voiceover") or "").strip()
             ).strip()
+            # "auto" skips narration the reference never really had — a couple
+            # of stray words become a synthetic-sounding voiceover over footage
+            # that was essentially silent.
+            if narration == "auto" and len(script.split()) < NARRATION_MIN_WORDS:
+                if script:
+                    yield {"type": "status", "text": (
+                        f"🔇 Reference is essentially silent ({len(script.split())} words) — "
+                        "skipping narration")}
+                script = ""
             if script:
                 yield {"type": "status", "text": "🔊 Recording narration in one take…"}
-                global_audio_url = fal_client.generate_voiceover(script, voice=voice, on_status=status)
+                global_audio_url = fal_client.generate_voiceover(
+                    script, voice=narrator_voice or voice, on_status=status)
                 yield from drain("Narration")
 
         yield {"type": "status", "text": "✂️ Assembling final video…"}
@@ -1342,7 +1382,6 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 aspect_ratio=aspect,
                 burn_subtitles=burn_subtitles,
                 output_dir=output_dir,
-                global_audio_url=global_audio_url,
             )
         except Exception as e:
             # The clips are already paid for — hand them back so assembly can be
@@ -1351,9 +1390,36 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                    "clips": _serialisable(clips), "global_audio_url": global_audio_url}
             return
 
+        # Ambience has to come from the finished cut, so it is a second pass.
+        ambient_url = None
+        soundscape = (recipe.get("soundscape") or "").strip()
+        if ambient and soundscape:
+            cut_path = os.path.join(output_dir, filename)
+            try:
+                yield {"type": "status", "text": f"🌊 Adding sound: {soundscape[:90]}"}
+                cut_url = fal_client.upload_bytes(
+                    open(cut_path, "rb").read(), "cut.mp4", "video/mp4")
+                ambient_url = fal_client.generate_ambient(
+                    cut_url, soundscape, recipe.get("total_duration") or 8, on_status=status)
+                yield from drain("Sound")
+            except Exception as e:
+                yield {"type": "status", "text": f"⚠️ Could not generate ambience: {e}"}
+
+        if ambient_url or global_audio_url:
+            cut_path = os.path.join(output_dir, filename)
+            mixed = video_assembler.add_soundtrack(
+                cut_path, output_dir,
+                narration_url=global_audio_url, ambient_url=ambient_url)
+            try:
+                os.remove(cut_path)      # the silent intermediate
+            except OSError:
+                pass
+            filename = mixed
+
         yield {"type": "status", "text": "✅ Done"}
         yield {"type": "done", "filename": filename, "scene_urls": [c["url"] for c in clips],
-               "clips": _serialisable(clips), "global_audio_url": global_audio_url}
+               "clips": _serialisable(clips), "global_audio_url": global_audio_url,
+               "ambient_audio_url": ambient_url}
 
     except fal_client.FalError as e:
         yield {"type": "done", "error": str(e)}
@@ -1369,7 +1435,7 @@ def _serialisable(clips):
 
 
 def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_dir=None,
-                      global_audio_url=None):
+                      global_audio_url=None, ambient_audio_url=None):
     """Re-run assembly over already-generated clips. Costs nothing."""
     try:
         if not clips:
@@ -1389,6 +1455,7 @@ def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_di
             burn_subtitles=burn_subtitles,
             output_dir=output_dir or video_assembler.OUTPUT_DIR,
             global_audio_url=global_audio_url,
+            ambient_audio_url=ambient_audio_url,
         )
         yield {"type": "status", "text": "✅ Done"}
         yield {"type": "done", "filename": filename,

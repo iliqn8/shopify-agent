@@ -257,31 +257,89 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
     return dest
 
 
-def _apply_global_audio(video_path, audio_url, tmpdir, out_path):
-    """Lay one continuous narration over the finished cut.
+# Integrated loudness targets, LUFS. Generated ambience comes back around 9 dB
+# quieter than real phone footage, so it is normalised rather than scaled by a
+# guessed factor; under narration it sits well below it.
+LOUDNESS_AMBIENT_ALONE = -18
+LOUDNESS_AMBIENT_UNDER_SPEECH = -28
+LOUDNESS_NARRATION = -16
 
-    Per-scene narration means each line is spoken in isolation, which on
-    two-second scenes lands as clipped, robotic fragments. A single read across
-    the whole video keeps the natural sentence flow and cadence.
+
+def _apply_audio(video_path, tmpdir, out_path, narration_url=None, ambient_url=None):
+    """Lay narration and/or ambience over the finished cut.
+
+    Narration is one continuous read rather than per-scene clips, which on
+    two-second scenes would land as robotic fragments. Ambience is ducked
+    slightly under it so speech stays intelligible, but stays loud on its own
+    when there is no narration — the sound of the place is most of what makes
+    a clip read as filmed rather than rendered.
     """
-    audio = _download(audio_url, os.path.join(tmpdir, "global_vo.mp3"))
+    if not narration_url and not ambient_url:
+        shutil.copyfile(video_path, out_path)
+        return out_path
+
     video_dur = _probe_duration(video_path)
-    args = ["-y", "-i", video_path, "-i", audio,
-            "-filter_complex", "[1:a]apad,aresample=48000[a]",
-            "-map", "0:v:0", "-map", "[a]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
+    args = ["-y", "-i", video_path]
+    idx, parts, labels = 1, [], []
+
+    if ambient_url:
+        # MMAudio hands back a video with the ambience muxed in; ffmpeg reads
+        # the audio stream straight out of it.
+        args += ["-i", _download(ambient_url, os.path.join(tmpdir, "ambient_source.mp4"))]
+        target = LOUDNESS_AMBIENT_UNDER_SPEECH if narration_url else LOUDNESS_AMBIENT_ALONE
+        parts.append(f"[{idx}:a]loudnorm=I={target}:TP=-1.5:LRA=11,apad,aresample=48000[amb]")
+        labels.append("[amb]")
+        idx += 1
+
+    if narration_url:
+        args += ["-i", _download(narration_url, os.path.join(tmpdir, "narration.mp3"))]
+        parts.append(f"[{idx}:a]loudnorm=I={LOUDNESS_NARRATION}:TP=-1.5:LRA=11,"
+                     f"apad,aresample=48000[vo]")
+        labels.append("[vo]")
+        idx += 1
+
+    if len(labels) == 2:
+        # `longest` with apad on both would run forever; -t bounds the output.
+        parts.append(f"{labels[0]}{labels[1]}amix=inputs=2:duration=longest:normalize=0[a]")
+    else:
+        parts.append(f"{labels[0]}anull[a]")
+
+    args += ["-filter_complex", ";".join(parts), "-map", "0:v:0", "-map", "[a]",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
     if video_dur:
         args += ["-t", f"{video_dur:.3f}"]
     args += ["-movflags", "+faststart", out_path]
 
     code, err = _run(args)
     if code != 0 or not os.path.exists(out_path):
-        raise AssemblyError(f"ffmpeg failed muxing narration: {err[-600:]}")
+        raise AssemblyError(f"ffmpeg failed muxing audio: {err[-600:]}")
     return out_path
 
 
+def add_soundtrack(cut_path, output_dir, narration_url=None, ambient_url=None,
+                   filename=None):
+    """Mux narration/ambience onto an already-assembled cut, into a new file.
+
+    Ambience has to be generated FROM the finished video, so it cannot be known
+    when the cut is built — hence a second pass. It is only a remux, with the
+    video stream copied, so it costs a moment rather than a re-encode.
+    """
+    import uuid
+    os.makedirs(output_dir, exist_ok=True)
+    filename = filename or f"video_{uuid.uuid4().hex[:12]}.mp4"
+    out_path = os.path.join(output_dir, filename)
+    tmpdir = tempfile.mkdtemp(prefix="vidcloner_audio_")
+    try:
+        _apply_audio(cut_path, tmpdir, out_path,
+                     narration_url=narration_url, ambient_url=ambient_url)
+        return filename
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
-             output_dir=None, filename=None, global_audio_url=None):
+             output_dir=None, filename=None, global_audio_url=None,
+             ambient_audio_url=None):
     """Stitch generated scene clips into one MP4.
 
     `clips` is a list of {"scene": <recipe scene dict>, "url": <video url>,
@@ -327,9 +385,10 @@ def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
             )
             segments.append(seg)
 
-        # When one narration track spans the whole video it is muxed on at the
+        # Narration and ambience span the whole video and are muxed on at the
         # end, so build the cut to a scratch file first.
-        cut_path = os.path.join(tmpdir, "cut.mp4") if global_audio_url else out_path
+        needs_mux = bool(global_audio_url or ambient_audio_url)
+        cut_path = os.path.join(tmpdir, "cut.mp4") if needs_mux else out_path
 
         if len(segments) == 1:
             shutil.copyfile(segments[0], cut_path)
@@ -356,8 +415,9 @@ def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
                 if code != 0:
                     raise AssemblyError(f"ffmpeg concat failed: {err[-800:]}")
 
-        if global_audio_url:
-            _apply_global_audio(cut_path, global_audio_url, tmpdir, out_path)
+        if needs_mux:
+            _apply_audio(cut_path, tmpdir, out_path,
+                         narration_url=global_audio_url, ambient_url=ambient_audio_url)
 
         return filename
     finally:

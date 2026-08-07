@@ -123,10 +123,16 @@ EDIT_LADDER = [
     # the one in Figure 2" as a spatial instruction across reference images.
     {"id": "fal-ai/bytedance/seedream/v4.5/edit", "label": "Seedream 4.5 Edit", "usd": 0.04},
     {"id": "fal-ai/nano-banana/edit", "label": "Nano Banana Edit", "usd": 0.04},
-    # Last resort: nearly 4x the price, but the strongest at following a
-    # "change only this" instruction.
+    # Strongest instruction follower of the three, and the only one that leaves
+    # untouched regions genuinely untouched rather than resynthesised.
+    {"id": "openai/gpt-image-2/edit", "label": "GPT Image 2 Edit", "usd": 0.21},
     {"id": "fal-ai/nano-banana-pro/edit", "label": "Nano Banana Pro Edit", "usd": 0.15},
 ]
+
+# Video-to-audio. Generates ambience that matches what is on screen — water,
+# wind, footsteps — which is most of what makes a clip read as real footage
+# rather than a render. At $0.001/s it is the cheapest thing in the pipeline.
+AUDIO_MODEL = "fal-ai/mmaudio-v2"
 TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
 
 
@@ -278,8 +284,13 @@ def edit_image(image_urls, prompt, aspect_ratio="9:16", on_status=None,
     if seed is not None:
         payload["seed"] = seed
 
-    if "seedream" in model_id:
+    if "seedream" in model_id or "gpt-image" in model_id:
+        # Both take a named image_size rather than an aspect ratio string.
         payload["image_size"] = _SEEDREAM_SIZES.get(aspect_ratio, "portrait_16_9")
+        payload.pop("seed", None)          # gpt-image-2 rejects unknown fields
+        if "gpt-image" in model_id:
+            payload["quality"] = "high"
+            payload["output_format"] = "jpeg"
     else:
         payload["aspect_ratio"] = aspect_ratio
         payload["output_format"] = "jpeg"
@@ -403,6 +414,27 @@ def get_balance():
     if r.status_code >= 400:
         raise FalError(f"fal.ai balance check failed ({r.status_code}): {r.text[:200]}")
     return float(r.text.strip())
+
+
+def generate_ambient(video_url, prompt, duration, on_status=None):
+    """Generate diegetic sound matched to what happens on screen.
+
+    Returns the URL of a video with the ambience muxed in — the caller pulls
+    the audio track out of it. Costs about a cent for a short ad.
+    """
+    out = run(AUDIO_MODEL, {
+        "video_url": video_url,
+        "prompt": prompt,
+        "negative_prompt": "music, soundtrack, speech, voice, narration, talking",
+        "duration": float(duration),
+        "num_steps": 25,
+        "cfg_strength": 4.5,
+    }, on_status=on_status, timeout=600)
+    video = out.get("video") or {}
+    url = video.get("url") if isinstance(video, dict) else None
+    if not url:
+        raise FalError(f"Audio model returned nothing usable: {str(out)[:300]}")
+    return url
 
 
 def check_account():

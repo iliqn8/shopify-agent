@@ -499,7 +499,29 @@
           </div>
         </div>
 
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+          <div>
+            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">NARRATION</label>
+            <select id="vid-narration" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px">
+              <option value="auto">Auto — only if the reference actually speaks</option>
+              <option value="off">Off — no voiceover at all</option>
+              <option value="on">On — always narrate</option>
+            </select>
+          </div>
+          <div>
+            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">NARRATOR VOICE</label>
+            <select id="vid-narrator-voice" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px">
+              <option value="">— From the recipe —</option>
+            </select>
+          </div>
+        </div>
+
         <label style="display:flex;align-items:center;gap:8px;margin-top:14px;color:#aaa;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="vid-ambient" checked> Add real ambient sound (water, wind, surroundings) — about $0.01
+        </label>
+        <div id="vid-soundscape" style="color:#666;font-size:11px;margin:4px 0 0 24px"></div>
+
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;color:#aaa;font-size:13px;cursor:pointer">
           <input type="checkbox" id="vid-subs"> Burn on-screen text / captions
         </label>
 
@@ -1867,6 +1889,7 @@ let vidActorUrl = null;
 let vidActorFile = null;
 let vidProviders = {};
 let vidModelNotes = {};
+let vidVoices = [];
 
 function vidModelChanged() {
   const note = vidModelNotes[document.getElementById('vid-model').value];
@@ -1887,6 +1910,7 @@ async function vidInit() {
     mSel.innerHTML = d.video_models.map(m =>
       `<option value="${m.key}"${m.recommended ? ' selected' : ''}>${m.label}</option>`).join('');
     vidModelNotes = Object.fromEntries(d.video_models.map(m => [m.key, m.note || '']));
+    vidVoices = d.voices || [];
     vidModelChanged();
     const aSel = document.getElementById('vid-avatar-model');
     aSel.innerHTML = d.avatar_models.map(m =>
@@ -2151,6 +2175,16 @@ function vidRenderRecipe() {
     `${r.scenes.length} scenes · ${r.total_duration}s${src} · ${r.aspect_ratio} · voice: ${r.voice}`;
   document.getElementById('vid-format-analysis').textContent = r.format_analysis || '';
 
+  const sc = document.getElementById('vid-soundscape');
+  sc.textContent = r.soundscape ? '🌊 ' + r.soundscape : '';
+
+  // The recipe picks a voice; let it be overridden without editing the JSON.
+  const vsel = document.getElementById('vid-narrator-voice');
+  if (vsel.options.length <= 1 && Array.isArray(vidVoices)) {
+    vsel.innerHTML = `<option value="">— From the recipe (${vidEsc(r.voice || 'Sarah')}) —</option>` +
+      vidVoices.map(v => `<option value="${vidEsc(v)}">${vidEsc(v)}</option>`).join('');
+  }
+
   // Show what the product shots will actually be built from — this is the
   // difference between reproducing the product and inventing one.
   const refs = r.product_reference_urls || [];
@@ -2254,7 +2288,10 @@ async function vidGenerate() {
         avatar_voice: document.getElementById('vid-avatar-voice').value || null,
         product_image_url: product ? product.image : null,
         product_name: product ? product.title : null,
-        burn_subtitles: document.getElementById('vid-subs').checked
+        burn_subtitles: document.getElementById('vid-subs').checked,
+        narration: document.getElementById('vid-narration').value,
+        narrator_voice: document.getElementById('vid-narrator-voice').value || null,
+        ambient: document.getElementById('vid-ambient').checked
       })
     });
     const d = await vidJson(r);

@@ -794,7 +794,11 @@ def video_generate_start():
     avatar_voice = data.get("avatar_voice") or None
     product_image_url = data.get("product_image_url") or None
     product_name = data.get("product_name") or None
-    burn_subtitles = data.get("burn_subtitles", True)
+    burn_subtitles = data.get("burn_subtitles", False)
+    narration = data.get("narration") or "auto"
+    if narration not in ("auto", "on", "off"):
+        narration = "auto"
+    ambient = data.get("ambient", True)
 
     project_id = kb.save_video_project(
         title=recipe.get("title", "Untitled video"),
@@ -815,6 +819,9 @@ def video_generate_start():
             avatar_voice=avatar_voice,
             product_image_url=product_image_url,
             burn_subtitles=burn_subtitles,
+            narration=narration,
+            narrator_voice=(data.get("narrator_voice") or None),
+            ambient=ambient,
         ):
             if event.get("type") == "done":
                 fields = {}
@@ -824,6 +831,7 @@ def video_generate_start():
                     fields["clips_json"] = json.dumps({
                         "clips": event["clips"],
                         "global_audio_url": event.get("global_audio_url"),
+                        "ambient_audio_url": event.get("ambient_audio_url"),
                     })
                     fields["scene_urls"] = json.dumps([c["url"] for c in event["clips"]])
                 if event.get("error"):
@@ -859,8 +867,9 @@ def video_reassemble(pid):
     if isinstance(stored, dict):
         clips = stored.get("clips") or []
         global_audio_url = stored.get("global_audio_url")
+        ambient_audio_url = stored.get("ambient_audio_url")
     else:
-        clips, global_audio_url = stored, None
+        clips, global_audio_url, ambient_audio_url = stored, None, None
     if not clips:
         return jsonify({"error": "This project has no saved clips — it predates "
                                  "clip retention, or generation failed before any "
@@ -872,7 +881,7 @@ def video_reassemble(pid):
         recipe = {}
 
     data = request.json or {}
-    burn_subtitles = data.get("burn_subtitles", True)
+    burn_subtitles = data.get("burn_subtitles", False)
     job_id = str(_uuid_v4.uuid4())
 
     def factory():
@@ -881,6 +890,7 @@ def video_reassemble(pid):
             aspect_ratio=recipe.get("aspect_ratio", "9:16"),
             burn_subtitles=burn_subtitles,
             global_audio_url=global_audio_url,
+            ambient_audio_url=ambient_audio_url,
         ):
             if event.get("type") == "done":
                 if event.get("error"):
