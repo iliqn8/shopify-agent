@@ -187,28 +187,36 @@ SWAP_SLOTS = {
                     "camera viewpoint and the framing",
     },
     "environment": {
-        "noun": "background and setting",
+        "noun": "location",
         "label": "environment",
         # Replacing the setting redraws nearly every edge; structure cannot judge it.
         "layout_min": None,
-        "keep": "the subject, its pose, position and size in frame, any product it wears or "
-                "holds, and the camera viewpoint and framing",
-        "completeness": "The setting in B must clearly be the place shown in C, not the "
-                        "original location merely recoloured or relit.",
-        "instruction": "the background and surroundings the subject is in",
+        "keep": "the subject itself — same species, breed, colouring, pose, position and size "
+                "in frame — any product it wears or holds, and the camera viewpoint and framing",
+        "completeness": "The location in B must read as the KIND of place shown in C — its "
+                        "surface, water, terrain, vegetation and light. It does NOT have to "
+                        "match C's exact composition or viewpoint; C is a reference for the "
+                        "place, not a backdrop to paste in. Also false if the result looks "
+                        "composited: a cut-out subject, mismatched lighting or shadows, or "
+                        "objects left over from the original location that do not belong in "
+                        "the new one.",
+        "instruction": "the location the action happens in",
         "preserve": "the subject exactly as it is — same pose, position, size, orientation and "
                     "appearance — along with any product it wears or holds, and the camera "
                     "viewpoint and framing",
     },
 }
 
-# Applied in this order. Product first because it is the smallest, most precise
-# edit and is easiest to verify against an untouched frame; environment last
-# because it repaints the most and would otherwise obscure the earlier checks.
-SWAP_ORDER = ["product", "subject", "environment"]
+# Applied most-destructive first. Environment repaints nearly the whole frame,
+# so anything swapped before it gets mangled by it — a product replaced first
+# came back altered once the setting was redrawn around it. Product goes last:
+# it is the smallest, most precisely verified edit, and nothing after it can
+# disturb what it just fixed.
+SWAP_ORDER = ["environment", "subject", "product"]
 
 
-def _verify_swap(base_url, edited_url, ref_urls, slot="product"):
+def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=None,
+                 masked=False):
     """Ask the vision model whether the swap did what was asked.
 
     Pixel heuristics cannot answer this. A whole-frame colour histogram scores
@@ -237,12 +245,46 @@ def _verify_swap(base_url, edited_url, ref_urls, slot="product"):
         content += block(edited_url, "IMAGE B — the edited frame:")
         for i, u in enumerate(ref_urls[:3], start=1):
             content += block(u, f"IMAGE C{i} — the replacement {spec['noun']}:")
+        if masked:
+            # The subject was cut out and handed over as a mask, so those pixels
+            # are preserved by construction. Asking a vision model to re-judge
+            # the pose only produces false rejections — it reads the loss of a
+            # prop the subject was leaning on as the subject having moved.
+            content.append({"type": "text", "text":
+                "B is A with the background repainted through a mask; the subject itself was "
+                "protected and cannot have moved. Do not judge the subject's pose or position."
+                + ("\n\nObjects deliberately removed with the old location: "
+                   + "; ".join(removed_props[:6]) + ". Their absence is correct."
+                   if removed_props else "") +
+                "\n\nAnswer with JSON only, no prose:\n"
+                '{"scene_kept": <true unless the subject itself was visibly altered or '
+                'duplicated>, '
+                '"swapped": <true if the location in B now reads as the kind of place shown in '
+                'the C images AND the result looks like a real photograph taken there — light '
+                'on the subject consistent with the new setting, plausible shadows and '
+                'reflections, the subject sitting in the scene rather than pasted on top. '
+                'false if it still shows the old location, or if it looks composited>, '
+                '"note": "<one short sentence on what is wrong, if anything>"}'})
+            resp = client.messages.create(model=MODEL, max_tokens=400,
+                                          messages=[{"role": "user", "content": content}])
+            text = "".join(b.text for b in resp.content if b.type == "text")
+            data = _extract_json(text)
+            return (bool(data.get("scene_kept")), bool(data.get("swapped")),
+                    str(data.get("note") or ""))
+
+        props_note = ""
+        if removed_props:
+            props_note = (
+                "\n\nThese objects belonged to A's original location and were DELIBERATELY "
+                "removed: " + "; ".join(removed_props[:6]) + ". Their absence from B is "
+                "CORRECT and must not count against it.")
+
         content.append({"type": "text", "text":
             f"B was meant to be A with only the {spec['noun']} replaced by the one in the C "
             "images.\n\n"
             "Judge the CONTENT of the scene, not the file. Ignore resolution, image size, "
             "compression and small crop differences at the edges — those are expected and "
-            "harmless.\n\n"
+            "harmless." + props_note + "\n\n"
             "Answer with JSON only, no prose:\n"
             '{"scene_kept": <true if everything OUTSIDE the replaced ' + spec['noun'] + ' is '
             'unchanged: ' + spec['keep'] + '. false only if something outside it was restaged, '
@@ -427,6 +469,8 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
   "format_analysis": "2-3 sentences: what happens in this ad and why it works",
   "product_identity": "one precise sentence naming what the product physically is, including its distinguishing visual features. Read it off the frames.",
   "product_parts": ["every separately-coloured or separately-shaped part of the product, named as it would be seen — e.g. 'main body panel', 'chin-rest float', 'fin spikes', 'buckle straps', 'grab handle'. This list is used to make sure a product swap replaces ALL of it, not just the largest part."],
+  "location_props": ["objects visible in the reference that belong to its LOCATION rather than to the subject or the product — e.g. 'inflatable paddleboard', 'wooden jetty', 'beach umbrella', 'kitchen counter'. Exclude the product and anything the subject wears or holds. If the location is later changed these have to be removed, so name them even when they seem incidental."],
+  "environment_brief": "<only if NEW LOCATION photos were attached> one or two sentences describing the kind of place the action moves to — ground/surface, water, terrain, vegetation, structures, time of day, quality of light. Otherwise \\"\\".",
   "soundscape": "the diegetic sound this footage would really have, as a comma-separated list of sources, ordered loudest first — e.g. 'gentle water lapping against an inflatable board, light sea breeze, distant seabirds, occasional small splash'. Describe only sound that the pictured place and action would actually make. No music. No speech.",
   "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
   "scenes": [
@@ -666,16 +710,66 @@ def _parts_clause(parts):
             "for a leftover piece in the original's colour, which is the usual failure.")
 
 
-def _slot_prompts(slot, ref_count, parts=None):
+def _environment_prompts(ref_count, brief="", props=None):
+    """Move the action to a new kind of place, believably.
+
+    Not a background replacement. Pasting the subject onto a different photo
+    gives the cut-out, mismatched-light look; what is wanted is the same moment
+    re-shot on location somewhere of that character. The reference photos are
+    a brief, not a backplate.
+
+    `props` are objects tied to the ORIGINAL location. They have to be named
+    for removal: they are neither subject nor product, so every "keep
+    everything else" instruction silently preserves them, and a paddleboard
+    followed a dog onto a beach that had none.
+    """
+    figs = "the reference photo" if ref_count == 1 else f"the {ref_count} reference photos"
+    props = [p for p in (props or []) if isinstance(p, str) and p.strip()][:6]
+    remove = ""
+    if props:
+        remove = ("\n\nThese belong to the ORIGINAL location and must be GONE from the result, "
+                  "not carried over: " + "; ".join(p.strip() for p in props) +
+                  ". Do not add replacements for them unless the new place would naturally "
+                  "have them. Fill the space they occupied with whatever the new location "
+                  "actually has there.")
+    place = f"\n\nThe new location: {brief.strip()}" if brief and brief.strip() else ""
+
+    common = (
+        "Keep the subject EXACTLY as it is — same species, breed, colouring and markings, same "
+        "pose, same position and size in the frame, same orientation — and keep any product it "
+        "wears or holds unchanged. Keep the camera viewpoint, the crop and the framing.\n\n"
+        "The result must look like a real photograph taken in that place: the light on the "
+        "subject matches the new location's light, shadows and reflections fall correctly, the "
+        "subject sits in the scene rather than on top of it, and depth of field is consistent. "
+        "It must not look composited or cut out."
+        + remove
+    )
+    return [
+        (f"Re-shoot this exact moment on location somewhere like {figs}.{place}\n\n"
+         f"Take the CHARACTER of the place from the reference — its surface, water, terrain, "
+         f"vegetation, colours and quality of light. Do NOT copy its composition, its camera "
+         f"angle or its specific objects; it is a mood reference, not a backdrop to paste in. "
+         f"Invent the details that make the new setting coherent.\n\n" + common),
+        (f"Change where this photograph was taken.{place}\n\n"
+         f"Everything around the subject becomes a new setting in the spirit of {figs} — you "
+         f"may reinterpret it freely, use only part of it, or extend it, as long as the result "
+         f"is a believable real place of that kind seen from this camera position.\n\n"
+         + common),
+    ]
+
+
+def _slot_prompts(slot, ref_count, parts=None, brief="", props=None):
     """Escalating edit instructions for one swap slot, best first.
 
-    Product keeps its own hand-tuned wording — it is the slot that took the
-    most iterations to get right. The others are generated from the slot's
-    description, which is the same shape of instruction: replace exactly one
-    thing, leave everything named in `preserve` untouched.
+    Product and environment have their own hand-tuned wording — they are the
+    two that took the most iterations. Subject is generated from the slot's
+    description, being the straightforward case: replace one thing, leave
+    everything named in `preserve` untouched.
     """
     if slot == "product":
         return _swap_prompts(ref_count, parts)
+    if slot == "environment":
+        return _environment_prompts(ref_count, brief, props)
 
     spec = SWAP_SLOTS[slot]
     figs = ("Figure 2" if ref_count == 1
@@ -884,6 +978,22 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
                 "media_type": img.get("media_type", "image/jpeg"),
                 "data": img["b64"]}})
 
+        for i, img in enumerate(environment_images or [], start=1):
+            content.append({"type": "text", "text": f"NEW LOCATION — REFERENCE PHOTO {i}:"})
+            content.append({"type": "image", "source": {
+                "type": "base64",
+                "media_type": img.get("media_type", "image/jpeg"),
+                "data": img["b64"]}})
+        if environment_images:
+            content.append({"type": "text", "text":
+                "The action is being moved to a place like the NEW LOCATION photos. Describe "
+                "that place in `environment_brief`: surface or ground, water if any, terrain, "
+                "vegetation, structures, time of day and quality of light. Describe the KIND "
+                "of place, not that specific photograph's composition — it is a reference for "
+                "the setting, not a backdrop to be pasted in.\n\n"
+                "`soundscape` must then describe what the NEW location sounds like, not the "
+                "original one."})
+
         product_block = (RECREATE_SWAP_PRODUCT.format(product=_format_product(product, len(product_images)))
                          if swapping else RECREATE_SAME_PRODUCT)
         content.append({"type": "text", "text": RECREATE_PROMPT.format(
@@ -929,6 +1039,8 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
         recipe["source_duration"] = meta["duration"]
         recipe.setdefault("product_identity", "")
         recipe.setdefault("product_parts", [])
+        recipe.setdefault("location_props", [])
+        recipe.setdefault("environment_brief", "")
         recipe.setdefault("soundscape", "")
 
         if target_duration and abs(float(target_duration) - meta["duration"]) > 0.5:
@@ -1372,8 +1484,8 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                     yield {"type": "status", "text": f"   {label} · using the reference's own frame"}
                 for slot, refs in wanted:
                     image_url = yield from _swap_into(
-                        image_url, slot, refs, aspect, label, s["index"],
-                        recipe.get("product_parts"), status, drain)
+                        image_url, slot, refs, aspect, label, s["index"], recipe,
+                        status, drain)
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
@@ -1512,7 +1624,7 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
 
 
-def _swap_into(base_url, slot, refs, aspect, label, scene_index, product_parts,
+def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
                status, drain):
     """Replace one thing in a frame, verifying the result. Yields status events.
 
@@ -1521,15 +1633,39 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, product_parts,
     original is better than one where the scene has been redrawn.
     """
     spec = SWAP_SLOTS[slot]
-    prompts = _slot_prompts(slot, len(refs), product_parts)
+    props = recipe.get("location_props") if slot == "environment" else None
+    prompts = _slot_prompts(slot, len(refs),
+                            parts=recipe.get("product_parts"),
+                            brief=recipe.get("environment_brief", ""),
+                            props=recipe.get("location_props"))
 
-    for attempt, rung in enumerate(fal_client.edit_ladder(slot), start=1):
+    # Changing the location while keeping the subject identical does not work
+    # by instruction alone — every model tested moved the dog, turned it, or
+    # resubmerged it. Cutting the subject out and handing that as a mask makes
+    # it physically impossible to touch, so the location swap leads with it.
+    mask_url = None
+    if slot == "environment":
+        try:
+            yield {"type": "status", "text": f"   {label} · isolating the subject…"}
+            mask_url = fal_client.segment_subject(base_url, on_status=status)
+            yield from drain(label)
+        except Exception as e:
+            yield {"type": "status", "text": f"   {label} · could not isolate the subject ({e})"}
+
+    ladder = fal_client.edit_ladder(slot)
+    if mask_url:
+        # Only gpt-image-2 accepts a mask, so it has to go first here.
+        masked = [r for r in ladder if "gpt-image" in r["id"]]
+        ladder = masked + [r for r in ladder if r not in masked]
+
+    for attempt, rung in enumerate(ladder, start=1):
         prompt = prompts[min(attempt - 1, len(prompts) - 1)]
+        use_mask = mask_url if "gpt-image" in rung["id"] else None
         # Pin the recipe's aspect. "auto" lets the model pick, and it returns a
         # differently-cropped frame that no longer matches the rest of the cut.
         candidate = fal_client.edit_image(
             [base_url] + refs, prompt, aspect_ratio=aspect, on_status=status,
-            model_id=rung["id"], seed=attempt * 1000 + scene_index)
+            model_id=rung["id"], seed=attempt * 1000 + scene_index, mask_url=use_mask)
         yield from drain(label)
 
         # The edit model will happily compose a brand-new scene out of all the
@@ -1545,11 +1681,13 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, product_parts,
                     f"(layout match {score:.2f}) — escalating")}
                 continue
 
-        scene_ok, swapped, note = _verify_swap(base_url, candidate, refs, slot)
+        scene_ok, swapped, note = _verify_swap(base_url, candidate, refs, slot,
+                                               removed_props=props, masked=bool(use_mask))
         if scene_ok and swapped:
             yield {"type": "status", "text": (
-                f"   {label} · {spec['label']} swapped in, rest of the shot intact"
-                + (f" (layout {score:.2f})" if score is not None else ""))}
+                f"   {label} · {spec['label']} swapped in"
+                + (" (subject mask held)" if use_mask else "")
+                + (f", layout {score:.2f}" if score is not None else ""))}
             return candidate
 
         reason = ("the rest of the shot was redrawn" if not scene_ok

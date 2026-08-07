@@ -293,7 +293,7 @@ _SEEDREAM_SIZES = {
 
 
 def edit_image(image_urls, prompt, aspect_ratio="9:16", on_status=None,
-               model_id=None, seed=None):
+               model_id=None, seed=None, mask_url=None):
     """Build a shot around real reference photos. Returns image URL.
 
     `image_urls` are actual pictures — a frame to edit, product photos, or
@@ -314,6 +314,10 @@ def edit_image(image_urls, prompt, aspect_ratio="9:16", on_status=None,
         if "gpt-image" in model_id:
             payload["quality"] = "high"
             payload["output_format"] = "jpeg"
+            # Only this model takes a mask; transparent regions are the ones
+            # it is allowed to repaint.
+            if mask_url:
+                payload["mask_url"] = mask_url
     else:
         payload["aspect_ratio"] = aspect_ratio
         payload["output_format"] = "jpeg"
@@ -437,6 +441,37 @@ def get_balance():
     if r.status_code >= 400:
         raise FalError(f"fal.ai balance check failed ({r.status_code}): {r.text[:200]}")
     return float(r.text.strip())
+
+
+SEGMENT_MODEL = "fal-ai/birefnet/v2"
+
+
+def segment_subject(image_url, on_status=None):
+    """Cut the foreground subject out. Returns a PNG URL: subject opaque,
+    background transparent.
+
+    That is exactly the mask shape an image editor wants for "repaint the
+    background" — transparent means editable. Without it, asking a model to
+    change the location while keeping the subject identical does not work:
+    every model tested moved the dog, changed its angle or resubmerged it,
+    because nothing physically stops them redrawing it.
+    """
+    out = run(SEGMENT_MODEL, {
+        "image_url": image_url,
+        "model": "General Use (Heavy)",
+        "operating_resolution": "1024x1024",
+        "refine_foreground": True,
+        "output_mask": False,
+    }, on_status=on_status, timeout=300)
+
+    img = out.get("image") or {}
+    url = img.get("url") if isinstance(img, dict) else None
+    if not url:
+        images = out.get("images") or []
+        url = images[0].get("url") if images else None
+    if not url:
+        raise FalError(f"Segmentation returned nothing usable: {str(out)[:300]}")
+    return url
 
 
 def generate_ambient(video_url, prompt, duration, on_status=None):
