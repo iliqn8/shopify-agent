@@ -38,35 +38,44 @@ def _headers():
 # Keep these honest — the UI turns them into a pre-flight cost estimate, and the
 # spread between the cheapest and dearest option here is nearly 6x.
 VIDEO_MODELS = {
-    "kling-2.5-standard": {
-        "id": "fal-ai/kling-video/v2.5-turbo/standard/image-to-video",
-        "label": "Kling 2.5 Turbo Standard — $0.042/s (cheapest)",
+    "kling-2.6-pro": {
+        "id": "fal-ai/kling-video/v2.6/pro/image-to-video",
+        "label": "Kling 2.6 Pro — $0.07/s ★ most realistic for the money",
         "durations": ["5", "10"],
-        "usd_per_second": 0.042,
+        "usd_per_second": 0.07,
+        "recommended": True,
+        "note": "Newest Kling. Best bet for footage that does not read as AI: "
+                "steady faces and hands, believable physics.",
     },
     "kling-2.5-pro": {
         "id": "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
-        "label": "Kling 2.5 Turbo Pro — $0.07/s (best motion)",
+        "label": "Kling 2.5 Turbo Pro — $0.07/s (proven, slightly older)",
         "durations": ["5", "10"],
         "usd_per_second": 0.07,
+        "note": "Same price as 2.6. Fall back here if 2.6 misreads a shot.",
     },
-    "kling-2.6-pro": {
-        "id": "fal-ai/kling-video/v2.6/pro/image-to-video",
-        "label": "Kling 2.6 Pro — $0.07/s (newest)",
-        "durations": ["5", "10"],
-        "usd_per_second": 0.07,
+    "seedance-pro": {
+        "id": "bytedance/seedance-2.0/image-to-video",
+        "label": "Seedance 2.0 — $0.30/s (highest fidelity, 4x the price)",
+        "durations": ["4", "6", "8", "10", "12"],
+        "usd_per_second": 0.3034,
+        "note": "Sharpest detail and best complex motion, but four times Kling Pro. "
+                "Worth it for a hero shot, wasteful for testing.",
     },
     "seedance-fast": {
         "id": "bytedance/seedance-2.0/fast/image-to-video",
         "label": "Seedance 2.0 Fast — $0.24/s",
         "durations": ["4", "6", "8", "10", "12"],
         "usd_per_second": 0.2419,
+        "note": "Cheaper Seedance, still 3x Kling Pro. Rarely the right pick.",
     },
-    "seedance-pro": {
-        "id": "bytedance/seedance-2.0/image-to-video",
-        "label": "Seedance 2.0 — $0.30/s (720p, highest fidelity)",
-        "durations": ["4", "6", "8", "10", "12"],
-        "usd_per_second": 0.3034,
+    "kling-2.5-standard": {
+        "id": "fal-ai/kling-video/v2.5-turbo/standard/image-to-video",
+        "label": "Kling 2.5 Standard — $0.042/s (cheapest, visibly weaker)",
+        "durations": ["5", "10"],
+        "usd_per_second": 0.042,
+        "note": "For drafting the shot list cheaply. Motion is looser and it "
+                "reads as AI more often — not for a final ad.",
     },
 }
 
@@ -326,10 +335,20 @@ def generate_avatar(model_key, image_url, script, voice="Sarah", seconds=6,
 
 
 def generate_voiceover(text, voice="Sarah", on_status=None):
-    """ElevenLabs TTS. Returns audio URL."""
+    """ElevenLabs TTS. Returns audio URL.
+
+    Left on defaults this reads flat and synthetic. Lower stability lets v3
+    actually perform the line instead of holding a neutral tone, and a little
+    style pushes it further from newsreader delivery towards how someone
+    talks in a UGC ad.
+    """
     out = run(TTS_MODEL, {
         "text": text,
         "voice": voice if voice in AVATAR_VOICES else "Sarah",
+        "stability": 0.35,
+        "similarity_boost": 0.75,
+        "style": 0.45,
+        "speed": 1.0,
     }, on_status=on_status, timeout=300)
     audio = out.get("audio") or {}
     url = audio.get("url") if isinstance(audio, dict) else None

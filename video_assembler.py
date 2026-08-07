@@ -55,6 +55,15 @@ def _has_audio(path):
     return bool(re.search(r"Stream #\d+:\d+.*: Audio:", err))
 
 
+def _probe_duration(path):
+    """Length in seconds, from `ffmpeg -i` stderr. None if unreadable."""
+    _, err = _run(["-i", path], timeout=60)
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
+    if not m:
+        return None
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
 def _font_file():
     candidates = [
         r"C:\Windows\Fonts\arialbd.ttf",
@@ -207,14 +216,21 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
     has_audio = _has_audio(src)
     if voiceover_path:
         args += ["-i", voiceover_path]
-        audio_map = f"{next_idx}:a:0"
+        audio_src = f"{next_idx}:a:0"
         next_idx += 1
     elif has_audio:
-        audio_map = "0:a:0"
+        audio_src = "0:a:0"
     else:
         args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
-        audio_map = f"{next_idx}:a:0"
+        audio_src = f"{next_idx}:a:0"
         next_idx += 1
+
+    # The cut length is always decided here, never by whichever input happens
+    # to run out first. `-shortest` used to do the latter, so a scene with a
+    # voiceover shorter than its slot was silently trimmed to the narration —
+    # a 2.6s scene with a 1.4s line came out 1.4s, and the whole video ended
+    # up short of its target.
+    out_dur = duration if duration is not None else _probe_duration(src)
 
     chain = (f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
              f"crop={width}:{height},fps={FPS}")
@@ -222,15 +238,16 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
         chain += f"[base];[base][{caption_idx}:v]overlay=0:0:format=auto[v]"
     else:
         chain += "[v]"
+    # Pad the audio with silence so it can never be the limiting stream.
+    chain += f";[{audio_src}]apad,aresample=48000[a]"
 
-    args += ["-filter_complex", chain, "-map", "[v]", "-map", audio_map]
-    if duration is not None:
-        args += ["-t", f"{duration:.3f}"]
+    args += ["-filter_complex", chain, "-map", "[v]", "-map", "[a]"]
+    if out_dur:
+        args += ["-t", f"{out_dur:.3f}"]
     args += [
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        "-shortest",
         dest,
     ]
 
@@ -240,8 +257,31 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
     return dest
 
 
+def _apply_global_audio(video_path, audio_url, tmpdir, out_path):
+    """Lay one continuous narration over the finished cut.
+
+    Per-scene narration means each line is spoken in isolation, which on
+    two-second scenes lands as clipped, robotic fragments. A single read across
+    the whole video keeps the natural sentence flow and cadence.
+    """
+    audio = _download(audio_url, os.path.join(tmpdir, "global_vo.mp3"))
+    video_dur = _probe_duration(video_path)
+    args = ["-y", "-i", video_path, "-i", audio,
+            "-filter_complex", "[1:a]apad,aresample=48000[a]",
+            "-map", "0:v:0", "-map", "[a]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
+    if video_dur:
+        args += ["-t", f"{video_dur:.3f}"]
+    args += ["-movflags", "+faststart", out_path]
+
+    code, err = _run(args)
+    if code != 0 or not os.path.exists(out_path):
+        raise AssemblyError(f"ffmpeg failed muxing narration: {err[-600:]}")
+    return out_path
+
+
 def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
-             output_dir=None, filename=None):
+             output_dir=None, filename=None, global_audio_url=None):
     """Stitch generated scene clips into one MP4.
 
     `clips` is a list of {"scene": <recipe scene dict>, "url": <video url>,
@@ -287,8 +327,12 @@ def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
             )
             segments.append(seg)
 
+        # When one narration track spans the whole video it is muxed on at the
+        # end, so build the cut to a scratch file first.
+        cut_path = os.path.join(tmpdir, "cut.mp4") if global_audio_url else out_path
+
         if len(segments) == 1:
-            shutil.copyfile(segments[0], out_path)
+            shutil.copyfile(segments[0], cut_path)
         else:
             # All segments share identical codec params, so the concat demuxer
             # can stream-copy instead of re-encoding.
@@ -299,18 +343,21 @@ def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
 
             code, err = _run([
                 "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-                "-c", "copy", "-movflags", "+faststart", out_path,
+                "-c", "copy", "-movflags", "+faststart", cut_path,
             ])
-            if code != 0 or not os.path.exists(out_path):
+            if code != 0 or not os.path.exists(cut_path):
                 # Fall back to a full re-encode if stream copy rejects the mix.
                 code, err = _run([
                     "-y", "-f", "concat", "-safe", "0", "-i", list_path,
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
-                    "-movflags", "+faststart", out_path,
+                    "-movflags", "+faststart", cut_path,
                 ])
                 if code != 0:
                     raise AssemblyError(f"ffmpeg concat failed: {err[-800:]}")
+
+        if global_audio_url:
+            _apply_global_audio(cut_path, global_audio_url, tmpdir, out_path)
 
         return filename
     finally:

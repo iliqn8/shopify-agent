@@ -28,9 +28,9 @@ client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
 MODEL = "claude-opus-4-8"
 
-# Kling 2.5 Turbo Standard is ~6x cheaper per second than Seedance 2.0 Fast for
-# comparable image-to-video work, so it is the sane default for ad iteration.
-DEFAULT_VIDEO_MODEL = "kling-2.5-standard"
+# Kling Pro sits at a fifth of Seedance's price without a matching drop in
+# realism, so it is the default; Standard is cheaper still but visibly weaker.
+DEFAULT_VIDEO_MODEL = "kling-2.6-pro"
 
 # Reference frames sent to the vision model. More frames = better read on pacing
 # and shot changes, at the cost of tokens.
@@ -263,6 +263,14 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
    This does NOT apply to the product itself — keeping the product identical is the whole point.
 6. VOICEOVER + AVATAR LINES TOGETHER MUST BE SPEAKABLE IN THE SCENE'S DURATION. Roughly 2.5 words
    per second. A 3-second scene gets ~7 words, not a sentence.
+7. WRITE THE NARRATION AS ONE PERSON TALKING, NOT AS CAPTIONS. Read every scene's `voiceover` in
+   order: together they must form connected, natural speech, because they are recorded as a single
+   continuous take. Use contractions, everyday word order, and sentences that run across scene
+   boundaries where that is how someone would actually say it. Never write clipped label-like
+   fragments ("Two gummies. Twelve vitamins. No sugar.") — that is what makes it sound synthetic.
+8. THE PRODUCT NEVER CHANGES. Its colour, shape, markings and materials are fixed across every
+   scene. Do not have it appear in a different colourway, size or variant partway through, and do
+   not mention alternatives.
 7. ON-SCREEN TEXT IS SHORT. Under 6 words. Only where the reference actually shows text.
 8. WRITE EVERYTHING IN ENGLISH.
 
@@ -483,10 +491,15 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
                 f"to the {target}s target")}
 
         # Anchor the product to real pixels. Text-to-image cannot reproduce a
-        # specific physical object, so the shots that show it are built by
+        # specific physical object, so shots that show it are built by
         # restaging these actual images instead of describing the product.
-        # The three sources stack — more angles give the edit model more to work
-        # from — but uploaded photos come first, being the most deliberate.
+        #
+        # Exactly ONE source wins. Mixing them looked like a free win — more
+        # angles for the edit model — but if the uploaded photo and the clip
+        # show different products, the model alternates between them and the
+        # product visibly changes partway through the video. An uploaded photo
+        # is an explicit statement of what the product is, so it beats frames
+        # scraped from someone else's ad.
         urls = []
 
         for i, img in enumerate(product_images):
@@ -498,10 +511,12 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
             except Exception as e:
                 yield {"type": "status", "text": f"⚠️ Could not upload product photo {i + 1}: {e}"}
 
-        if product and product.get("image") and product["image"] not in urls:
-            urls.append(product["image"])
-
-        if mode == "same_product":
+        if urls:
+            recipe["product_source"] = f"{len(urls)} uploaded photo(s)"
+        elif product and product.get("image"):
+            urls = [product["image"]]
+            recipe["product_source"] = "Shopify product photo"
+        elif mode == "same_product":
             picked = [i for i in (recipe.get("product_reference_frames") or [])
                       if isinstance(i, int) and 0 <= i < len(frames)]
             if not picked:
@@ -518,6 +533,7 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
                         base64.b64decode(frames[idx]["b64"]), f"product_ref_{idx}.jpg", "image/jpeg"))
                 except Exception as e:
                     yield {"type": "status", "text": f"⚠️ Could not upload frame {idx}: {e}"}
+            recipe["product_source"] = f"{len(urls)} frame(s) from the reference clip"
 
         recipe["product_reference_urls"] = urls[:8]
 
@@ -671,6 +687,14 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
         clips = []
         total = len(scenes)
+        locked_frame = None      # first rendered product shot, reused to stop drift
+
+        # One continuous read sounds human; the same words rendered as separate
+        # per-scene clips come out clipped and robotic, because a two-second
+        # scene is only about five words spoken in isolation. Fall back to
+        # per-scene only when an avatar scene carries its own speech, which a
+        # single track laid over the whole timeline would talk over.
+        per_scene_voice = bool(avatar_scenes)
         # fal's on_status callback fires from inside a blocking call, so it can't
         # yield — it appends here and we drain the buffer after each step.
         pending = []
@@ -704,11 +728,20 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                     # Restage the real product rather than describing it — a
                     # text-to-image model asked for "an orange dog life vest"
                     # returns *an* orange vest, not *this* one.
+                    #
+                    # Each scene is a separate call, so the product drifts —
+                    # most visibly in colour — over the course of a video.
+                    # Feeding the first accepted frame back in as an extra
+                    # reference pins every later scene to what was actually
+                    # rendered, not just to the source photos.
+                    refs = product_refs if locked_frame is None else [locked_frame] + product_refs
                     image_url = fal_client.edit_image(
-                        product_refs, prompt, aspect_ratio=aspect, on_status=status)
+                        refs, prompt, aspect_ratio=aspect, on_status=status)
                     yield from drain(label)
+                    if locked_frame is None:
+                        locked_frame = image_url
                     yield {"type": "status",
-                           "text": f"   {label} · first frame built from {len(product_refs)} product reference(s)"}
+                           "text": f"   {label} · first frame built from {len(refs)} product reference(s)"}
                 else:
                     image_url = fal_client.generate_image(prompt, aspect_ratio=aspect, on_status=status)
                     yield from drain(label)
@@ -734,11 +767,10 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
             if s["kind"] == "avatar" and avatar_registry.is_fixed_length(avatar_model):
                 clip["keep_full_length"] = True
 
-            # Voiceover is generated per scene, not as one continuous track —
-            # a single blob would drift out of sync as soon as an avatar scene
-            # (which carries its own speech) sits in the middle of the timeline.
+            # Per-scene narration only when an avatar scene forces it (see the
+            # continuous track below).
             vo_text = (s.get("voiceover") or "").strip()
-            if s["kind"] == "broll" and vo_text:
+            if per_scene_voice and s["kind"] == "broll" and vo_text:
                 yield {"type": "status", "text": f"   {label} · voiceover…"}
                 clip["voiceover_url"] = fal_client.generate_voiceover(
                     vo_text, voice=voice, on_status=status
@@ -748,6 +780,17 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
             clips.append(clip)
             yield {"type": "scene", "index": s["index"], "url": url, "kind": s["kind"]}
 
+        global_audio_url = None
+        if not per_scene_voice:
+            script = " ".join(
+                (s.get("voiceover") or "").strip()
+                for s in scenes if s.get("kind") == "broll" and (s.get("voiceover") or "").strip()
+            ).strip()
+            if script:
+                yield {"type": "status", "text": "🔊 Recording narration in one take…"}
+                global_audio_url = fal_client.generate_voiceover(script, voice=voice, on_status=status)
+                yield from drain("Narration")
+
         yield {"type": "status", "text": "✂️ Assembling final video…"}
         try:
             filename = video_assembler.assemble(
@@ -755,17 +798,18 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 aspect_ratio=aspect,
                 burn_subtitles=burn_subtitles,
                 output_dir=output_dir,
+                global_audio_url=global_audio_url,
             )
         except Exception as e:
             # The clips are already paid for — hand them back so assembly can be
             # retried without regenerating anything.
             yield {"type": "done", "error": f"{type(e).__name__}: {e}",
-                   "clips": _serialisable(clips)}
+                   "clips": _serialisable(clips), "global_audio_url": global_audio_url}
             return
 
         yield {"type": "status", "text": "✅ Done"}
         yield {"type": "done", "filename": filename, "scene_urls": [c["url"] for c in clips],
-               "clips": _serialisable(clips)}
+               "clips": _serialisable(clips), "global_audio_url": global_audio_url}
 
     except fal_client.FalError as e:
         yield {"type": "done", "error": str(e)}
@@ -780,7 +824,8 @@ def _serialisable(clips):
              "keep_full_length": c.get("keep_full_length", False)} for c in clips]
 
 
-def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_dir=None):
+def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_dir=None,
+                      global_audio_url=None):
     """Re-run assembly over already-generated clips. Costs nothing."""
     try:
         if not clips:
@@ -799,6 +844,7 @@ def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_di
             aspect_ratio=aspect_ratio,
             burn_subtitles=burn_subtitles,
             output_dir=output_dir or video_assembler.OUTPUT_DIR,
+            global_audio_url=global_audio_url,
         )
         yield {"type": "status", "text": "✅ Done"}
         yield {"type": "done", "filename": filename,

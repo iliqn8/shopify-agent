@@ -821,7 +821,10 @@ def video_generate_start():
                 # Clips may be present even on failure (assembly died after the
                 # scenes were paid for) — persist them so a retry is free.
                 if event.get("clips"):
-                    fields["clips_json"] = json.dumps(event["clips"])
+                    fields["clips_json"] = json.dumps({
+                        "clips": event["clips"],
+                        "global_audio_url": event.get("global_audio_url"),
+                    })
                     fields["scene_urls"] = json.dumps([c["url"] for c in event["clips"]])
                 if event.get("error"):
                     fields["status"] = "failed"
@@ -849,9 +852,15 @@ def video_reassemble(pid):
         return jsonify({"error": "Project not found"}), 404
 
     try:
-        clips = json.loads(row.get("clips_json") or "[]")
+        stored = json.loads(row.get("clips_json") or "[]")
     except ValueError:
-        clips = []
+        stored = []
+    # Older projects stored a bare list, before narration moved to one track.
+    if isinstance(stored, dict):
+        clips = stored.get("clips") or []
+        global_audio_url = stored.get("global_audio_url")
+    else:
+        clips, global_audio_url = stored, None
     if not clips:
         return jsonify({"error": "This project has no saved clips — it predates "
                                  "clip retention, or generation failed before any "
@@ -871,6 +880,7 @@ def video_reassemble(pid):
             clips,
             aspect_ratio=recipe.get("aspect_ratio", "9:16"),
             burn_subtitles=burn_subtitles,
+            global_audio_url=global_audio_url,
         ):
             if event.get("type") == "done":
                 if event.get("error"):

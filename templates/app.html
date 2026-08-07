@@ -471,7 +471,8 @@
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
           <div>
             <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">B-ROLL MODEL</label>
-            <select id="vid-model" onchange="vidEstimate()" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px"></select>
+            <select id="vid-model" onchange="vidModelChanged()" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px"></select>
+            <div id="vid-model-note" style="font-size:11px;margin-top:5px;color:#666;line-height:1.4"></div>
           </div>
           <div id="vid-avatar-model-row" style="display:none">
             <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">AVATAR MODEL</label>
@@ -500,7 +501,7 @@
         </div>
 
         <label style="display:flex;align-items:center;gap:8px;margin-top:14px;color:#aaa;font-size:13px;cursor:pointer">
-          <input type="checkbox" id="vid-subs" checked> Burn on-screen text / captions
+          <input type="checkbox" id="vid-subs"> Burn on-screen text / captions
         </label>
 
         <div style="display:flex;align-items:center;gap:12px;margin-top:18px;flex-wrap:wrap">
@@ -1866,6 +1867,13 @@ let vidProducts = [];
 let vidActorUrl = null;
 let vidActorFile = null;
 let vidProviders = {};
+let vidModelNotes = {};
+
+function vidModelChanged() {
+  const note = vidModelNotes[document.getElementById('vid-model').value];
+  document.getElementById('vid-model-note').textContent = note || '';
+  vidEstimate();
+}
 
 async function vidInit() {
   vidLoadHistory();
@@ -1878,7 +1886,9 @@ async function vidInit() {
     const d = await r.json();
     const mSel = document.getElementById('vid-model');
     mSel.innerHTML = d.video_models.map(m =>
-      `<option value="${m.key}"${m.key === 'kling-2.5-standard' ? ' selected' : ''}>${m.label}</option>`).join('');
+      `<option value="${m.key}"${m.recommended ? ' selected' : ''}>${m.label}</option>`).join('');
+    vidModelNotes = Object.fromEntries(d.video_models.map(m => [m.key, m.note || '']));
+    vidModelChanged();
     const aSel = document.getElementById('vid-avatar-model');
     aSel.innerHTML = d.avatar_models.map(m =>
       `<option value="${m.key}"${m.key === d.default_avatar_model ? ' selected' : ''}>${m.label}</option>`).join('');
