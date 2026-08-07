@@ -1853,6 +1853,13 @@ async function vidInit() {
     }
     acc.innerHTML = lines.map(l =>
       `<div style="color:${l.startsWith('✅') ? '#4ade80' : '#fbbf24'}">${vidEsc(l)}</div>`).join('');
+
+    // Assembly is the last step and the most expensive one to discover broken,
+    // so its status belongs next to the account status, not after a paid run.
+    fetch('/api/video-preflight').then(r => r.json()).then(pf => {
+      acc.innerHTML += `<div style="color:${pf.ok ? '#4ade80' : '#f87171'}">${
+        (pf.ok ? '✅ ' : '❌ ') + vidEsc(pf.message)}</div>`;
+    }).catch(() => {});
   } catch (e) {
     document.getElementById('vid-account').textContent = '⚠️ Could not reach fal.ai: ' + e.message;
   }

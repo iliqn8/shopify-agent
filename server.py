@@ -688,6 +688,14 @@ def video_models():
     })
 
 
+@app.route("/api/video-preflight")
+def video_preflight():
+    """Check the ffmpeg assembly path without generating anything."""
+    import video_assembler
+    ok, msg = video_assembler.preflight(burn_subtitles=True)
+    return jsonify({"ok": ok, "message": msg})
+
+
 @app.route("/api/video-voices/<model_key>")
 def video_voices(model_key):
     import avatar_registry
