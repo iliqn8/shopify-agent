@@ -192,11 +192,23 @@ def _download(url, dest):
     return dest
 
 
-def _normalise_segment(src, dest, duration, width, height, caption, voiceover_path, tmpdir, tag):
-    """Trim, crop to frame, burn caption, and settle on exactly one audio track.
+# Beyond this, compressing a clip to its slot stops looking like real motion
+# and starts looking sped up, so the excess is trimmed instead.
+MAX_SPEEDUP = 2.6
+
+
+def _normalise_segment(src, dest, duration, width, height, caption, voiceover_path, tmpdir, tag,
+                       fit="speed"):
+    """Fit to length, crop to frame, burn caption, settle on one audio track.
 
     `duration=None` keeps the source's own length — used for talking-head clips
     whose length is set by the script rather than by us.
+
+    `fit="speed"` retimes a too-long clip into its slot; `fit="trim"` cuts it.
+    Speed is the default because video models only emit fixed clip lengths —
+    Kling does 5s or 10s — so an 8s shot is generated as 10s and an 2s shot as
+    5s. Trimming those shows the first part of an action paced for a longer
+    span, which reads as slow motion. Retiming restores the reference's pace.
     """
     caption_png = _render_caption_png(
         caption, width, height, os.path.join(tmpdir, f"caption_{tag}.png")
@@ -232,7 +244,18 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
     # up short of its target.
     out_dur = duration if duration is not None else _probe_duration(src)
 
-    chain = (f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+    # Retime before anything else, so the caption and the audio see the final
+    # timeline rather than the generated one.
+    retime = ""
+    if fit == "speed" and duration:
+        src_dur = _probe_duration(src)
+        if src_dur and src_dur > duration + 0.05:
+            factor = src_dur / duration
+            if factor <= MAX_SPEEDUP:
+                retime = f"setpts=PTS/{factor:.4f},"
+            # Past the cap the clip is simply cut; -t below handles that.
+
+    chain = (f"[0:v]{retime}scale={width}:{height}:force_original_aspect_ratio=increase,"
              f"crop={width}:{height},fps={FPS}")
     if caption_idx is not None:
         chain += f"[base];[base][{caption_idx}:v]overlay=0:0:format=auto[v]"
@@ -382,6 +405,9 @@ def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
                 caption=caption,
                 voiceover_path=vo_path,
                 tmpdir=tmpdir, tag=str(i),
+                # A talking head is already paced by its own speech; retiming
+                # it would chipmunk the delivery.
+                fit="trim" if clip.get("keep_full_length") else "speed",
             )
             segments.append(seg)
 

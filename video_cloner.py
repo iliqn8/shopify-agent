@@ -216,7 +216,7 @@ SWAP_ORDER = ["environment", "subject", "product"]
 
 
 def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=None,
-                 masked=False):
+                 masked=False, parts=None):
     """Ask the vision model whether the swap did what was asked.
 
     Pixel heuristics cannot answer this. A whole-frame colour histogram scores
@@ -290,7 +290,10 @@ def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=N
             'unchanged: ' + spec['keep'] + '. false only if something outside it was restaged, '
             'moved or redrawn>, '
             '"swapped": <true ONLY if the ' + spec['noun'] + ' in B has been COMPLETELY '
-            'replaced by the one in C. ' + spec['completeness'] + '>, '
+            'replaced by the one in C. ' + spec['completeness']
+            + (" Go through these parts ONE BY ONE and confirm each has taken the C "
+               "product's colour and form: " + "; ".join(parts[:8]) + "."
+               if parts else "") + '>, '
             '"note": "<one short sentence on what differs; if the swap is partial, name what '
             'was missed>"}'})
 
@@ -1658,8 +1661,14 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
         masked = [r for r in ladder if "gpt-image" in r["id"]]
         ladder = masked + [r for r in ladder if r not in masked]
 
+    last_note = ""
     for attempt, rung in enumerate(ladder, start=1):
         prompt = prompts[min(attempt - 1, len(prompts) - 1)]
+        # Retrying blind repeats the same mistake — a chin-rest pad kept coming
+        # back in the original colour. Tell the next attempt what was wrong.
+        if last_note:
+            prompt += (f"\n\nA previous attempt was REJECTED for this reason: {last_note}\n"
+                       "Fix exactly that, while still obeying everything above.")
         use_mask = mask_url if "gpt-image" in rung["id"] else None
         # Pin the recipe's aspect. "auto" lets the model pick, and it returns a
         # differently-cropped frame that no longer matches the rest of the cut.
@@ -1681,8 +1690,10 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
                     f"(layout match {score:.2f}) — escalating")}
                 continue
 
-        scene_ok, swapped, note = _verify_swap(base_url, candidate, refs, slot,
-                                               removed_props=props, masked=bool(use_mask))
+        scene_ok, swapped, note = _verify_swap(
+            base_url, candidate, refs, slot, removed_props=props,
+            masked=bool(use_mask),
+            parts=recipe.get("product_parts") if slot == "product" else None)
         if scene_ok and swapped:
             yield {"type": "status", "text": (
                 f"   {label} · {spec['label']} swapped in"
@@ -1691,7 +1702,8 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
             return candidate
 
         reason = ("the rest of the shot was redrawn" if not scene_ok
-                  else f"the {spec['noun']} was left unchanged")
+                  else f"the {spec['noun']} was not fully replaced")
+        last_note = note or reason
         yield {"type": "status", "text": (
             f"   {label} · {rung['label']} rejected — {reason}"
             + (f": {note}" if note else ""))}
