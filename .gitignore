@@ -3,6 +3,7 @@ knowledge.db
 get_token.py
 uploads/
 generated_images/
+generated_videos/
 __pycache__/
 *.pyc
 *.pyo

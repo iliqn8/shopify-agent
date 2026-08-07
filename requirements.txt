@@ -9,3 +9,4 @@ beautifulsoup4
 opencv-python-headless
 numpy
 playwright==1.48.0
+imageio-ffmpeg

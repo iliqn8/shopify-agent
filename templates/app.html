@@ -109,6 +109,7 @@
   <div class="tab" onclick="switchTab('dev', this)">🛠️ Dev</div>
   <div class="tab" onclick="switchTab('builder', this)">🛍️ Product Builder</div>
   <div class="tab" onclick="switchTab('sections', this)">🧩 Section Builder</div>
+  <div class="tab" onclick="switchTab('video', this)">🎬 Video Cloner</div>
 </div>
 
 <!-- Chat Panel -->
@@ -375,6 +376,115 @@
   </div>
 </div>
 
+<!-- Video Cloner Panel -->
+<div class="panel" id="panel-video" style="overflow-y:auto">
+  <div style="max-width:820px;margin:0 auto;padding:24px 20px">
+    <h2 style="color:#fff;font-size:18px;margin:0 0 4px">🎬 Video Cloner</h2>
+    <p style="color:#888;font-size:13px;margin:0 0 8px">Upload a reference ad. It reverse-engineers the format — pacing, hook, shot list — then rebuilds the same format for your product with AI scenes and UGC actors.</p>
+    <div id="vid-account" style="font-size:12px;margin:0 0 20px;color:#666"></div>
+
+    <!-- Step 1 — reference -->
+    <div style="display:grid;gap:16px">
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">REFERENCE VIDEO *</label>
+        <input type="file" id="vid-file" accept="video/*" style="display:none" onchange="vidHandleFile(this)">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button class="btn-sm" onclick="document.getElementById('vid-file').click()">📹 Choose video</button>
+          <span id="vid-file-name" style="color:#555;font-size:12px">No file selected</span>
+        </div>
+      </div>
+
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT</label>
+        <select id="vid-product" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px">
+          <option value="">— Loading products… —</option>
+        </select>
+      </div>
+
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">NOTES <span style="color:#555">(optional)</span></label>
+        <textarea id="vid-notes" rows="2" placeholder="e.g. keep it under 20s, make the hook about bloating, no talking head" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      </div>
+
+      <button class="btn" id="vid-analyze-btn" onclick="vidAnalyze()">🔍 Analyse reference</button>
+      <div id="vid-analyze-status" style="display:none;color:#a5b4fc;font-size:13px;padding:8px 12px;background:#16162a;border-radius:8px"></div>
+    </div>
+
+    <!-- Step 2 — recipe -->
+    <div id="vid-recipe-box" style="display:none;margin-top:28px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <h2 style="color:#fff;font-size:16px;margin:0;flex:1">📋 Recipe</h2>
+        <span id="vid-recipe-summary" style="color:#666;font-size:12px"></span>
+      </div>
+      <div id="vid-format-analysis" style="color:#999;font-size:13px;line-height:1.5;background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:12px;margin-bottom:12px"></div>
+      <div id="vid-scenes" style="display:flex;flex-direction:column;gap:8px"></div>
+
+      <div style="margin-top:14px">
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">🔧 REQUEST CHANGES</label>
+        <div style="display:flex;gap:8px">
+          <input id="vid-edit" type="text" placeholder="e.g. cut it to 5 scenes, make scene 1 a talking head" style="flex:1;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px">
+          <button class="btn-sm" onclick="vidRewrite()">Apply</button>
+        </div>
+        <div id="vid-edit-status" style="display:none;color:#a5b4fc;font-size:12px;margin-top:8px"></div>
+      </div>
+
+      <!-- Step 3 — generation settings -->
+      <div style="margin-top:24px;border-top:1px solid #2a2a2a;padding-top:20px">
+        <h2 style="color:#fff;font-size:16px;margin:0 0 14px">⚙️ Generation</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div>
+            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">B-ROLL MODEL</label>
+            <select id="vid-model" onchange="vidEstimate()" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px"></select>
+          </div>
+          <div>
+            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">AVATAR MODEL</label>
+            <select id="vid-avatar-model" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px"></select>
+          </div>
+        </div>
+
+        <div id="vid-actor-row" style="display:none;margin-top:14px">
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">ACTOR PHOTO * <span style="color:#555">(this recipe has talking-head scenes)</span></label>
+          <input type="file" id="vid-actor" accept="image/*" style="display:none" onchange="vidHandleActor(this)">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <button class="btn-sm" onclick="document.getElementById('vid-actor').click()">🧑 Choose photo</button>
+            <span id="vid-actor-status" style="color:#555;font-size:12px">No photo</span>
+            <span id="vid-actor-thumb"></span>
+          </div>
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;color:#aaa;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="vid-subs" checked> Burn on-screen text / captions
+        </label>
+
+        <div style="display:flex;align-items:center;gap:12px;margin-top:18px;flex-wrap:wrap">
+          <button class="btn" id="vid-generate-btn" onclick="vidGenerate()">🎬 Generate video</button>
+          <span id="vid-cost" style="color:#666;font-size:12px"></span>
+        </div>
+        <div id="vid-gen-log" style="display:none;margin-top:12px;background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:12px;max-height:280px;overflow-y:auto;font-size:12px;line-height:1.7;color:#999;white-space:pre-wrap"></div>
+      </div>
+    </div>
+
+    <!-- Result -->
+    <div id="vid-result" style="display:none;margin-top:28px">
+      <h2 style="color:#fff;font-size:16px;margin:0 0 12px">✅ Result</h2>
+      <video id="vid-player" controls style="width:100%;max-width:380px;border-radius:12px;background:#000;display:block"></video>
+      <a id="vid-download" class="btn-sm" style="display:inline-block;margin-top:10px;text-decoration:none" download>⬇️ Download MP4</a>
+    </div>
+
+    <!-- History -->
+    <div style="margin-top:36px;border-top:1px solid #2a2a2a;padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 style="color:#fff;font-size:16px;margin:0">📚 History</h2>
+        <button class="btn-sm" onclick="vidLoadHistory()">↻ Refresh</button>
+      </div>
+      <div id="vid-history" style="display:flex;flex-direction:column;gap:8px">
+        <div style="color:#555;font-size:13px">No videos yet.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <script>
 let sending = false;
 let networkUrl = '';
@@ -462,6 +572,7 @@ function switchTab(tab, el) {
   if (tab === 'imagegen' && !imageGenLoaded) loadImageGen();
   if (tab === 'builder') pbLoadHistory();
   if (tab === 'sections') secLoadHistory();
+  if (tab === 'video') vidInit();
 }
 
 async function loadImageGen() {
@@ -1697,6 +1808,301 @@ async function devSend() {
 
   devSending = false;
   document.getElementById('dev-sendBtn').disabled = false;
+}
+
+// ── Video Cloner ───────────────────────────────────────────────────────────
+
+let vidInited = false;
+let vidFile = null;
+let vidRecipe = null;
+let vidProducts = [];
+let vidActorUrl = null;
+
+async function vidInit() {
+  vidLoadHistory();
+  if (vidInited) return;
+  vidInited = true;
+
+  try {
+    const r = await fetch('/api/video-models');
+    const d = await r.json();
+    const mSel = document.getElementById('vid-model');
+    mSel.innerHTML = d.video_models.map(m =>
+      `<option value="${m.key}"${m.key === 'kling-2.5-standard' ? ' selected' : ''}>${m.label}</option>`).join('');
+    const aSel = document.getElementById('vid-avatar-model');
+    aSel.innerHTML = d.avatar_models.map(m => `<option value="${m.key}">${m.label}</option>`).join('');
+
+    const acc = document.getElementById('vid-account');
+    acc.textContent = (d.account_ok ? '✅ ' : '⚠️ ') + d.account_message;
+    acc.style.color = d.account_ok ? '#4ade80' : '#fbbf24';
+  } catch (e) {
+    document.getElementById('vid-account').textContent = '⚠️ Could not reach fal.ai: ' + e.message;
+  }
+
+  try {
+    const r = await fetch('/api/shopify-products');
+    vidProducts = await r.json();
+    if (Array.isArray(vidProducts)) {
+      document.getElementById('vid-product').innerHTML =
+        '<option value="">— No product (generic) —</option>' +
+        vidProducts.map((p, i) => `<option value="${i}">${p.title}</option>`).join('');
+    }
+  } catch (e) {
+    document.getElementById('vid-product').innerHTML = '<option value="">— Could not load products —</option>';
+  }
+}
+
+function vidHandleFile(input) {
+  vidFile = input.files[0] || null;
+  document.getElementById('vid-file-name').textContent = vidFile
+    ? `${vidFile.name} (${(vidFile.size / 1048576).toFixed(1)} MB)` : 'No file selected';
+}
+
+async function vidHandleActor(input) {
+  const f = input.files[0];
+  if (!f) return;
+  const st = document.getElementById('vid-actor-status');
+  st.textContent = 'Uploading…';
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const r = await fetch('/api/video-upload-image', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    vidActorUrl = d.url;
+    st.textContent = '✅ ' + f.name;
+    document.getElementById('vid-actor-thumb').innerHTML =
+      `<img src="${URL.createObjectURL(f)}" style="width:40px;height:40px;object-fit:cover;border-radius:6px;border:1px solid #333;vertical-align:middle">`;
+  } catch (e) {
+    st.textContent = '❌ ' + e.message;
+  }
+}
+
+function vidSelectedProduct() {
+  const v = document.getElementById('vid-product').value;
+  return v === '' ? null : vidProducts[parseInt(v, 10)];
+}
+
+// Shared poller for every video job endpoint.
+function vidPoll(jobId, onStatus, onDone) {
+  let since = 0;
+  const timer = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/video-poll/${jobId}?since=${since}`);
+      const d = await r.json();
+      since += d.events.length;
+      for (const ev of d.events) {
+        if (ev.type === 'status') onStatus(ev.text);
+        if (ev.type === 'scene') onStatus(`   ✅ Scene ${ev.index} rendered`);
+        if (ev.type === 'done') { clearInterval(timer); onDone(ev); }
+      }
+    } catch (e) { console.error('video poll', e); }
+  }, 1500);
+  return timer;
+}
+
+async function vidAnalyze() {
+  if (!vidFile) { alert('Choose a reference video first.'); return; }
+
+  const btn = document.getElementById('vid-analyze-btn');
+  const st = document.getElementById('vid-analyze-status');
+  btn.disabled = true;
+  btn.textContent = 'Analysing…';
+  st.style.display = 'block';
+  st.textContent = 'Uploading video…';
+
+  const fd = new FormData();
+  fd.append('file', vidFile);
+  fd.append('notes', document.getElementById('vid-notes').value);
+  const p = vidSelectedProduct();
+  if (p) fd.append('product', JSON.stringify(p));
+
+  try {
+    const r = await fetch('/api/video-analyze-start', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id, t => st.textContent = t, ev => {
+      btn.disabled = false;
+      btn.textContent = '🔍 Analyse reference';
+      if (ev.error) { st.textContent = '❌ ' + ev.error; return; }
+      st.style.display = 'none';
+      vidRecipe = ev.recipe;
+      vidRenderRecipe();
+    });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '🔍 Analyse reference';
+    st.textContent = '❌ ' + e.message;
+  }
+}
+
+async function vidRewrite() {
+  const instructions = document.getElementById('vid-edit').value.trim();
+  if (!instructions || !vidRecipe) return;
+
+  const st = document.getElementById('vid-edit-status');
+  st.style.display = 'block';
+  st.textContent = 'Applying…';
+
+  try {
+    const r = await fetch('/api/video-rewrite-start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipe: vidRecipe, instructions })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id, t => st.textContent = t, ev => {
+      if (ev.error) { st.textContent = '❌ ' + ev.error; return; }
+      st.style.display = 'none';
+      document.getElementById('vid-edit').value = '';
+      vidRecipe = ev.recipe;
+      vidRenderRecipe();
+    });
+  } catch (e) {
+    st.textContent = '❌ ' + e.message;
+  }
+}
+
+function vidRenderRecipe() {
+  const r = vidRecipe;
+  document.getElementById('vid-recipe-box').style.display = 'block';
+  document.getElementById('vid-recipe-summary').textContent =
+    `${r.scenes.length} scenes · ${r.total_duration}s · ${r.aspect_ratio} · voice: ${r.voice}`;
+  document.getElementById('vid-format-analysis').textContent = r.format_analysis || '';
+
+  document.getElementById('vid-scenes').innerHTML = r.scenes.map(s => {
+    const isAvatar = s.kind === 'avatar';
+    const badge = isAvatar
+      ? '<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#3b2a5a;color:#c4b5fd">AVATAR</span>'
+      : '<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#1e3a2a;color:#86efac">B-ROLL</span>';
+    const spoken = isAvatar ? s.avatar_line : s.voiceover;
+    return `
+      <div style="background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:11px 13px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="color:#666;font-size:12px;font-weight:600">${s.index}</span>
+          ${badge}
+          <span style="color:#666;font-size:11px">${s.duration}s</span>
+          ${s.use_product_image ? '<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#2a2a3a;color:#93c5fd">PRODUCT PHOTO</span>' : ''}
+          <span style="flex:1"></span>
+          ${s.on_screen_text ? `<span style="color:#fbbf24;font-size:11px">“${vidEsc(s.on_screen_text)}”</span>` : ''}
+        </div>
+        <div style="color:#bbb;font-size:13px;line-height:1.45">${vidEsc(s.shot_description || '')}</div>
+        ${spoken ? `<div style="color:#777;font-size:12px;margin-top:5px;font-style:italic">🗣️ ${vidEsc(spoken)}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  document.getElementById('vid-actor-row').style.display =
+    r.scenes.some(s => s.kind === 'avatar') ? 'block' : 'none';
+
+  vidEstimate();
+}
+
+function vidEsc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+async function vidEstimate() {
+  if (!vidRecipe) return;
+  try {
+    const r = await fetch('/api/video-estimate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipe: vidRecipe, video_model: document.getElementById('vid-model').value })
+    });
+    const d = await r.json();
+    document.getElementById('vid-cost').textContent = `≈ $${d.usd} in fal.ai credits`;
+  } catch (e) { /* estimate is advisory only */ }
+}
+
+async function vidGenerate() {
+  if (!vidRecipe) return;
+
+  const needsActor = vidRecipe.scenes.some(s => s.kind === 'avatar');
+  if (needsActor && !vidActorUrl) {
+    alert('This recipe has talking-head scenes — upload an actor photo first.');
+    return;
+  }
+
+  const btn = document.getElementById('vid-generate-btn');
+  const log = document.getElementById('vid-gen-log');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  log.style.display = 'block';
+  log.textContent = 'Starting…';
+  document.getElementById('vid-result').style.display = 'none';
+
+  const product = vidSelectedProduct();
+
+  try {
+    const r = await fetch('/api/video-generate-start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipe: vidRecipe,
+        video_model: document.getElementById('vid-model').value,
+        avatar_model: document.getElementById('vid-avatar-model').value,
+        avatar_image_url: vidActorUrl,
+        product_image_url: product ? product.image : null,
+        product_name: product ? product.title : null,
+        burn_subtitles: document.getElementById('vid-subs').checked
+      })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
+      ev => {
+        btn.disabled = false;
+        btn.textContent = '🎬 Generate video';
+        if (ev.error) { log.textContent += '\n❌ ' + ev.error; log.scrollTop = log.scrollHeight; return; }
+        const src = '/generated-videos/' + ev.filename;
+        document.getElementById('vid-player').src = src;
+        const dl = document.getElementById('vid-download');
+        dl.href = src;
+        dl.setAttribute('download', ev.filename);
+        document.getElementById('vid-result').style.display = 'block';
+        vidLoadHistory();
+      });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '🎬 Generate video';
+    log.textContent += '\n❌ ' + e.message;
+  }
+}
+
+async function vidLoadHistory() {
+  try {
+    const r = await fetch('/api/video-projects');
+    const rows = await r.json();
+    const el = document.getElementById('vid-history');
+    if (!rows.length) { el.innerHTML = '<div style="color:#555;font-size:13px">No videos yet.</div>'; return; }
+
+    el.innerHTML = rows.map(p => {
+      const badge = { done: ['#1e3a2a', '#86efac'], failed: ['#3a1e1e', '#fca5a5'] }[p.status] || ['#2a2a2a', '#888'];
+      return `
+        <div style="background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:11px 13px;display:flex;align-items:center;gap:12px">
+          <div style="flex:1;min-width:0">
+            <div style="color:#ddd;font-size:13px">${vidEsc(p.title)}</div>
+            <div style="color:#555;font-size:11px;margin-top:2px">
+              ${p.product_name ? vidEsc(p.product_name) + ' · ' : ''}${p.video_model || ''} · ${p.created_at}
+            </div>
+          </div>
+          <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${badge[0]};color:${badge[1]}">${p.status}</span>
+          ${p.filename ? `<a class="btn-sm" style="text-decoration:none" href="/generated-videos/${p.filename}" target="_blank">▶︎</a>` : ''}
+          <button class="btn-sm" onclick="vidDelete(${p.id})">🗑</button>
+        </div>`;
+    }).join('');
+  } catch (e) { console.error('video history', e); }
+}
+
+async function vidDelete(id) {
+  if (!confirm('Delete this video project?')) return;
+  await fetch('/api/video-projects/' + id, { method: 'DELETE' });
+  vidLoadHistory();
 }
 </script>
 </body>

@@ -14,6 +14,7 @@ MEDIA_TYPES = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
 
 def init_db():
     os.makedirs(IMAGES_DIR, exist_ok=True)
+    os.makedirs(os.path.join(_DATA_DIR, "generated_videos"), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS knowledge (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +50,17 @@ def init_db():
         reference_url TEXT,
         theme_id TEXT,
         liquid_code TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS video_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        product_name TEXT,
+        recipe_json TEXT NOT NULL,
+        video_model TEXT,
+        filename TEXT,
+        scene_urls TEXT,
+        status TEXT NOT NULL DEFAULT 'recipe',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.commit()
@@ -250,6 +262,78 @@ def delete_custom_section(section_id):
 def update_custom_section_code(section_id, liquid_code):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE custom_sections SET liquid_code = ? WHERE id = ?", (liquid_code, section_id))
+    conn.commit()
+    conn.close()
+
+
+VIDEOS_DIR = os.path.join(_DATA_DIR, "generated_videos")
+
+
+def save_video_project(title, recipe_json, product_name=None, video_model=None,
+                       filename=None, scene_urls=None, status="recipe"):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("""INSERT INTO video_projects
+        (title, product_name, recipe_json, video_model, filename, scene_urls, status)
+        VALUES (?,?,?,?,?,?,?)""",
+        (title, recipe_json, product_name, video_model, filename, scene_urls, status))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def update_video_project(project_id, **fields):
+    allowed = {"title", "recipe_json", "video_model", "filename", "scene_urls", "status"}
+    sets = {k: v for k, v in fields.items() if k in allowed}
+    if not sets:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    clause = ", ".join(f"{k} = ?" for k in sets)
+    conn.execute(f"UPDATE video_projects SET {clause} WHERE id = ?",
+                 (*sets.values(), project_id))
+    conn.commit()
+    conn.close()
+
+
+def _video_row(r):
+    return {"id": r[0], "title": r[1], "product_name": r[2], "recipe_json": r[3],
+            "video_model": r[4], "filename": r[5], "scene_urls": r[6],
+            "status": r[7], "created_at": r[8]}
+
+
+_VIDEO_COLS = ("id, title, product_name, recipe_json, video_model, filename, "
+               "scene_urls, status, created_at")
+
+
+def list_video_projects():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        f"SELECT {_VIDEO_COLS} FROM video_projects ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return [_video_row(r) for r in rows]
+
+
+def get_video_project(project_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        f"SELECT {_VIDEO_COLS} FROM video_projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    conn.close()
+    return _video_row(row) if row else None
+
+
+def delete_video_project(project_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT filename FROM video_projects WHERE id = ?", (project_id,)).fetchone()
+    if row and row[0]:
+        path = os.path.join(VIDEOS_DIR, row[0])
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    conn.execute("DELETE FROM video_projects WHERE id = ?", (project_id,))
     conn.commit()
     conn.close()
 

@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response, stream_with_context
 from dotenv import load_dotenv
 import os
+import json
 import subprocess
 import socket
 import threading
@@ -648,6 +649,214 @@ def republish_custom_section(sid):
         return jsonify({"ok": True, "asset_key": row["asset_key"]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ── Video Cloner ───────────────────────────────────────────────────────────
+
+_video_jobs = {}
+
+
+def _run_video_job(job_id, generator_factory):
+    """Drain a video_cloner generator into a pollable job."""
+    def run():
+        try:
+            for event in generator_factory():
+                _video_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    _video_jobs[job_id]["done"] = True
+        except Exception as e:
+            _video_jobs[job_id]["events"].append({"type": "done", "error": f"{type(e).__name__}: {e}"})
+            _video_jobs[job_id]["done"] = True
+
+    _video_jobs[job_id] = {"events": [], "done": False}
+    threading.Thread(target=run, daemon=True).start()
+
+
+@app.route("/api/video-models")
+def video_models():
+    import fal_client
+    ok, msg = fal_client.check_account()
+    return jsonify({
+        "video_models": [{"key": k, **v} for k, v in fal_client.VIDEO_MODELS.items()],
+        "avatar_models": [{"key": k, **v} for k, v in fal_client.AVATAR_MODELS.items()],
+        "voices": fal_client.AVATAR_VOICES,
+        "account_ok": ok,
+        "account_message": msg,
+    })
+
+
+@app.route("/api/video-analyze-start", methods=["POST"])
+def video_analyze_start():
+    import uuid as _uuid_v
+    import video_cloner
+
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No video uploaded"}), 400
+    video_bytes = f.read()
+    if not video_bytes:
+        return jsonify({"error": "Empty video file"}), 400
+
+    product = None
+    raw_product = request.form.get("product")
+    if raw_product:
+        try:
+            product = json.loads(raw_product)
+        except ValueError:
+            product = None
+    notes = (request.form.get("notes") or "").strip() or None
+
+    job_id = str(_uuid_v.uuid4())
+    _run_video_job(job_id, lambda: video_cloner.analyze_stream(video_bytes, product, notes))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/video-rewrite-start", methods=["POST"])
+def video_rewrite_start():
+    import uuid as _uuid_v2
+    import video_cloner
+
+    data = request.json or {}
+    recipe = data.get("recipe")
+    instructions = (data.get("instructions") or "").strip()
+    if not recipe:
+        return jsonify({"error": "Missing recipe"}), 400
+    if not instructions:
+        return jsonify({"error": "Missing instructions"}), 400
+
+    job_id = str(_uuid_v2.uuid4())
+    _run_video_job(job_id, lambda: video_cloner.rewrite_stream(recipe, instructions))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/video-generate-start", methods=["POST"])
+def video_generate_start():
+    import uuid as _uuid_v3
+    import video_cloner
+
+    data = request.json or {}
+    recipe = data.get("recipe")
+    if not recipe:
+        return jsonify({"error": "Missing recipe"}), 400
+
+    video_model = data.get("video_model") or video_cloner.DEFAULT_VIDEO_MODEL
+    avatar_model = data.get("avatar_model") or "ai-avatar"
+    avatar_image_url = data.get("avatar_image_url") or None
+    product_image_url = data.get("product_image_url") or None
+    product_name = data.get("product_name") or None
+    burn_subtitles = data.get("burn_subtitles", True)
+
+    project_id = kb.save_video_project(
+        title=recipe.get("title", "Untitled video"),
+        recipe_json=json.dumps(recipe),
+        product_name=product_name,
+        video_model=video_model,
+        status="generating",
+    )
+
+    job_id = str(_uuid_v3.uuid4())
+
+    def factory():
+        for event in video_cloner.generate_stream(
+            recipe,
+            video_model=video_model,
+            avatar_model=avatar_model,
+            avatar_image_url=avatar_image_url,
+            product_image_url=product_image_url,
+            burn_subtitles=burn_subtitles,
+        ):
+            if event.get("type") == "done":
+                if event.get("error"):
+                    kb.update_video_project(project_id, status="failed")
+                else:
+                    kb.update_video_project(
+                        project_id,
+                        status="done",
+                        filename=event.get("filename"),
+                        scene_urls=json.dumps(event.get("scene_urls") or []),
+                    )
+                event["project_id"] = project_id
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id, "project_id": project_id})
+
+
+@app.route("/api/video-poll/<job_id>")
+def video_poll(job_id):
+    job = _video_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Not found"}), 404
+    since = request.args.get("since", 0, type=int)
+    events = job["events"][since:]
+    done = job["done"]
+    if done and since + len(events) >= len(job["events"]):
+        threading.Timer(120, lambda: _video_jobs.pop(job_id, None)).start()
+    return jsonify({"events": events, "total": len(job["events"]), "done": done})
+
+
+@app.route("/api/video-estimate", methods=["POST"])
+def video_estimate():
+    import video_cloner
+    data = request.json or {}
+    recipe = data.get("recipe") or {}
+    model = data.get("video_model") or video_cloner.DEFAULT_VIDEO_MODEL
+    return jsonify({"usd": video_cloner.estimate_cost(recipe, model)})
+
+
+@app.route("/api/video-upload-image", methods=["POST"])
+def video_upload_image():
+    """Push an actor/product photo to fal storage so models can fetch it."""
+    import fal_client
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file"}), 400
+    try:
+        url = fal_client.upload_bytes(f.read(), f.filename or "photo.jpg", f.content_type)
+        return jsonify({"url": url})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/video-projects", methods=["GET"])
+def list_video_projects():
+    return jsonify(kb.list_video_projects())
+
+
+@app.route("/api/video-projects/<int:pid>", methods=["DELETE"])
+def delete_video_project(pid):
+    kb.delete_video_project(pid)
+    return jsonify({"ok": True})
+
+
+@app.route("/generated-videos/<path:filename>")
+def serve_generated_video(filename):
+    import video_assembler
+    return send_from_directory(video_assembler.OUTPUT_DIR, filename)
+
+
+@app.route("/api/shopify-products")
+def shopify_products():
+    """Lightweight product list for the Video Cloner picker."""
+    import shopify_client as sc
+    try:
+        products = sc.list_products()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    out = []
+    for p in products:
+        images = p.get("images") or []
+        variants = p.get("variants") or []
+        out.append({
+            "id": p.get("id"),
+            "title": p.get("title"),
+            "description": p.get("body_html") or "",
+            "price": variants[0].get("price") if variants else None,
+            "image": (images[0].get("src") if images else None) or (p.get("image") or {}).get("src"),
+            "url": f"https://{os.getenv('SHOPIFY_STORE', '')}/products/{p.get('handle')}",
+        })
+    return jsonify(out)
 
 
 @app.route("/api/set-local-agent", methods=["POST"])

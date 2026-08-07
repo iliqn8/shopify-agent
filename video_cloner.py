@@ -1,0 +1,522 @@
+"""Video Cloner — analyse a reference video, then rebuild the same format for our product.
+
+Two phases, both exposed as generators so the UI can stream progress
+(same job/poll pattern as section_builder):
+
+  analyze_stream()  reference video -> "recipe" JSON (scenes, timing, hook, shots)
+  generate_stream() recipe -> generated clips (fal.ai) -> assembled MP4
+
+The recipe is deliberately a plain JSON document the user can read and edit in
+the UI before spending any credits — generation is the expensive half.
+"""
+
+import os
+import re
+import json
+import base64
+import tempfile
+import subprocess
+
+import cv2
+import anthropic
+
+import fal_client
+import video_assembler
+
+client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
+
+MODEL = "claude-opus-4-8"
+
+# Kling 2.5 Turbo Standard is ~6x cheaper per second than Seedance 2.0 Fast for
+# comparable image-to-video work, so it is the sane default for ad iteration.
+DEFAULT_VIDEO_MODEL = "kling-2.5-standard"
+
+# Reference frames sent to the vision model. More frames = better read on pacing
+# and shot changes, at the cost of tokens.
+ANALYSIS_FRAMES = 16
+
+
+# ── Probing / frame extraction ─────────────────────────────────────────────
+
+def probe_video(video_bytes):
+    """Duration, fps, dimensions and aspect ratio of raw video bytes.
+
+    Uses OpenCV rather than ffprobe — ffprobe is not bundled with the
+    imageio-ffmpeg binary we rely on for assembly.
+    """
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+        cap = cv2.VideoCapture(tmp_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        duration = round(total / fps, 2) if fps > 0 and total > 0 else 0.0
+        if w and h:
+            ratio = w / h
+            aspect = "9:16" if ratio < 0.85 else ("1:1" if ratio < 1.2 else "16:9")
+        else:
+            aspect = "9:16"
+        return {"duration": duration, "fps": round(fps, 2), "width": w, "height": h, "aspect_ratio": aspect}
+    except Exception:
+        return {"duration": 0.0, "fps": 30.0, "width": 0, "height": 0, "aspect_ratio": "9:16"}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def extract_frames(video_bytes, max_frames=ANALYSIS_FRAMES):
+    """Evenly-spaced JPEG frames with their timestamps. Never raises."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if total <= 0:
+            cap.release()
+            return []
+
+        count = min(max_frames, total)
+        indices = [int(i * (total - 1) / max(count - 1, 1)) for i in range(count)]
+        frames = []
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            # Downscale wide side to 768px — plenty for layout/pacing reading.
+            h, w = frame.shape[:2]
+            scale = 768 / max(h, w)
+            if scale < 1:
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
+            if ok2:
+                frames.append({
+                    "b64": base64.b64encode(buf.tobytes()).decode(),
+                    "media_type": "image/jpeg",
+                    "t": round(idx / fps, 2) if fps > 0 else 0.0,
+                })
+        cap.release()
+        return frames
+    except Exception:
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def transcribe(video_bytes):
+    """Whisper transcription of the reference audio. Returns '' when there is no
+    usable audio track or no OpenAI key — a silent reference is still analysable."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return ""
+
+    audio_path = None
+    video_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            video_path = tmp.name
+        audio_path = video_path + ".mp3"
+
+        # Strip to mono 16kHz mp3 — Whisper's upload limit is 25MB and raw
+        # video easily blows past it.
+        cmd = [
+            video_assembler.ffmpeg_exe(), "-y", "-i", video_path,
+            "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", audio_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=300)
+        if proc.returncode != 0 or not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
+            return ""
+
+        from openai import OpenAI
+        oa = OpenAI(api_key=api_key)
+        with open(audio_path, "rb") as f:
+            result = oa.audio.transcriptions.create(model="whisper-1", file=f)
+        return (result.text or "").strip()
+    except Exception:
+        return ""
+    finally:
+        for p in (audio_path, video_path):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+
+# ── Analysis prompt ────────────────────────────────────────────────────────
+
+ANALYSIS_PROMPT = """You are a short-form video ad director. You are given frames from a REFERENCE
+video ad (in chronological order, each labelled with its timestamp), its transcript, and technical
+metadata. Your job is to reverse-engineer its FORMAT, then write a shot-by-shot recipe that recreates
+that same format for a DIFFERENT product.
+
+You are NOT copying the reference. You are extracting what makes it work — pacing, shot grammar,
+hook structure, on-screen text rhythm — and applying it to the new product.
+
+## REFERENCE METADATA
+{metadata}
+
+## REFERENCE TRANSCRIPT
+{transcript}
+
+## THE PRODUCT THIS NEW VIDEO IS FOR
+{product}
+
+## EXTRA INSTRUCTIONS FROM THE USER
+{notes}
+
+## WHAT TO PRODUCE
+
+Return ONE JSON object inside a ```json fenced block. No prose outside the block.
+
+{{
+  "title": "short name for this video project",
+  "format_analysis": "2-4 sentences: what format is this, why does it work, what is the hook mechanism",
+  "aspect_ratio": "9:16" | "1:1" | "16:9" — use the REFERENCE's own aspect ratio unless the user's instructions ask for something else,
+  "total_duration": <number, seconds — match the reference within ~20%, UNLESS the user's instructions specify a length, which always wins>,
+  "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
+  "scenes": [
+    {{
+      "index": 1,
+      "duration": <number, seconds>,
+      "kind": "broll" | "avatar",
+      "shot_description": "what the viewer sees, one sentence",
+      "image_prompt": "<broll only> full text-to-image prompt for the FIRST FRAME of this shot. Be specific about subject, framing, lens, lighting, colour palette, background. Photorealistic unless the reference is animated.",
+      "use_product_image": <broll only, true/false> true ONLY if this shot is a clean look at the product itself, where the real product photo should be the first frame instead of a generated one,
+      "motion_prompt": "<broll only> what MOVES in this shot — camera move and subject motion. Keep it to one clear movement; image-to-video models degrade when asked for several.",
+      "avatar_line": "<avatar only> the exact words the person says on camera",
+      "voiceover": "<broll only> narration over this shot, or \\"\\" for silence",
+      "on_screen_text": "text burned on screen, or \\"\\" for none"
+    }}
+  ]
+}}
+
+## HARD RULES
+
+1. SCENE COUNT AND TIMING MIRROR THE REFERENCE. If the reference cuts every 1.5s, your scenes are
+   1.5s. If it holds a 6s shot, hold 6s. Read the cut rhythm off the frames — do not default to
+   uniform 5s scenes. If the user asked for a shorter total than the reference, keep the reference's
+   CUT RHYTHM and drop scenes to fit — do not stretch every scene out to pad the runtime.
+2. THE FIRST SCENE IS THE HOOK. Whatever mechanism the reference uses in its first 3 seconds
+   (question, bold claim, visual pattern-break, problem shown), use the SAME mechanism with the new
+   product's angle.
+3. "avatar" IS ONLY FOR SHOTS WHERE A PERSON TALKS TO CAMERA. Everything else is "broll". If the
+   reference is pure b-roll with voiceover, produce zero avatar scenes. If it is a UGC creator
+   talking with cutaways, mirror that mix exactly.
+4. MINIMUM SCENE DURATION IS 4 SECONDS for generation purposes. If the reference cuts faster,
+   still write the true short duration — assembly trims the generated clip down to it. Never write
+   a duration below 0.8s.
+5. IMAGE PROMPTS MUST NOT NAME REAL BRANDS, celebrities, or copyrighted characters, and must not
+   describe the reference video's specific actors. Describe generic people by role and appearance.
+6. VOICEOVER + AVATAR LINES TOGETHER MUST BE SPEAKABLE IN THE SCENE'S DURATION. Roughly 2.5 words
+   per second. A 3-second scene gets ~7 words, not a sentence.
+7. ON-SCREEN TEXT IS SHORT. Under 6 words. Only where the reference actually shows text.
+8. WRITE EVERYTHING IN ENGLISH.
+
+Now analyse the frames and return the JSON."""
+
+
+REWRITE_PROMPT = """Here is an existing video recipe JSON and a change request from the user.
+
+Apply ONLY the requested change. Keep every other field byte-identical. Return the full updated
+JSON object in a ```json fenced block, no prose outside it.
+
+## CURRENT RECIPE
+```json
+{recipe}
+```
+
+## CHANGE REQUEST
+{instructions}"""
+
+
+def _format_product(product):
+    if not product:
+        return "(no product selected — write the recipe generically for a direct-response ecommerce product)"
+    parts = [f"Name: {product.get('title', '(untitled)')}"]
+    if product.get("price"):
+        parts.append(f"Price: {product['price']}")
+    if product.get("description"):
+        desc = re.sub(r"<[^>]+>", " ", product["description"])
+        desc = re.sub(r"\s+", " ", desc).strip()
+        parts.append(f"Description: {desc[:1500]}")
+    if product.get("url"):
+        parts.append(f"URL: {product['url']}")
+    return "\n".join(parts)
+
+
+def _extract_json(text):
+    m = re.search(r"```json\s*\n(.*?)```", text, re.DOTALL)
+    raw = m.group(1) if m else text
+    raw = raw.strip()
+    if not raw.startswith("{"):
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1:
+            raise ValueError("Model did not return a JSON object")
+        raw = raw[start:end + 1]
+    return json.loads(raw)
+
+
+def _normalise_recipe(recipe, meta):
+    """Fill in defaults and clamp anything the model may have got wrong."""
+    recipe.setdefault("title", "Untitled video")
+    recipe.setdefault("aspect_ratio", meta.get("aspect_ratio", "9:16"))
+    if recipe["aspect_ratio"] not in ("9:16", "1:1", "16:9"):
+        recipe["aspect_ratio"] = "9:16"
+    if recipe.get("voice") not in fal_client.AVATAR_VOICES:
+        recipe["voice"] = "Sarah"
+
+    scenes = recipe.get("scenes") or []
+    clean = []
+    for i, s in enumerate(scenes, start=1):
+        s["index"] = i
+        try:
+            s["duration"] = max(0.8, round(float(s.get("duration", 4)), 2))
+        except (TypeError, ValueError):
+            s["duration"] = 4.0
+        if s.get("kind") not in ("broll", "avatar"):
+            s["kind"] = "broll"
+        for field in ("shot_description", "image_prompt", "motion_prompt",
+                      "avatar_line", "voiceover", "on_screen_text"):
+            s.setdefault(field, "")
+            if s[field] is None:
+                s[field] = ""
+        s["use_product_image"] = bool(s.get("use_product_image")) and s["kind"] == "broll"
+        clean.append(s)
+    recipe["scenes"] = clean
+    recipe["total_duration"] = round(sum(s["duration"] for s in clean), 2)
+    return recipe
+
+
+# ── Phase 1: analysis ──────────────────────────────────────────────────────
+
+def analyze_stream(video_bytes, product=None, notes=None):
+    """Yields {'type': 'status'|'done', ...}. Final event carries the recipe."""
+    try:
+        yield {"type": "status", "text": "🎞️ Reading video…"}
+        meta = probe_video(video_bytes)
+        if meta["duration"] <= 0:
+            yield {"type": "done", "error": "Could not read this video file. Try re-exporting it as MP4 (H.264)."}
+            return
+
+        yield {"type": "status", "text": f"🎞️ {meta['duration']}s · {meta['width']}×{meta['height']} · {meta['aspect_ratio']}"}
+
+        frames = extract_frames(video_bytes)
+        if not frames:
+            yield {"type": "done", "error": "Could not extract frames from this video."}
+            return
+        yield {"type": "status", "text": f"🖼️ Extracted {len(frames)} frames"}
+
+        yield {"type": "status", "text": "🎙️ Transcribing audio…"}
+        transcript = transcribe(video_bytes)
+        yield {"type": "status", "text": (
+            f"🎙️ Transcript: {len(transcript.split())} words" if transcript
+            else "🎙️ No usable audio — analysing visually only"
+        )}
+
+        yield {"type": "status", "text": "🧠 Analysing format with Claude…"}
+
+        content = []
+        for f in frames:
+            content.append({"type": "text", "text": f"Frame at {f['t']}s:"})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": f["media_type"], "data": f["b64"]},
+            })
+        content.append({"type": "text", "text": ANALYSIS_PROMPT.format(
+            metadata=json.dumps(meta),
+            transcript=transcript or "(no audio / silent video)",
+            product=_format_product(product),
+            notes=notes or "(none)",
+        )})
+
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=8000,
+            messages=[{"role": "user", "content": content}],
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text")
+
+        recipe = _normalise_recipe(_extract_json(text), meta)
+        recipe["source_duration"] = meta["duration"]
+
+        yield {"type": "status", "text": f"✅ Recipe ready — {len(recipe['scenes'])} scenes, {recipe['total_duration']}s"}
+        yield {"type": "done", "recipe": recipe, "transcript": transcript}
+
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+def rewrite_stream(recipe, instructions):
+    """Apply a plain-English change to an existing recipe."""
+    try:
+        yield {"type": "status", "text": "🧠 Applying changes…"}
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=8000,
+            messages=[{"role": "user", "content": REWRITE_PROMPT.format(
+                recipe=json.dumps(recipe, indent=2),
+                instructions=instructions,
+            )}],
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        updated = _normalise_recipe(_extract_json(text), {"aspect_ratio": recipe.get("aspect_ratio", "9:16")})
+        yield {"type": "status", "text": f"✅ Updated — {len(updated['scenes'])} scenes, {updated['total_duration']}s"}
+        yield {"type": "done", "recipe": updated}
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+# ── Phase 2: generation ────────────────────────────────────────────────────
+
+def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-avatar",
+                  avatar_resolution="480p"):
+    """USD estimate from fal's published per-second list prices.
+
+    Bills against the duration we actually REQUEST, not the recipe duration —
+    scenes shorter than the model's 4s floor still cost a full 4s, and assembly
+    trims the excess away afterwards.
+    """
+    spec = fal_client.VIDEO_MODELS.get(video_model) or fal_client.VIDEO_MODELS[DEFAULT_VIDEO_MODEL]
+    per_second = spec["usd_per_second"]
+    avatar_spec = fal_client.AVATAR_MODELS.get(avatar_model) or fal_client.AVATAR_MODELS["ai-avatar"]
+    avatar_per_second = avatar_spec["usd_per_second"].get(avatar_resolution, 0.20)
+
+    total = 0.0
+    for s in recipe.get("scenes", []):
+        billed = max(4.0, s.get("duration", 4))
+        if s.get("kind") == "avatar":
+            total += billed * avatar_per_second
+        else:
+            if not s.get("use_product_image"):
+                total += fal_client.USD_PER_IMAGE
+            total += billed * per_second
+            if (s.get("voiceover") or "").strip():
+                total += fal_client.USD_PER_TTS_LINE
+    return round(total, 2)
+
+
+def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-avatar",
+                    avatar_image_url=None, product_image_url=None,
+                    burn_subtitles=True, output_dir=None):
+    """Generate every scene on fal.ai, then assemble the final MP4.
+
+    Yields {'type': 'status'|'scene'|'done', ...}. The final event carries
+    `filename` (relative to output_dir) on success.
+    """
+    output_dir = output_dir or video_assembler.OUTPUT_DIR
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        scenes = recipe.get("scenes") or []
+        if not scenes:
+            yield {"type": "done", "error": "Recipe has no scenes."}
+            return
+
+        aspect = recipe.get("aspect_ratio", "9:16")
+        voice = recipe.get("voice", "Sarah")
+
+        avatar_scenes = [s for s in scenes if s.get("kind") == "avatar"]
+        if avatar_scenes and not avatar_image_url:
+            yield {"type": "done", "error": (
+                f"{len(avatar_scenes)} scene(s) need a talking-head actor, but no actor photo was "
+                "provided. Upload an actor photo, or ask for those scenes to be changed to b-roll."
+            )}
+            return
+
+        ok, msg = fal_client.check_account()
+        if not ok:
+            yield {"type": "done", "error": msg}
+            return
+
+        clips = []
+        total = len(scenes)
+        # fal's on_status callback fires from inside a blocking call, so it can't
+        # yield — it appends here and we drain the buffer after each step.
+        pending = []
+
+        def status(text):
+            pending.append(text)
+
+        def drain(label):
+            while pending:
+                yield {"type": "status", "text": f"   {label} · {pending.pop(0)}"}
+
+        for s in scenes:
+            label = f"Scene {s['index']}/{total}"
+            yield {"type": "status", "text": f"🎬 {label} ({s['kind']}, {s['duration']}s) — {s.get('shot_description', '')[:80]}"}
+
+            if s["kind"] == "avatar":
+                url = fal_client.generate_avatar(
+                    avatar_model,
+                    avatar_image_url,
+                    s.get("avatar_line") or s.get("voiceover") or "…",
+                    voice=voice,
+                    seconds=max(4.0, s["duration"]),
+                    scene_prompt=s.get("shot_description"),
+                    on_status=status,
+                )
+                yield from drain(label)
+            else:
+                prompt = s.get("image_prompt") or s.get("shot_description")
+                if product_image_url and s.get("use_product_image"):
+                    image_url = product_image_url
+                    yield {"type": "status", "text": f"   {label} · using product photo as first frame"}
+                else:
+                    image_url = fal_client.generate_image(prompt, aspect_ratio=aspect, on_status=status)
+                    yield from drain(label)
+                    yield {"type": "status", "text": f"   {label} · first frame ready"}
+
+                url = fal_client.generate_broll(
+                    video_model,
+                    image_url,
+                    s.get("motion_prompt") or s.get("shot_description") or prompt,
+                    max(4.0, s["duration"]),
+                    aspect_ratio=aspect,
+                    on_status=status,
+                )
+                yield from drain(label)
+
+            clip = {"scene": s, "url": url}
+
+            # Voiceover is generated per scene, not as one continuous track —
+            # a single blob would drift out of sync as soon as an avatar scene
+            # (which carries its own speech) sits in the middle of the timeline.
+            vo_text = (s.get("voiceover") or "").strip()
+            if s["kind"] == "broll" and vo_text:
+                yield {"type": "status", "text": f"   {label} · voiceover…"}
+                clip["voiceover_url"] = fal_client.generate_voiceover(
+                    vo_text, voice=voice, on_status=status
+                )
+                yield from drain(label)
+
+            clips.append(clip)
+            yield {"type": "scene", "index": s["index"], "url": url, "kind": s["kind"]}
+
+        yield {"type": "status", "text": "✂️ Assembling final video…"}
+        filename = video_assembler.assemble(
+            clips,
+            aspect_ratio=aspect,
+            burn_subtitles=burn_subtitles,
+            output_dir=output_dir,
+        )
+
+        yield {"type": "status", "text": "✅ Done"}
+        yield {"type": "done", "filename": filename, "scene_urls": [c["url"] for c in clips]}
+
+    except fal_client.FalError as e:
+        yield {"type": "done", "error": str(e)}
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
