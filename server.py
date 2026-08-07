@@ -731,8 +731,23 @@ def video_analyze_start():
     if mode not in ("same_product", "my_product"):
         mode = "same_product"
 
+    import base64 as _b64
+    product_images = []
+    for f in request.files.getlist("product_images"):
+        raw = f.read()
+        if raw:
+            product_images.append({
+                "b64": _b64.b64encode(raw).decode(),
+                "media_type": f.content_type or "image/jpeg",
+            })
+
+    if mode == "my_product" and not product_images and not (product or {}).get("image"):
+        return jsonify({"error": "Pick a Shopify product that has a photo, or upload photos of "
+                                 "your product — without one the product would be invented."}), 400
+
     job_id = str(_uuid_v.uuid4())
-    _run_video_job(job_id, lambda: video_cloner.analyze_stream(video_bytes, product, notes, mode))
+    _run_video_job(job_id, lambda: video_cloner.analyze_stream(
+        video_bytes, product, notes, mode, product_images))
     return jsonify({"job_id": job_id})
 
 

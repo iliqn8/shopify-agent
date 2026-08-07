@@ -178,14 +178,22 @@ frames, not as a description of the product itself:
 MODE_MY_PRODUCT = """## WHAT THIS VIDEO IS FOR
 
 Reverse-engineer the reference's FORMAT — pacing, shot grammar, hook structure, on-screen text
-rhythm — and apply it to a DIFFERENT product, described below. You are NOT copying the reference's
+rhythm — and apply it to a DIFFERENT product, given below. You are NOT copying the reference's
 subject, only how it is constructed.
 
 ## THE PRODUCT THIS NEW VIDEO IS FOR
 {product}
 
-Shots that show the product will be rendered from the REAL product photos, so write `image_prompt`
-as a staging instruction ("Place this exact product in ...") rather than re-describing the product."""
+Photos of this product are attached above, labelled YOUR PRODUCT. Describe it in `product_identity`
+from those photos, not from the reference video's product.
+
+Shots that show the product will be rendered from those REAL photos, so write `image_prompt` as a
+STAGING INSTRUCTION for them, not as a description of the product itself:
+
+  GOOD: "Place this exact product on a marble bathroom counter, soft window light, close three-
+         quarter angle, shallow depth of field."
+  BAD:  "A white ceramic jar of face cream on a counter."   <- re-describing it invites the model
+        to invent a different one; the photos already show what it looks like."""
 
 
 ANALYSIS_PROMPT = """You are a short-form video ad director. You are given frames from a REFERENCE
@@ -270,9 +278,12 @@ JSON object in a ```json fenced block, no prose outside it.
 {instructions}"""
 
 
-def _format_product(product):
+def _format_product(product, uploaded_count=0):
     if not product:
-        return "(no product selected — write the recipe generically for a direct-response ecommerce product)"
+        if uploaded_count:
+            return (f"See the {uploaded_count} attached YOUR PRODUCT photo(s) — that is the product. "
+                    "No other details were given, so read everything off the photos.")
+        return "(no product details given — write the recipe generically for a direct-response ecommerce product)"
     parts = [f"Name: {product.get('title', '(untitled)')}"]
     if product.get("price"):
         parts.append(f"Price: {product['price']}")
@@ -333,12 +344,19 @@ def _normalise_recipe(recipe, meta):
 
 # ── Phase 1: analysis ──────────────────────────────────────────────────────
 
-def analyze_stream(video_bytes, product=None, notes=None, mode="same_product"):
+def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
+                   product_images=None):
     """Yields {'type': 'status'|'done', ...}. Final event carries the recipe.
 
     `mode` is "same_product" (rebuild an ad for the product that appears in the
-    reference clip) or "my_product" (borrow the format for a Shopify product).
+    reference clip) or "my_product" (borrow the format for a different product).
+
+    `product_images` is a list of {"b64", "media_type"} for photos the user
+    uploaded directly — usable on their own, so a product that is not in the
+    Shopify store yet still works, and stackable with the other sources to give
+    the edit model more angles to work from.
     """
+    product_images = product_images or []
     try:
         yield {"type": "status", "text": "🎞️ Reading video…"}
         meta = probe_video(video_bytes)
@@ -371,8 +389,18 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product"):
                 "source": {"type": "base64", "media_type": f["media_type"], "data": f["b64"]},
             })
 
+        for i, img in enumerate(product_images, start=1):
+            content.append({"type": "text", "text": f"YOUR PRODUCT — PHOTO {i}:"})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64",
+                           "media_type": img.get("media_type", "image/jpeg"),
+                           "data": img["b64"]},
+            })
+
         mode_block = (MODE_SAME_PRODUCT if mode == "same_product"
-                      else MODE_MY_PRODUCT.format(product=_format_product(product)))
+                      else MODE_MY_PRODUCT.format(
+                          product=_format_product(product, len(product_images))))
         content.append({"type": "text", "text": ANALYSIS_PROMPT.format(
             mode_block=mode_block,
             metadata=json.dumps(meta),
@@ -394,6 +422,22 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product"):
         # Anchor the product to real pixels. Text-to-image cannot reproduce a
         # specific physical object, so the shots that show it are built by
         # restaging these actual images instead of describing the product.
+        # The three sources stack — more angles give the edit model more to work
+        # from — but uploaded photos come first, being the most deliberate.
+        urls = []
+
+        for i, img in enumerate(product_images):
+            try:
+                urls.append(fal_client.upload_bytes(
+                    base64.b64decode(img["b64"]),
+                    f"product_photo_{i}.jpg",
+                    img.get("media_type", "image/jpeg")))
+            except Exception as e:
+                yield {"type": "status", "text": f"⚠️ Could not upload product photo {i + 1}: {e}"}
+
+        if product and product.get("image") and product["image"] not in urls:
+            urls.append(product["image"])
+
         if mode == "same_product":
             picked = [i for i in (recipe.get("product_reference_frames") or [])
                       if isinstance(i, int) and 0 <= i < len(frames)]
@@ -405,16 +449,14 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="same_product"):
             picked = list(dict.fromkeys(picked))[:4]
 
             yield {"type": "status", "text": f"📌 Locking product identity from frames {picked}…"}
-            urls = []
             for idx in picked:
                 try:
                     urls.append(fal_client.upload_bytes(
                         base64.b64decode(frames[idx]["b64"]), f"product_ref_{idx}.jpg", "image/jpeg"))
                 except Exception as e:
                     yield {"type": "status", "text": f"⚠️ Could not upload frame {idx}: {e}"}
-            recipe["product_reference_urls"] = urls
-        elif product and product.get("image"):
-            recipe["product_reference_urls"] = [product["image"]]
+
+        recipe["product_reference_urls"] = urls[:8]
 
         refs = len(recipe.get("product_reference_urls") or [])
         yield {"type": "status", "text": (
