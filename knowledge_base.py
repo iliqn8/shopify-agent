@@ -275,7 +275,7 @@ def save_video_project(title, recipe_json, product_name=None, video_model=None,
     cur = conn.execute("""INSERT INTO video_projects
         (title, product_name, recipe_json, video_model, filename, scene_urls, status)
         VALUES (?,?,?,?,?,?,?)""",
-        (title, recipe_json, product_name, video_model, filename, scene_urls, status))
+        (title, product_name, recipe_json, video_model, filename, scene_urls, status))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -308,7 +308,9 @@ _VIDEO_COLS = ("id, title, product_name, recipe_json, video_model, filename, "
 def list_video_projects():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        f"SELECT {_VIDEO_COLS} FROM video_projects ORDER BY created_at DESC"
+        # created_at only has second precision, so it ties for videos made in
+        # quick succession — id breaks the tie and matches insertion order.
+        f"SELECT {_VIDEO_COLS} FROM video_projects ORDER BY created_at DESC, id DESC"
     ).fetchall()
     conn.close()
     return [_video_row(r) for r in rows]

@@ -1922,7 +1922,7 @@ async function vidUploadActor(f) {
   fd.append('avatar_model', document.getElementById('vid-avatar-model').value);
   try {
     const r = await fetch('/api/video-upload-image', { method: 'POST', body: fd });
-    const d = await r.json();
+    const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
     vidActorUrl = d.url;
     st.textContent = '✅ ' + f.name;
@@ -1936,6 +1936,19 @@ async function vidUploadActor(f) {
 function vidSelectedProduct() {
   const v = document.getElementById('vid-product').value;
   return v === '' ? null : vidProducts[parseInt(v, 10)];
+}
+
+// Flask renders 500s as an HTML page, and r.json() on that throws a useless
+// "Unexpected token '<'". Surface the status instead.
+async function vidJson(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(r.ok
+      ? `Server returned a non-JSON response (${r.status})`
+      : `Server error ${r.status} — check the Railway logs`);
+  }
 }
 
 // Shared poller for every video job endpoint.
@@ -1974,7 +1987,7 @@ async function vidAnalyze() {
 
   try {
     const r = await fetch('/api/video-analyze-start', { method: 'POST', body: fd });
-    const d = await r.json();
+    const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
 
     vidPoll(d.job_id, t => st.textContent = t, ev => {
@@ -2006,7 +2019,7 @@ async function vidRewrite() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipe: vidRecipe, instructions })
     });
-    const d = await r.json();
+    const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
 
     vidPoll(d.job_id, t => st.textContent = t, ev => {
@@ -2114,7 +2127,7 @@ async function vidGenerate() {
         burn_subtitles: document.getElementById('vid-subs').checked
       })
     });
-    const d = await r.json();
+    const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
 
     vidPoll(d.job_id,

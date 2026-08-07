@@ -221,12 +221,28 @@ def generate_broll(model_key, image_url, motion_prompt, seconds, aspect_ratio="9
         raise FalError(f"Unknown video model '{model_key}'")
     duration = _nearest_duration(seconds, spec["durations"])
 
-    if spec["id"].startswith("fal-ai/kling-video"):
+    negative = ("blur, distort, warped hands, extra fingers, low quality, "
+                "watermark, text artifacts")
+
+    if model_key == "kling-2.6-pro":
+        # 2.6 renamed the input image field. Sending `image_url` here is
+        # accepted and silently ignored, which quietly downgrades the call to
+        # text-to-video and throws away the starter frame.
+        # generate_audio defaults to true and doubles the rate ($0.07 -> $0.14
+        # per second) for a track the assembler overwrites anyway.
+        payload = {
+            "prompt": motion_prompt,
+            "start_image_url": image_url,
+            "duration": duration,
+            "negative_prompt": negative,
+            "generate_audio": False,
+        }
+    elif spec["id"].startswith("fal-ai/kling-video"):
         payload = {
             "prompt": motion_prompt,
             "image_url": image_url,
             "duration": duration,
-            "negative_prompt": "blur, distort, warped hands, extra fingers, low quality, watermark, text artifacts",
+            "negative_prompt": negative,
             "cfg_scale": 0.5,
         }
     else:  # seedance
