@@ -21,6 +21,7 @@ import cv2
 import anthropic
 
 import fal_client
+import avatar_registry
 import video_assembler
 
 client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
@@ -381,7 +382,8 @@ def rewrite_stream(recipe, instructions):
 
 # ── Phase 2: generation ────────────────────────────────────────────────────
 
-def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-avatar",
+def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
+                  avatar_model=avatar_registry.DEFAULT_AVATAR_MODEL,
                   avatar_resolution="480p"):
     """USD estimate from fal's published per-second list prices.
 
@@ -391,25 +393,42 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-avat
     """
     spec = fal_client.VIDEO_MODELS.get(video_model) or fal_client.VIDEO_MODELS[DEFAULT_VIDEO_MODEL]
     per_second = spec["usd_per_second"]
-    avatar_spec = fal_client.AVATAR_MODELS.get(avatar_model) or fal_client.AVATAR_MODELS["ai-avatar"]
-    avatar_per_second = avatar_spec["usd_per_second"].get(avatar_resolution, 0.20)
+    try:
+        avatar_per_second = avatar_registry.usd_per_second(avatar_model, avatar_resolution)
+    except avatar_registry.AvatarError:
+        avatar_per_second = avatar_registry.usd_per_second(
+            avatar_registry.DEFAULT_AVATAR_MODEL, avatar_resolution)
 
-    total = 0.0
+    fal_usd = 0.0
+    avatar_usd = 0.0
     for s in recipe.get("scenes", []):
         billed = max(4.0, s.get("duration", 4))
         if s.get("kind") == "avatar":
-            total += billed * avatar_per_second
+            avatar_usd += billed * avatar_per_second
         else:
             if not s.get("use_product_image"):
-                total += fal_client.USD_PER_IMAGE
-            total += billed * per_second
+                fal_usd += fal_client.USD_PER_IMAGE
+            fal_usd += billed * per_second
             if (s.get("voiceover") or "").strip():
-                total += fal_client.USD_PER_TTS_LINE
-    return round(total, 2)
+                fal_usd += fal_client.USD_PER_TTS_LINE
+
+    avatar_provider = avatar_registry.provider_of(avatar_model)
+    if avatar_provider == "fal":
+        # Same account, so there is nothing to split out.
+        fal_usd += avatar_usd
+        avatar_usd = 0.0
+
+    return {
+        "usd": round(fal_usd + avatar_usd, 2),
+        "fal_usd": round(fal_usd, 2),
+        "avatar_usd": round(avatar_usd, 2),
+        "avatar_provider": avatar_provider,
+    }
 
 
-def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-avatar",
-                    avatar_image_url=None, product_image_url=None,
+def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
+                    avatar_model=avatar_registry.DEFAULT_AVATAR_MODEL,
+                    avatar_image_url=None, avatar_voice=None, product_image_url=None,
                     burn_subtitles=True, output_dir=None):
     """Generate every scene on fal.ai, then assemble the final MP4.
 
@@ -436,10 +455,19 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-av
             )}
             return
 
-        ok, msg = fal_client.check_account()
-        if not ok:
-            yield {"type": "done", "error": msg}
-            return
+        # Check every provider this recipe will actually touch, before spending
+        # anything — a missing HeyGen key should not surface only after five
+        # b-roll scenes have already been billed.
+        if any(s.get("kind") == "broll" for s in scenes):
+            ok, msg = fal_client.check_account()
+            if not ok:
+                yield {"type": "done", "error": msg}
+                return
+        if avatar_scenes:
+            ok, msg = avatar_registry.check_provider(avatar_registry.provider_of(avatar_model))
+            if not ok:
+                yield {"type": "done", "error": msg}
+                return
 
         clips = []
         total = len(scenes)
@@ -459,13 +487,14 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-av
             yield {"type": "status", "text": f"🎬 {label} ({s['kind']}, {s['duration']}s) — {s.get('shot_description', '')[:80]}"}
 
             if s["kind"] == "avatar":
-                url = fal_client.generate_avatar(
+                url = avatar_registry.generate(
                     avatar_model,
                     avatar_image_url,
                     s.get("avatar_line") or s.get("voiceover") or "…",
-                    voice=voice,
+                    voice=avatar_voice or voice,
                     seconds=max(4.0, s["duration"]),
                     scene_prompt=s.get("shot_description"),
+                    aspect_ratio=aspect,
                     on_status=status,
                 )
                 yield from drain(label)
@@ -490,6 +519,12 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL, avatar_model="ai-av
                 yield from drain(label)
 
             clip = {"scene": s, "url": url}
+
+            # Providers that derive length from the script (HeyGen) can return a
+            # clip longer than the recipe's slot. Trimming it would cut the actor
+            # off mid-sentence, so the spoken take wins over the planned timing.
+            if s["kind"] == "avatar" and avatar_registry.is_fixed_length(avatar_model):
+                clip["keep_full_length"] = True
 
             # Voiceover is generated per scene, not as one continuous track —
             # a single blob would drift out of sync as soon as an avatar scene

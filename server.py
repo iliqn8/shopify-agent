@@ -675,14 +675,28 @@ def _run_video_job(job_id, generator_factory):
 @app.route("/api/video-models")
 def video_models():
     import fal_client
+    import avatar_registry
     ok, msg = fal_client.check_account()
     return jsonify({
         "video_models": [{"key": k, **v} for k, v in fal_client.VIDEO_MODELS.items()],
-        "avatar_models": [{"key": k, **v} for k, v in fal_client.AVATAR_MODELS.items()],
+        "avatar_models": [{"key": k, **v} for k, v in avatar_registry.AVATAR_MODELS.items()],
+        "default_avatar_model": avatar_registry.DEFAULT_AVATAR_MODEL,
+        "providers": avatar_registry.providers_status(),
         "voices": fal_client.AVATAR_VOICES,
         "account_ok": ok,
         "account_message": msg,
     })
+
+
+@app.route("/api/video-voices/<model_key>")
+def video_voices(model_key):
+    import avatar_registry
+    try:
+        return jsonify({"voices": avatar_registry.list_voices(model_key)})
+    except avatar_registry.AvatarError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e), "voices": []})
 
 
 @app.route("/api/video-analyze-start", methods=["POST"])
@@ -739,9 +753,11 @@ def video_generate_start():
     if not recipe:
         return jsonify({"error": "Missing recipe"}), 400
 
+    import avatar_registry
     video_model = data.get("video_model") or video_cloner.DEFAULT_VIDEO_MODEL
-    avatar_model = data.get("avatar_model") or "ai-avatar"
+    avatar_model = data.get("avatar_model") or avatar_registry.DEFAULT_AVATAR_MODEL
     avatar_image_url = data.get("avatar_image_url") or None
+    avatar_voice = data.get("avatar_voice") or None
     product_image_url = data.get("product_image_url") or None
     product_name = data.get("product_name") or None
     burn_subtitles = data.get("burn_subtitles", True)
@@ -762,6 +778,7 @@ def video_generate_start():
             video_model=video_model,
             avatar_model=avatar_model,
             avatar_image_url=avatar_image_url,
+            avatar_voice=avatar_voice,
             product_image_url=product_image_url,
             burn_subtitles=burn_subtitles,
         ):
@@ -799,21 +816,29 @@ def video_poll(job_id):
 def video_estimate():
     import video_cloner
     data = request.json or {}
+    import avatar_registry
     recipe = data.get("recipe") or {}
     model = data.get("video_model") or video_cloner.DEFAULT_VIDEO_MODEL
-    return jsonify({"usd": video_cloner.estimate_cost(recipe, model)})
+    avatar_model = data.get("avatar_model") or avatar_registry.DEFAULT_AVATAR_MODEL
+    return jsonify(video_cloner.estimate_cost(recipe, model, avatar_model))
 
 
 @app.route("/api/video-upload-image", methods=["POST"])
 def video_upload_image():
-    """Push an actor/product photo to fal storage so models can fetch it."""
-    import fal_client
+    """Turn an uploaded actor photo into a reference the chosen provider accepts.
+
+    fal wants a URL; HeyGen wants a talking_photo_id it minted itself — the
+    registry hides that difference.
+    """
+    import avatar_registry
     f = request.files.get("file")
     if not f:
         return jsonify({"error": "No file"}), 400
+    model_key = request.form.get("avatar_model") or avatar_registry.DEFAULT_AVATAR_MODEL
     try:
-        url = fal_client.upload_bytes(f.read(), f.filename or "photo.jpg", f.content_type)
-        return jsonify({"url": url})
+        ref = avatar_registry.upload_actor(
+            model_key, f.read(), f.filename or "actor.jpg", f.content_type)
+        return jsonify({"url": ref})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

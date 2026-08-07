@@ -126,7 +126,11 @@ def _download(url, dest):
 
 
 def _normalise_segment(src, dest, duration, width, height, caption, voiceover_path, tmpdir, tag):
-    """Trim, crop to frame, burn caption, and settle on exactly one audio track."""
+    """Trim, crop to frame, burn caption, and settle on exactly one audio track.
+
+    `duration=None` keeps the source's own length — used for talking-head clips
+    whose length is set by the script rather than by us.
+    """
     vf = [
         f"scale={width}:{height}:force_original_aspect_ratio=increase",
         f"crop={width}:{height}",
@@ -148,9 +152,10 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
         args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
         audio_map = ["-map", f"{1}:a:0"]
 
+    args += ["-map", "0:v:0", *audio_map]
+    if duration is not None:
+        args += ["-t", f"{duration:.3f}"]
     args += [
-        "-map", "0:v:0", *audio_map,
-        "-t", f"{duration:.3f}",
         "-vf", ",".join(vf),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-r", str(FPS),
@@ -204,7 +209,7 @@ def assemble(clips, aspect_ratio="9:16", burn_subtitles=True,
 
             seg = _normalise_segment(
                 raw, os.path.join(tmpdir, f"seg_{i}.mp4"),
-                duration=float(scene.get("duration", 4)),
+                duration=None if clip.get("keep_full_length") else float(scene.get("duration", 4)),
                 width=width, height=height,
                 caption=caption,
                 voiceover_path=vo_path,

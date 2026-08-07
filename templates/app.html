@@ -438,7 +438,8 @@
           </div>
           <div>
             <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">AVATAR MODEL</label>
-            <select id="vid-avatar-model" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px"></select>
+            <select id="vid-avatar-model" onchange="vidAvatarModelChanged()" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px"></select>
+            <div id="vid-avatar-provider" style="font-size:11px;margin-top:5px;color:#666"></div>
           </div>
         </div>
 
@@ -449,6 +450,12 @@
             <button class="btn-sm" onclick="document.getElementById('vid-actor').click()">🧑 Choose photo</button>
             <span id="vid-actor-status" style="color:#555;font-size:12px">No photo</span>
             <span id="vid-actor-thumb"></span>
+          </div>
+          <div style="margin-top:12px">
+            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">ACTOR VOICE</label>
+            <select id="vid-avatar-voice" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:9px 12px;border-radius:8px;font-size:13px">
+              <option value="">— Provider default —</option>
+            </select>
           </div>
         </div>
 
@@ -1817,6 +1824,8 @@ let vidFile = null;
 let vidRecipe = null;
 let vidProducts = [];
 let vidActorUrl = null;
+let vidActorFile = null;
+let vidProviders = {};
 
 async function vidInit() {
   vidLoadHistory();
@@ -1830,11 +1839,20 @@ async function vidInit() {
     mSel.innerHTML = d.video_models.map(m =>
       `<option value="${m.key}"${m.key === 'kling-2.5-standard' ? ' selected' : ''}>${m.label}</option>`).join('');
     const aSel = document.getElementById('vid-avatar-model');
-    aSel.innerHTML = d.avatar_models.map(m => `<option value="${m.key}">${m.label}</option>`).join('');
+    aSel.innerHTML = d.avatar_models.map(m =>
+      `<option value="${m.key}"${m.key === d.default_avatar_model ? ' selected' : ''}>${m.label}</option>`).join('');
+    vidProviders = d.providers || {};
+    vidAvatarModelChanged();
 
+    // One line per provider — b-roll always runs on fal, talking heads may not.
     const acc = document.getElementById('vid-account');
-    acc.textContent = (d.account_ok ? '✅ ' : '⚠️ ') + d.account_message;
-    acc.style.color = d.account_ok ? '#4ade80' : '#fbbf24';
+    const lines = [(d.account_ok ? '✅ ' : '⚠️ ') + d.account_message];
+    for (const [name, st] of Object.entries(vidProviders)) {
+      if (name === 'fal') continue;
+      lines.push((st.ok ? '✅ ' : '⚠️ ') + st.message);
+    }
+    acc.innerHTML = lines.map(l =>
+      `<div style="color:${l.startsWith('✅') ? '#4ade80' : '#fbbf24'}">${vidEsc(l)}</div>`).join('');
   } catch (e) {
     document.getElementById('vid-account').textContent = '⚠️ Could not reach fal.ai: ' + e.message;
   }
@@ -1858,13 +1876,50 @@ function vidHandleFile(input) {
     ? `${vidFile.name} (${(vidFile.size / 1048576).toFixed(1)} MB)` : 'No file selected';
 }
 
+// Providers mint incompatible actor references (fal: a URL, HeyGen: an id it
+// owns), so switching model invalidates whatever we uploaded and we re-upload.
+async function vidAvatarModelChanged() {
+  const key = document.getElementById('vid-avatar-model').value;
+  if (!key) return;
+
+  const models = { heygen: 'heygen', 'ai-avatar': 'fal', infinitalk: 'fal' };
+  const st = vidProviders[models[key]];
+  const note = document.getElementById('vid-avatar-provider');
+  if (st) {
+    note.textContent = (st.ok ? '' : '⚠️ ') + st.message;
+    note.style.color = st.ok ? '#666' : '#fbbf24';
+  }
+
+  const sel = document.getElementById('vid-avatar-voice');
+  sel.innerHTML = '<option value="">— Loading voices… —</option>';
+  try {
+    const r = await fetch('/api/video-voices/' + encodeURIComponent(key));
+    const d = await r.json();
+    sel.innerHTML = '<option value="">— Provider default —</option>' +
+      (d.voices || []).map(v => `<option value="${vidEsc(v.id)}">${vidEsc(v.name)}</option>`).join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">— Provider default —</option>';
+  }
+
+  if (vidActorFile) await vidUploadActor(vidActorFile);
+  vidEstimate();
+}
+
 async function vidHandleActor(input) {
   const f = input.files[0];
   if (!f) return;
+  vidActorFile = f;
+  await vidUploadActor(f);
+}
+
+async function vidUploadActor(f) {
   const st = document.getElementById('vid-actor-status');
   st.textContent = 'Uploading…';
+  vidActorUrl = null;
+
   const fd = new FormData();
   fd.append('file', f);
+  fd.append('avatar_model', document.getElementById('vid-avatar-model').value);
   try {
     const r = await fetch('/api/video-upload-image', { method: 'POST', body: fd });
     const d = await r.json();
@@ -2010,10 +2065,18 @@ async function vidEstimate() {
     const r = await fetch('/api/video-estimate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ recipe: vidRecipe, video_model: document.getElementById('vid-model').value })
+      body: JSON.stringify({
+        recipe: vidRecipe,
+        video_model: document.getElementById('vid-model').value,
+        avatar_model: document.getElementById('vid-avatar-model').value
+      })
     });
     const d = await r.json();
-    document.getElementById('vid-cost').textContent = `≈ $${d.usd} in fal.ai credits`;
+    // Talking heads may bill to a different account than the b-roll, so show
+    // the split rather than implying it all comes off one balance.
+    document.getElementById('vid-cost').textContent = d.avatar_usd > 0
+      ? `≈ $${d.usd} total — $${d.fal_usd} fal.ai + $${d.avatar_usd} ${d.avatar_provider}`
+      : `≈ $${d.usd} in fal.ai credits`;
   } catch (e) { /* estimate is advisory only */ }
 }
 
@@ -2045,6 +2108,7 @@ async function vidGenerate() {
         video_model: document.getElementById('vid-model').value,
         avatar_model: document.getElementById('vid-avatar-model').value,
         avatar_image_url: vidActorUrl,
+        avatar_voice: document.getElementById('vid-avatar-voice').value || null,
         product_image_url: product ? product.image : null,
         product_name: product ? product.title : null,
         burn_subtitles: document.getElementById('vid-subs').checked
