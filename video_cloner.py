@@ -149,7 +149,66 @@ def _layout_similarity(url_a, url_b):
         return None
 
 
-def _verify_swap(base_url, edited_url, product_urls):
+# What can optionally be replaced inside an otherwise faithful recreation.
+# Each is independent and opt-in: with no photo uploaded for a slot, that part
+# of the frame is left exactly as the reference had it.
+#
+# `layout_min` is the Laplacian-correlation floor for accepting an edit. It has
+# to differ per slot: replacing a product barely moves the frame's edges, but
+# replacing the environment redraws most of them by design, so the structural
+# check is useless there and the vision check carries it alone.
+SWAP_SLOTS = {
+    "product": {
+        "noun": "product",
+        "label": "product",
+        "layout_min": 0.45,
+        "keep": "the subject and its pose and position, the background and setting, "
+                "every other object, the lighting and the camera viewpoint",
+        "completeness": "Check every part of it separately — body, panels, padding, straps, "
+                        "trims, handles, attachments. If any part still has the original's "
+                        "colour or shape this is false; a leftover piece in the old colour is "
+                        "the usual failure.",
+        "instruction": "the product worn by, held by or attached to the subject",
+        "preserve": "the subject itself and its exact pose and position, the background and "
+                    "setting, the lighting, the camera viewpoint and the framing",
+    },
+    "subject": {
+        "noun": "main subject",
+        "label": "subject",
+        # A subject fills much of the frame, so its edges legitimately change.
+        "layout_min": 0.20,
+        "keep": "the background and setting, every other object, the lighting and the camera "
+                "viewpoint, and the subject's POSE, POSITION and SIZE in frame",
+        "completeness": "The subject in B must be recognisably the one from C — same species, "
+                        "breed, colouring and markings — not the original merely restyled.",
+        "instruction": "the main subject (the person or animal)",
+        "preserve": "the subject's exact pose, position, size and orientation in frame, the "
+                    "background and setting, any product it wears or holds, the lighting, the "
+                    "camera viewpoint and the framing",
+    },
+    "environment": {
+        "noun": "background and setting",
+        "label": "environment",
+        # Replacing the setting redraws nearly every edge; structure cannot judge it.
+        "layout_min": None,
+        "keep": "the subject, its pose, position and size in frame, any product it wears or "
+                "holds, and the camera viewpoint and framing",
+        "completeness": "The setting in B must clearly be the place shown in C, not the "
+                        "original location merely recoloured or relit.",
+        "instruction": "the background and surroundings the subject is in",
+        "preserve": "the subject exactly as it is — same pose, position, size, orientation and "
+                    "appearance — along with any product it wears or holds, and the camera "
+                    "viewpoint and framing",
+    },
+}
+
+# Applied in this order. Product first because it is the smallest, most precise
+# edit and is easiest to verify against an untouched frame; environment last
+# because it repaints the most and would otherwise obscure the earlier checks.
+SWAP_ORDER = ["product", "subject", "environment"]
+
+
+def _verify_swap(base_url, edited_url, ref_urls, slot="product"):
     """Ask the vision model whether the swap did what was asked.
 
     Pixel heuristics cannot answer this. A whole-frame colour histogram scores
@@ -173,34 +232,31 @@ def _verify_swap(base_url, edited_url, product_urls):
                     "data": base64.b64encode(raw).decode()}},
             ]
 
+        spec = SWAP_SLOTS[slot]
         content = block(base_url, "IMAGE A — the original frame:")
         content += block(edited_url, "IMAGE B — the edited frame:")
-        for i, u in enumerate(product_urls[:3], start=1):
-            content += block(u, f"IMAGE C{i} — the replacement product:")
+        for i, u in enumerate(ref_urls[:3], start=1):
+            content += block(u, f"IMAGE C{i} — the replacement {spec['noun']}:")
         content.append({"type": "text", "text":
-            "B was meant to be A with only the product replaced by the product in the C images.\n\n"
+            f"B was meant to be A with only the {spec['noun']} replaced by the one in the C "
+            "images.\n\n"
             "Judge the CONTENT of the scene, not the file. Ignore resolution, image size, "
             "compression and small crop differences at the edges — those are expected and "
-            "harmless. What matters is whether the same moment is still depicted.\n\n"
+            "harmless.\n\n"
             "Answer with JSON only, no prose:\n"
-            '{"scene_kept": <true if B shows the SAME scene as A — same subject in the same '
-            'pose and position, same background and setting, same other objects in the same '
-            'places, same camera viewpoint. false only if the scene was restaged: the subject '
-            'moved or changed activity, the setting or background changed, objects moved, or '
-            'the camera viewpoint changed>, '
-            '"product_swapped": <true ONLY if the product in B has been COMPLETELY replaced by '
-            'the C product. Check every part of it separately — body, panels, padding, straps, '
-            'trims, handles, attachments. If any part still has the original product\'s colour '
-            'or shape, this is false: a partial swap is a failure, and a leftover piece in the '
-            'old colour is the usual way it happens>, '
-            '"note": "<one short sentence on what differs; if the swap is partial, name the '
-            'part that was missed>"}'})
+            '{"scene_kept": <true if everything OUTSIDE the replaced ' + spec['noun'] + ' is '
+            'unchanged: ' + spec['keep'] + '. false only if something outside it was restaged, '
+            'moved or redrawn>, '
+            '"swapped": <true ONLY if the ' + spec['noun'] + ' in B has been COMPLETELY '
+            'replaced by the one in C. ' + spec['completeness'] + '>, '
+            '"note": "<one short sentence on what differs; if the swap is partial, name what '
+            'was missed>"}'})
 
         resp = client.messages.create(model=MODEL, max_tokens=400,
                                       messages=[{"role": "user", "content": content}])
         text = "".join(b.text for b in resp.content if b.type == "text")
         data = _extract_json(text)
-        return (bool(data.get("scene_kept")), bool(data.get("product_swapped")),
+        return (bool(data.get("scene_kept")), bool(data.get("swapped")),
                 str(data.get("note") or ""))
     except Exception:
         return True, True, "(verification unavailable)"
@@ -610,6 +666,39 @@ def _parts_clause(parts):
             "for a leftover piece in the original's colour, which is the usual failure.")
 
 
+def _slot_prompts(slot, ref_count, parts=None):
+    """Escalating edit instructions for one swap slot, best first.
+
+    Product keeps its own hand-tuned wording — it is the slot that took the
+    most iterations to get right. The others are generated from the slot's
+    description, which is the same shape of instruction: replace exactly one
+    thing, leave everything named in `preserve` untouched.
+    """
+    if slot == "product":
+        return _swap_prompts(ref_count, parts)
+
+    spec = SWAP_SLOTS[slot]
+    figs = ("Figure 2" if ref_count == 1
+            else "Figures 2" + "".join(f", {i}" for i in range(3, ref_count + 2)))
+    others = "the image that follows" if ref_count == 1 else f"the {ref_count} images that follow"
+    return [
+        (
+            f"Figure 1 is a photograph. {figs} show {spec['instruction']} to use instead.\n\n"
+            f"Edit Figure 1 so that {spec['instruction']} is replaced by the one from {figs}.\n\n"
+            f"Keep unchanged: {spec['preserve']}. Do not restage the shot. Do not change what "
+            f"is happening. Only {spec['noun']} changes."
+        ),
+        (
+            "You are performing an inpainting edit, not generating a new picture.\n\n"
+            f"IMAGE 1 is the ONLY image whose composition matters. Reproduce it, then repaint "
+            f"ONLY {spec['instruction']}, replacing it with the one shown in {others}.\n\n"
+            f"These must survive the edit untouched: {spec['preserve']}. The reference images "
+            f"supply nothing but the new {spec['noun']} — ignore their composition, their "
+            "camera angle and anything else in them."
+        ),
+    ]
+
+
 def _swap_prompts(ref_count, parts=None):
     """Instructions for swapping a product into an existing frame, best first.
 
@@ -736,7 +825,8 @@ def _normalise_recipe(recipe, meta, target_duration=None):
 
 # ── Phase 1a: shot-for-shot reconstruction ─────────────────────────────────
 
-def _analyze_recreate(video_bytes, product, notes, product_images, target_duration):
+def _analyze_recreate(video_bytes, product, notes, product_images, target_duration,
+                      subject_images=None, environment_images=None):
     """Build a recipe that rebuilds the reference shot for shot.
 
     The difference from the other modes is where each shot's first frame comes
@@ -875,9 +965,26 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
         recipe["product_source"] = (f"{len(refs)} photo(s) — swapped into every shot"
                                     if refs else "kept from the reference video")
 
+        # Optional subject / environment replacements, same mechanism.
+        for slot, images in (("subject", subject_images), ("environment", environment_images)):
+            slot_urls = []
+            for i, img in enumerate(images or []):
+                try:
+                    slot_urls.append(fal_client.upload_bytes(
+                        base64.b64decode(img["b64"]), f"{slot}_{i}.jpg",
+                        img.get("media_type", "image/jpeg")))
+                except Exception as e:
+                    yield {"type": "status",
+                           "text": f"⚠️ Could not upload {slot} photo {i + 1}: {e}"}
+            recipe[f"{slot}_reference_urls"] = slot_urls[:4]
+
+        swapped = [SWAP_SLOTS[k]["label"] for k in SWAP_ORDER
+                   if recipe.get("product_reference_urls" if k == "product"
+                                 else f"{k}_reference_urls")]
         yield {"type": "status", "text": (
             f"✅ Recipe ready — {len(scenes)} shot(s), {recipe['total_duration']}s, "
-            + ("product swapped in" if refs else "original product kept"))}
+            + (f"replacing: {', '.join(swapped)}" if swapped
+               else "everything kept from the reference"))}
         yield {"type": "done", "recipe": recipe, "transcript": transcript}
 
     except Exception as e:
@@ -887,7 +994,8 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
 # ── Phase 1: analysis ──────────────────────────────────────────────────────
 
 def analyze_stream(video_bytes, product=None, notes=None, mode="recreate",
-                   product_images=None, target_duration=None):
+                   product_images=None, target_duration=None,
+                   subject_images=None, environment_images=None):
     """Yields {'type': 'status'|'done', ...}. Final event carries the recipe.
 
     `mode`:
@@ -904,7 +1012,7 @@ def analyze_stream(video_bytes, product=None, notes=None, mode="recreate",
     product_images = product_images or []
     if mode == "recreate":
         yield from _analyze_recreate(video_bytes, product, notes, product_images,
-                                     target_duration)
+                                     target_duration, subject_images, environment_images)
         return
     try:
         yield {"type": "status", "text": "🎞️ Reading video…"}
@@ -1059,7 +1167,8 @@ def rewrite_stream(recipe, instructions):
         # these through, but losing them would silently downgrade a recreation
         # back to invented shots. Re-attach them from the original by index.
         for key in ("mode", "product_reference_urls", "product_swap", "product_source",
-                    "product_identity", "source_duration"):
+                    "product_identity", "product_parts", "soundscape", "source_duration",
+                    "subject_reference_urls", "environment_reference_urls"):
             if key in recipe:
                 updated.setdefault(key, recipe[key])
         originals = {s.get("index"): s for s in (recipe.get("scenes") or [])}
@@ -1095,6 +1204,14 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
         avatar_per_second = avatar_registry.usd_per_second(
             avatar_registry.DEFAULT_AVATAR_MODEL, avatar_resolution)
 
+    # Each active swap slot is its own edit pass per shot that shows it, and
+    # subject/environment swaps run on the dearer models.
+    swap_cost = sum(
+        (fal_client.USD_PER_EDIT if slot == "product" else fal_client.USD_PER_BIG_EDIT)
+        for slot in SWAP_ORDER
+        if recipe.get("product_reference_urls" if slot == "product"
+                      else f"{slot}_reference_urls"))
+
     fal_usd = 0.0
     avatar_usd = 0.0
     for s in recipe.get("scenes", []):
@@ -1105,10 +1222,11 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
         if s.get("kind") == "avatar":
             avatar_usd += max(4.0, s.get("duration", 4)) * avatar_per_second
         else:
-            # Every b-roll shot needs a first frame — either restaged from the
-            # product references, or generated from text.
-            fal_usd += (fal_client.USD_PER_EDIT if s.get("shows_product")
-                        else fal_client.USD_PER_IMAGE)
+            # Every b-roll shot needs a first frame. A recreation starts from
+            # the reference's own, costing nothing; otherwise it is generated.
+            if not s.get("base_image_url"):
+                fal_usd += fal_client.USD_PER_IMAGE
+            fal_usd += swap_cost
             fal_usd += billed * per_second
             if (s.get("voiceover") or "").strip():
                 fal_usd += fal_client.USD_PER_TTS_LINE
@@ -1153,6 +1271,15 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         if product_image_url and product_image_url not in product_refs:
             product_refs.append(product_image_url)
 
+        # Each slot is opt-in. An empty one means that part of the frame is
+        # left exactly as the reference had it.
+        swap_refs = {slot: (product_refs if slot == "product"
+                            else list(recipe.get(f"{slot}_reference_urls") or []))
+                     for slot in SWAP_ORDER}
+        active = [SWAP_SLOTS[k]["label"] for k, v in swap_refs.items() if v]
+        if active:
+            yield {"type": "status", "text": f"🔁 Replacing: {', '.join(active)}"}
+
         # Only shots built from a text prompt need product references. A
         # recreation starts from the reference's own frame, which already shows
         # the product, so it needs none unless one is being swapped in.
@@ -1166,9 +1293,6 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 "without one the product would be invented rather than reproduced."
             )}
             return
-        if product_refs:
-            yield {"type": "status",
-                   "text": f"📌 {len(product_refs)} product reference image(s) locked in"}
 
         avatar_scenes = [s for s in scenes if s.get("kind") == "avatar"]
         if avatar_scenes and not avatar_image_url:
@@ -1241,54 +1365,15 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 # Recreation: this shot's own opening frame from the reference
                 # is the starting image, so composition, subject, location and
                 # framing are inherited rather than reinvented.
-                if product_refs and s.get("shows_product"):
-                    image_url = None
-                    prompts = _swap_prompts(len(product_refs), recipe.get("product_parts"))
-                    for attempt, rung in enumerate(fal_client.EDIT_LADDER, start=1):
-                        swap = prompts[min(attempt - 1, len(prompts) - 1)]
-                        # Pin the recipe's aspect. "auto" lets the model pick,
-                        # and it returns a differently-cropped frame that no
-                        # longer matches the rest of the cut.
-                        candidate = fal_client.edit_image(
-                            [s["base_image_url"]] + product_refs, swap,
-                            aspect_ratio=aspect, on_status=status,
-                            model_id=rung["id"], seed=attempt * 1000 + s["index"])
-                        yield from drain(label)
-
-                        # The edit model will happily compose a brand-new scene
-                        # out of all the inputs instead of editing the first
-                        # one — a floating dog in deep water came back standing
-                        # on a different beach. Cheap structural check first.
-                        score = _layout_similarity(s["base_image_url"], candidate)
-                        if score is not None and score < COMPOSITION_MIN:
-                            yield {"type": "status", "text": (
-                                f"   {label} · {rung['label']} redrew the scene "
-                                f"(layout match {score:.2f}) — escalating")}
-                            continue
-
-                        scene_ok, swapped, note = _verify_swap(
-                            s["base_image_url"], candidate, product_refs)
-                        if scene_ok and swapped:
-                            image_url = candidate
-                            yield {"type": "status", "text": (
-                                f"   {label} · {rung['label']}: product swapped in, scene intact"
-                                + (f" (layout {score:.2f})" if score is not None else ""))}
-                            break
-
-                        reason = ("the scene was redrawn" if not scene_ok
-                                  else "the product was left unchanged")
-                        yield {"type": "status", "text": (
-                            f"   {label} · {rung['label']} rejected — {reason}"
-                            + (f": {note}" if note else ""))}
-
-                    if image_url is None:
-                        image_url = s["base_image_url"]
-                        yield {"type": "status", "text": (
-                            f"   ⚠️ {label} · could not swap the product without redrawing the "
-                            "scene, so this shot keeps the original product")}
-                else:
-                    image_url = s["base_image_url"]
+                image_url = s["base_image_url"]
+                wanted = [(slot, refs) for slot, refs in swap_refs.items()
+                          if refs and (slot != "product" or s.get("shows_product"))]
+                if not wanted:
                     yield {"type": "status", "text": f"   {label} · using the reference's own frame"}
+                for slot, refs in wanted:
+                    image_url = yield from _swap_into(
+                        image_url, slot, refs, aspect, label, s["index"],
+                        recipe.get("product_parts"), status, drain)
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
@@ -1425,6 +1510,58 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         yield {"type": "done", "error": str(e)}
     except Exception as e:
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+def _swap_into(base_url, slot, refs, aspect, label, scene_index, product_parts,
+               status, drain):
+    """Replace one thing in a frame, verifying the result. Yields status events.
+
+    Returns the edited image URL, or the untouched input if no rung of the
+    ladder produced something that passed both checks — a shot that keeps the
+    original is better than one where the scene has been redrawn.
+    """
+    spec = SWAP_SLOTS[slot]
+    prompts = _slot_prompts(slot, len(refs), product_parts)
+
+    for attempt, rung in enumerate(fal_client.edit_ladder(slot), start=1):
+        prompt = prompts[min(attempt - 1, len(prompts) - 1)]
+        # Pin the recipe's aspect. "auto" lets the model pick, and it returns a
+        # differently-cropped frame that no longer matches the rest of the cut.
+        candidate = fal_client.edit_image(
+            [base_url] + refs, prompt, aspect_ratio=aspect, on_status=status,
+            model_id=rung["id"], seed=attempt * 1000 + scene_index)
+        yield from drain(label)
+
+        # The edit model will happily compose a brand-new scene out of all the
+        # inputs instead of editing the first one — a floating dog in deep
+        # water came back standing on a different beach. Cheap structural check
+        # first, where the slot allows one.
+        score = None
+        if spec["layout_min"] is not None:
+            score = _layout_similarity(base_url, candidate)
+            if score is not None and score < spec["layout_min"]:
+                yield {"type": "status", "text": (
+                    f"   {label} · {rung['label']} redrew the shot "
+                    f"(layout match {score:.2f}) — escalating")}
+                continue
+
+        scene_ok, swapped, note = _verify_swap(base_url, candidate, refs, slot)
+        if scene_ok and swapped:
+            yield {"type": "status", "text": (
+                f"   {label} · {spec['label']} swapped in, rest of the shot intact"
+                + (f" (layout {score:.2f})" if score is not None else ""))}
+            return candidate
+
+        reason = ("the rest of the shot was redrawn" if not scene_ok
+                  else f"the {spec['noun']} was left unchanged")
+        yield {"type": "status", "text": (
+            f"   {label} · {rung['label']} rejected — {reason}"
+            + (f": {note}" if note else ""))}
+
+    yield {"type": "status", "text": (
+        f"   ⚠️ {label} · could not replace the {spec['noun']} without redrawing the shot, "
+        f"so it keeps the original")}
+    return base_url
 
 
 def _serialisable(clips):

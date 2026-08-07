@@ -94,9 +94,11 @@ AVATAR_MODELS = {
 
 # Flat-ish costs for the supporting calls, used by the estimator.
 USD_PER_IMAGE = 0.025
-# A product swap averages more than one rung of EDIT_LADDER before it passes
-# both checks, and can reach $0.23 if it goes all the way to the top.
+# Measured, not list price: a swap averages more than one rung before it passes
+# both checks. A product swap cleared at rung 2; a subject swap needed all four
+# and cost $0.22, so the bigger edits now start on the strong model.
 USD_PER_EDIT = 0.08
+USD_PER_BIG_EDIT = 0.18
 USD_PER_TTS_LINE = 0.02
 
 # Voices exposed by fal-ai/ai-avatar/single-text (ElevenLabs voice names).
@@ -133,6 +135,27 @@ EDIT_LADDER = [
 # wind, footsteps — which is most of what makes a clip read as real footage
 # rather than a render. At $0.001/s it is the cheapest thing in the pipeline.
 AUDIO_MODEL = "fal-ai/mmaudio-v2"
+
+
+def edit_ladder(slot="product"):
+    """Ladder order for a given swap, cheapest-that-works first.
+
+    Replacing a product is a small, local edit and the cheap models handle it —
+    measured: rung 2 succeeded. Replacing a subject or a whole background is a
+    much larger edit, and there the cheap models either no-op or restage the
+    shot: swapping a dog took all four rungs and only Nano Banana Pro produced
+    something acceptable. Leading with the strong model there is both faster
+    and, once the wasted rungs are counted, cheaper.
+    """
+    if slot == "product":
+        return EDIT_LADDER
+    # Explicit order, from the one observed to succeed on a subject swap down
+    # to the one that flatly no-opped on it — not derived from list position.
+    preferred = ["nano-banana-pro", "gpt-image-2", "seedream", "nano-banana/edit"]
+    ordered = []
+    for key in preferred:
+        ordered += [r for r in EDIT_LADDER if key in r["id"] and r not in ordered]
+    return ordered + [r for r in EDIT_LADDER if r not in ordered]
 TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
 
 

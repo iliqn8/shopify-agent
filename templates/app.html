@@ -429,6 +429,28 @@
         <div id="vid-extra-photos-thumbs" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
       </div>
 
+      <div id="vid-swap-rows" style="border-top:1px solid #222;padding-top:16px">
+        <div style="color:#aaa;font-size:12px;margin-bottom:2px">ALSO REPLACE <span style="color:#555">(optional — leave empty to keep what's in the clip)</span></div>
+        <div style="color:#666;font-size:11px;margin-bottom:10px">Each is independent. Upload a photo and only that part of every shot is replaced; everything else stays as filmed.</div>
+
+        <div style="display:grid;gap:10px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="color:#888;font-size:12px;width:96px">🐶 Subject</span>
+            <input type="file" id="vid-subject-photos" accept="image/*" multiple style="display:none" onchange="vidHandleSlotPhotos('subject', this)">
+            <button class="btn-sm" onclick="document.getElementById('vid-subject-photos').click()">📷 Photo</button>
+            <span id="vid-subject-status" style="color:#555;font-size:12px">Keep the one in the clip</span>
+            <span id="vid-subject-thumbs" style="display:flex;gap:6px"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="color:#888;font-size:12px;width:96px">🏞️ Environment</span>
+            <input type="file" id="vid-environment-photos" accept="image/*" multiple style="display:none" onchange="vidHandleSlotPhotos('environment', this)">
+            <button class="btn-sm" onclick="document.getElementById('vid-environment-photos').click()">📷 Photo</button>
+            <span id="vid-environment-status" style="color:#555;font-size:12px">Keep the one in the clip</span>
+            <span id="vid-environment-thumbs" style="display:flex;gap:6px"></span>
+          </div>
+        </div>
+      </div>
+
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">
           TARGET LENGTH <span style="color:#555">(seconds — leave blank to match the reference)</span>
@@ -2024,6 +2046,9 @@ function vidModeChanged() {
   // there — supply one only if you want your product swapped into them.
   document.getElementById('vid-product-row').style.display = m === 'my_product' ? 'block' : 'none';
   document.getElementById('vid-extra-photos-row').style.display = m === 'recreate' ? 'block' : 'none';
+  // Subject/environment swaps only make sense against the reference's own
+  // frames; the other modes invent every shot from scratch anyway.
+  document.getElementById('vid-swap-rows').style.display = m === 'recreate' ? 'block' : 'none';
   document.getElementById('vid-mode-note').textContent = {
     recreate: 'Every shot is rebuilt starting from that shot’s own frame in your clip, keeping the same scenes, framing and actions. Upload a product photo below only if you want your product swapped in; leave it empty to keep the original.',
     same_product: 'Keeps the product from the clip but designs new shots around it. The result will look different from the reference.',
@@ -2035,6 +2060,31 @@ function vidModeChanged() {
 }
 
 let vidProductPhotos = [];
+// Optional per-slot replacements. Empty means "leave that part of the frame alone".
+let vidSlotPhotos = { subject: [], environment: [] };
+
+function vidHandleSlotPhotos(slot, input) {
+  for (const f of input.files) vidSlotPhotos[slot].push(f);
+  input.value = '';
+  vidRenderSlotPhotos(slot);
+}
+
+function vidRemoveSlotPhoto(slot, i) {
+  vidSlotPhotos[slot].splice(i, 1);
+  vidRenderSlotPhotos(slot);
+}
+
+function vidRenderSlotPhotos(slot) {
+  const files = vidSlotPhotos[slot];
+  document.getElementById(`vid-${slot}-status`).textContent = files.length
+    ? `Replacing with ${files.length} photo${files.length > 1 ? 's' : ''}`
+    : 'Keep the one in the clip';
+  document.getElementById(`vid-${slot}-thumbs`).innerHTML = files.map((f, i) => `
+    <span style="position:relative;display:inline-block">
+      <img src="${URL.createObjectURL(f)}" style="width:40px;height:40px;object-fit:cover;border-radius:5px;border:1px solid #333;display:block">
+      <button onclick="vidRemoveSlotPhoto('${slot}',${i})" style="position:absolute;top:-5px;right:-5px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:10px;width:14px;height:14px;border-radius:50%;padding:0;line-height:1">×</button>
+    </span>`).join('');
+}
 
 function vidHandleProductPhotos(input) {
   for (const f of input.files) vidProductPhotos.push(f);
@@ -2117,6 +2167,8 @@ async function vidAnalyze() {
   const p = vidSelectedProduct();
   if (p) fd.append('product', JSON.stringify(p));
   for (const f of vidProductPhotos) fd.append('product_images', f);
+  for (const f of vidSlotPhotos.subject) fd.append('subject_images', f);
+  for (const f of vidSlotPhotos.environment) fd.append('environment_images', f);
 
   try {
     const r = await fetch('/api/video-analyze-start', { method: 'POST', body: fd });
@@ -2187,16 +2239,23 @@ function vidRenderRecipe() {
 
   // Show what the product shots will actually be built from — this is the
   // difference between reproducing the product and inventing one.
-  const refs = r.product_reference_urls || [];
+  const groups = [
+    ['📌 PRODUCT', r.product_reference_urls || [], r.product_identity],
+    ['🐶 SUBJECT', r.subject_reference_urls || [], ''],
+    ['🏞️ ENVIRONMENT', r.environment_reference_urls || [], ''],
+  ].filter(g => g[1].length);
+
   const box = document.getElementById('vid-product-refs');
-  if (refs.length) {
+  if (groups.length) {
     box.style.display = 'block';
-    box.innerHTML =
-      `<div style="color:#aaa;font-size:12px;margin-bottom:6px">📌 PRODUCT LOCKED FROM ${refs.length} REFERENCE IMAGE(S)</div>` +
-      (r.product_identity ? `<div style="color:#999;font-size:12px;margin-bottom:8px">${vidEsc(r.product_identity)}</div>` : '') +
-      `<div style="display:flex;gap:8px;flex-wrap:wrap">` +
-      refs.map(u => `<img src="${vidEsc(u)}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`).join('') +
-      `</div>`;
+    box.innerHTML = groups.map(([title, urls, caption]) =>
+      `<div style="margin-bottom:10px">
+         <div style="color:#aaa;font-size:12px;margin-bottom:6px">${title} — LOCKED FROM ${urls.length} IMAGE(S)</div>
+         ${caption ? `<div style="color:#999;font-size:12px;margin-bottom:8px">${vidEsc(caption)}</div>` : ''}
+         <div style="display:flex;gap:8px;flex-wrap:wrap">${
+           urls.map(u => `<img src="${vidEsc(u)}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`).join('')
+         }</div>
+       </div>`).join('');
   } else {
     box.style.display = 'none';
   }

@@ -740,14 +740,19 @@ def video_analyze_start():
             target_duration = None
 
     import base64 as _b64
-    product_images = []
-    for f in request.files.getlist("product_images"):
-        raw = f.read()
-        if raw:
-            product_images.append({
-                "b64": _b64.b64encode(raw).decode(),
-                "media_type": f.content_type or "image/jpeg",
-            })
+
+    def _read_images(field):
+        out = []
+        for f in request.files.getlist(field):
+            raw = f.read()
+            if raw:
+                out.append({"b64": _b64.b64encode(raw).decode(),
+                            "media_type": f.content_type or "image/jpeg"})
+        return out
+
+    product_images = _read_images("product_images")
+    subject_images = _read_images("subject_images")
+    environment_images = _read_images("environment_images")
 
     if mode == "my_product" and not product_images and not (product or {}).get("image"):
         return jsonify({"error": "Pick a Shopify product that has a photo, or upload photos of "
@@ -755,7 +760,8 @@ def video_analyze_start():
 
     job_id = str(_uuid_v.uuid4())
     _run_video_job(job_id, lambda: video_cloner.analyze_stream(
-        video_bytes, product, notes, mode, product_images, target_duration))
+        video_bytes, product, notes, mode, product_images, target_duration,
+        subject_images, environment_images))
     return jsonify({"job_id": job_id})
 
 
