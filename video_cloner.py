@@ -157,22 +157,48 @@ def transcribe(video_bytes):
 
 # ── Analysis prompt ────────────────────────────────────────────────────────
 
-ANALYSIS_PROMPT = """You are a short-form video ad director. You are given frames from a REFERENCE
-video ad (in chronological order, each labelled with its timestamp), its transcript, and technical
-metadata. Your job is to reverse-engineer its FORMAT, then write a shot-by-shot recipe that recreates
-that same format for a DIFFERENT product.
+MODE_SAME_PRODUCT = """## WHAT THIS VIDEO IS FOR
 
-You are NOT copying the reference. You are extracting what makes it work — pacing, shot grammar,
-hook structure, on-screen text rhythm — and applying it to the new product.
+Build a NEW ad for **the exact same product that appears in the reference video**. Same physical
+object, same brand, same colours and shape. This is a fresh ad for that product — new shots, new
+angles, new scenes — not a copy of the reference's specific footage.
+
+Identify the product from the frames as precisely as you can, and report it in `product_identity`.
+
+Every shot that shows the product will be rendered by an image model that receives REAL FRAMES of
+the product lifted from this very video. So write `image_prompt` as a STAGING INSTRUCTION for those
+frames, not as a description of the product itself:
+
+  GOOD: "Place this exact product on wet timber decking beside a lake at golden hour, low three-
+         quarter angle, shallow depth of field, water droplets on the surface."
+  BAD:  "An orange dog life vest with a dinosaur fin on a dock."   <- re-describing it invites the
+        model to invent a different one; the frames already show what it looks like."""
+
+
+MODE_MY_PRODUCT = """## WHAT THIS VIDEO IS FOR
+
+Reverse-engineer the reference's FORMAT — pacing, shot grammar, hook structure, on-screen text
+rhythm — and apply it to a DIFFERENT product, described below. You are NOT copying the reference's
+subject, only how it is constructed.
+
+## THE PRODUCT THIS NEW VIDEO IS FOR
+{product}
+
+Shots that show the product will be rendered from the REAL product photos, so write `image_prompt`
+as a staging instruction ("Place this exact product in ...") rather than re-describing the product."""
+
+
+ANALYSIS_PROMPT = """You are a short-form video ad director. You are given frames from a REFERENCE
+video ad (in chronological order, each labelled with its timestamp and a FRAME INDEX), its
+transcript, and technical metadata.
+
+{mode_block}
 
 ## REFERENCE METADATA
 {metadata}
 
 ## REFERENCE TRANSCRIPT
 {transcript}
-
-## THE PRODUCT THIS NEW VIDEO IS FOR
-{product}
 
 ## EXTRA INSTRUCTIONS FROM THE USER
 {notes}
@@ -184,7 +210,8 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
 {{
   "title": "short name for this video project",
   "format_analysis": "2-4 sentences: what format is this, why does it work, what is the hook mechanism",
-  "aspect_ratio": "9:16" | "1:1" | "16:9" — use the REFERENCE's own aspect ratio unless the user's instructions ask for something else,
+  "product_identity": "one precise sentence naming what the product physically is, including its distinguishing visual features (colour, shape, markings). Read it off the frames.",
+  "product_reference_frames": [<frame indices, 2 to 4 of them, whose frames show the PRODUCT most clearly and unobstructed — prefer close, well-lit, front-or-three-quarter views. These exact frames get fed to the image model as ground truth for what the product looks like.>],
   "total_duration": <number, seconds — match the reference within ~20%, UNLESS the user's instructions specify a length, which always wins>,
   "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
   "scenes": [
@@ -193,8 +220,8 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
       "duration": <number, seconds>,
       "kind": "broll" | "avatar",
       "shot_description": "what the viewer sees, one sentence",
-      "image_prompt": "<broll only> full text-to-image prompt for the FIRST FRAME of this shot. Be specific about subject, framing, lens, lighting, colour palette, background. Photorealistic unless the reference is animated.",
-      "use_product_image": <broll only, true/false> true ONLY if this shot is a clean look at the product itself, where the real product photo should be the first frame instead of a generated one,
+      "shows_product": <broll only, true/false> true if the product is visible in this shot at all,
+      "image_prompt": "<broll only> the FIRST FRAME of this shot. When shows_product is true this is a STAGING instruction applied to the real product reference images (see above) — say where the product is, the angle, lens, lighting, background, and what else is in frame, but do NOT re-describe the product's own appearance. When shows_product is false it is an ordinary text-to-image prompt for a shot the product is not in.",
       "motion_prompt": "<broll only> what MOVES in this shot — camera move and subject motion. Keep it to one clear movement; image-to-video models degrade when asked for several.",
       "avatar_line": "<avatar only> the exact words the person says on camera",
       "voiceover": "<broll only> narration over this shot, or \\"\\" for silence",
@@ -220,6 +247,7 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
    a duration below 0.8s.
 5. IMAGE PROMPTS MUST NOT NAME REAL BRANDS, celebrities, or copyrighted characters, and must not
    describe the reference video's specific actors. Describe generic people by role and appearance.
+   This does NOT apply to the product itself — keeping the product identical is the whole point.
 6. VOICEOVER + AVATAR LINES TOGETHER MUST BE SPEAKABLE IN THE SCENE'S DURATION. Roughly 2.5 words
    per second. A 3-second scene gets ~7 words, not a sentence.
 7. ON-SCREEN TEXT IS SHORT. Under 6 words. Only where the reference actually shows text.
@@ -294,17 +322,23 @@ def _normalise_recipe(recipe, meta):
             s.setdefault(field, "")
             if s[field] is None:
                 s[field] = ""
-        s["use_product_image"] = bool(s.get("use_product_image")) and s["kind"] == "broll"
+        s["shows_product"] = bool(s.get("shows_product")) and s["kind"] == "broll"
         clean.append(s)
     recipe["scenes"] = clean
     recipe["total_duration"] = round(sum(s["duration"] for s in clean), 2)
+    recipe.setdefault("product_identity", "")
+    recipe.setdefault("product_reference_urls", [])
     return recipe
 
 
 # ── Phase 1: analysis ──────────────────────────────────────────────────────
 
-def analyze_stream(video_bytes, product=None, notes=None):
-    """Yields {'type': 'status'|'done', ...}. Final event carries the recipe."""
+def analyze_stream(video_bytes, product=None, notes=None, mode="same_product"):
+    """Yields {'type': 'status'|'done', ...}. Final event carries the recipe.
+
+    `mode` is "same_product" (rebuild an ad for the product that appears in the
+    reference clip) or "my_product" (borrow the format for a Shopify product).
+    """
     try:
         yield {"type": "status", "text": "🎞️ Reading video…"}
         meta = probe_video(video_bytes)
@@ -330,16 +364,19 @@ def analyze_stream(video_bytes, product=None, notes=None):
         yield {"type": "status", "text": "🧠 Analysing format with Claude…"}
 
         content = []
-        for f in frames:
-            content.append({"type": "text", "text": f"Frame at {f['t']}s:"})
+        for i, f in enumerate(frames):
+            content.append({"type": "text", "text": f"FRAME INDEX {i} (at {f['t']}s):"})
             content.append({
                 "type": "image",
                 "source": {"type": "base64", "media_type": f["media_type"], "data": f["b64"]},
             })
+
+        mode_block = (MODE_SAME_PRODUCT if mode == "same_product"
+                      else MODE_MY_PRODUCT.format(product=_format_product(product)))
         content.append({"type": "text", "text": ANALYSIS_PROMPT.format(
+            mode_block=mode_block,
             metadata=json.dumps(meta),
             transcript=transcript or "(no audio / silent video)",
-            product=_format_product(product),
             notes=notes or "(none)",
         )})
 
@@ -352,8 +389,37 @@ def analyze_stream(video_bytes, product=None, notes=None):
 
         recipe = _normalise_recipe(_extract_json(text), meta)
         recipe["source_duration"] = meta["duration"]
+        recipe["mode"] = mode
 
-        yield {"type": "status", "text": f"✅ Recipe ready — {len(recipe['scenes'])} scenes, {recipe['total_duration']}s"}
+        # Anchor the product to real pixels. Text-to-image cannot reproduce a
+        # specific physical object, so the shots that show it are built by
+        # restaging these actual images instead of describing the product.
+        if mode == "same_product":
+            picked = [i for i in (recipe.get("product_reference_frames") or [])
+                      if isinstance(i, int) and 0 <= i < len(frames)]
+            if not picked:
+                # Middle frames beat the first and last, which are often titles
+                # or end cards rather than the product.
+                mid = len(frames) // 2
+                picked = [mid, min(mid + 2, len(frames) - 1)]
+            picked = list(dict.fromkeys(picked))[:4]
+
+            yield {"type": "status", "text": f"📌 Locking product identity from frames {picked}…"}
+            urls = []
+            for idx in picked:
+                try:
+                    urls.append(fal_client.upload_bytes(
+                        base64.b64decode(frames[idx]["b64"]), f"product_ref_{idx}.jpg", "image/jpeg"))
+                except Exception as e:
+                    yield {"type": "status", "text": f"⚠️ Could not upload frame {idx}: {e}"}
+            recipe["product_reference_urls"] = urls
+        elif product and product.get("image"):
+            recipe["product_reference_urls"] = [product["image"]]
+
+        refs = len(recipe.get("product_reference_urls") or [])
+        yield {"type": "status", "text": (
+            f"✅ Recipe ready — {len(recipe['scenes'])} scenes, {recipe['total_duration']}s, "
+            f"{refs} product reference image(s)")}
         yield {"type": "done", "recipe": recipe, "transcript": transcript}
 
     except Exception as e:
@@ -406,8 +472,10 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
         if s.get("kind") == "avatar":
             avatar_usd += billed * avatar_per_second
         else:
-            if not s.get("use_product_image"):
-                fal_usd += fal_client.USD_PER_IMAGE
+            # Every b-roll shot needs a first frame — either restaged from the
+            # product references, or generated from text.
+            fal_usd += (fal_client.USD_PER_EDIT if s.get("shows_product")
+                        else fal_client.USD_PER_IMAGE)
             fal_usd += billed * per_second
             if (s.get("voiceover") or "").strip():
                 fal_usd += fal_client.USD_PER_TTS_LINE
@@ -446,6 +514,22 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
         aspect = recipe.get("aspect_ratio", "9:16")
         voice = recipe.get("voice", "Sarah")
+
+        product_refs = list(recipe.get("product_reference_urls") or [])
+        if product_image_url and product_image_url not in product_refs:
+            product_refs.append(product_image_url)
+
+        product_scenes = [s for s in scenes if s.get("kind") == "broll" and s.get("shows_product")]
+        if product_scenes and not product_refs:
+            yield {"type": "done", "error": (
+                f"{len(product_scenes)} scene(s) show the product, but there are no product "
+                "reference images. Re-run Analyse, or pick a Shopify product that has a photo — "
+                "without one the product would be invented rather than reproduced."
+            )}
+            return
+        if product_refs:
+            yield {"type": "status",
+                   "text": f"📌 {len(product_refs)} product reference image(s) locked in"}
 
         avatar_scenes = [s for s in scenes if s.get("kind") == "avatar"]
         if avatar_scenes and not avatar_image_url:
@@ -508,9 +592,15 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 yield from drain(label)
             else:
                 prompt = s.get("image_prompt") or s.get("shot_description")
-                if product_image_url and s.get("use_product_image"):
-                    image_url = product_image_url
-                    yield {"type": "status", "text": f"   {label} · using product photo as first frame"}
+                if s.get("shows_product") and product_refs:
+                    # Restage the real product rather than describing it — a
+                    # text-to-image model asked for "an orange dog life vest"
+                    # returns *an* orange vest, not *this* one.
+                    image_url = fal_client.edit_image(
+                        product_refs, prompt, aspect_ratio=aspect, on_status=status)
+                    yield from drain(label)
+                    yield {"type": "status",
+                           "text": f"   {label} · first frame built from {len(product_refs)} product reference(s)"}
                 else:
                     image_url = fal_client.generate_image(prompt, aspect_ratio=aspect, on_status=status)
                     yield from drain(label)

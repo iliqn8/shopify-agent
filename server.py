@@ -727,9 +727,12 @@ def video_analyze_start():
         except ValueError:
             product = None
     notes = (request.form.get("notes") or "").strip() or None
+    mode = request.form.get("mode") or "same_product"
+    if mode not in ("same_product", "my_product"):
+        mode = "same_product"
 
     job_id = str(_uuid_v.uuid4())
-    _run_video_job(job_id, lambda: video_cloner.analyze_stream(video_bytes, product, notes))
+    _run_video_job(job_id, lambda: video_cloner.analyze_stream(video_bytes, product, notes, mode))
     return jsonify({"job_id": job_id})
 
 

@@ -85,6 +85,7 @@ AVATAR_MODELS = {
 
 # Flat-ish costs for the supporting calls, used by the estimator.
 USD_PER_IMAGE = 0.025
+USD_PER_EDIT = 0.04
 USD_PER_TTS_LINE = 0.02
 
 # Voices exposed by fal-ai/ai-avatar/single-text (ElevenLabs voice names).
@@ -95,6 +96,11 @@ AVATAR_VOICES = [
 ]
 
 IMAGE_MODEL = "fal-ai/flux/dev"
+# Image *editing* — takes real reference photos plus an instruction and keeps
+# the subject intact. Text-to-image cannot reproduce a specific physical
+# product no matter how precisely it is described, so every shot that has to
+# show the actual product goes through here instead.
+EDIT_MODEL = "fal-ai/nano-banana/edit"
 TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
 
 
@@ -211,6 +217,28 @@ def generate_image(prompt, aspect_ratio="9:16", on_status=None):
     images = out.get("images") or []
     if not images:
         raise FalError("Image model returned no images")
+    return images[0]["url"]
+
+
+def edit_image(image_urls, prompt, aspect_ratio="9:16", on_status=None):
+    """Build a new shot around real reference photos. Returns image URL.
+
+    `image_urls` are actual pictures of the product (frames lifted from the
+    reference video, or the Shopify product photos). The model keeps that
+    subject and restages it per `prompt`.
+    """
+    if not image_urls:
+        raise FalError("edit_image needs at least one reference image")
+    out = run(EDIT_MODEL, {
+        "prompt": prompt,
+        "image_urls": image_urls[:8],
+        "num_images": 1,
+        "aspect_ratio": aspect_ratio,
+        "output_format": "jpeg",
+    }, on_status=on_status, timeout=300)
+    images = out.get("images") or []
+    if not images:
+        raise FalError(f"Edit model returned no images: {str(out)[:300]}")
     return images[0]["url"]
 
 

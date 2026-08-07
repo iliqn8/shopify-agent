@@ -395,6 +395,15 @@
       </div>
 
       <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">WHICH PRODUCT?</label>
+        <select id="vid-mode" onchange="vidModeChanged()" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px">
+          <option value="same_product">The same product that's in the reference video</option>
+          <option value="my_product">A product from my Shopify store</option>
+        </select>
+        <div id="vid-mode-note" style="color:#666;font-size:11px;margin-top:5px"></div>
+      </div>
+
+      <div id="vid-product-row" style="display:none">
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT</label>
         <select id="vid-product" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px">
           <option value="">— Loading products… —</option>
@@ -417,6 +426,7 @@
         <span id="vid-recipe-summary" style="color:#666;font-size:12px"></span>
       </div>
       <div id="vid-format-analysis" style="color:#999;font-size:13px;line-height:1.5;background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:12px;margin-bottom:12px"></div>
+      <div id="vid-product-refs" style="display:none;background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:12px;margin-bottom:12px"></div>
       <div id="vid-scenes" style="display:flex;flex-direction:column;gap:8px"></div>
 
       <div style="margin-top:14px">
@@ -1831,6 +1841,7 @@ async function vidInit() {
   vidLoadHistory();
   if (vidInited) return;
   vidInited = true;
+  vidModeChanged();
 
   try {
     const r = await fetch('/api/video-models');
@@ -1940,7 +1951,20 @@ async function vidUploadActor(f) {
   }
 }
 
+function vidMode() {
+  return document.getElementById('vid-mode').value;
+}
+
+function vidModeChanged() {
+  const same = vidMode() === 'same_product';
+  document.getElementById('vid-product-row').style.display = same ? 'none' : 'block';
+  document.getElementById('vid-mode-note').textContent = same
+    ? 'Product shots are rebuilt from real frames of your clip, so the product stays identical.'
+    : 'Product shots are rebuilt from the Shopify product photo — pick a product that has one.';
+}
+
 function vidSelectedProduct() {
+  if (vidMode() === 'same_product') return null;
   const v = document.getElementById('vid-product').value;
   return v === '' ? null : vidProducts[parseInt(v, 10)];
 }
@@ -1989,6 +2013,7 @@ async function vidAnalyze() {
   const fd = new FormData();
   fd.append('file', vidFile);
   fd.append('notes', document.getElementById('vid-notes').value);
+  fd.append('mode', vidMode());
   const p = vidSelectedProduct();
   if (p) fd.append('product', JSON.stringify(p));
 
@@ -2048,6 +2073,22 @@ function vidRenderRecipe() {
     `${r.scenes.length} scenes · ${r.total_duration}s · ${r.aspect_ratio} · voice: ${r.voice}`;
   document.getElementById('vid-format-analysis').textContent = r.format_analysis || '';
 
+  // Show what the product shots will actually be built from — this is the
+  // difference between reproducing the product and inventing one.
+  const refs = r.product_reference_urls || [];
+  const box = document.getElementById('vid-product-refs');
+  if (refs.length) {
+    box.style.display = 'block';
+    box.innerHTML =
+      `<div style="color:#aaa;font-size:12px;margin-bottom:6px">📌 PRODUCT LOCKED FROM ${refs.length} REFERENCE IMAGE(S)</div>` +
+      (r.product_identity ? `<div style="color:#999;font-size:12px;margin-bottom:8px">${vidEsc(r.product_identity)}</div>` : '') +
+      `<div style="display:flex;gap:8px;flex-wrap:wrap">` +
+      refs.map(u => `<img src="${vidEsc(u)}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #333">`).join('') +
+      `</div>`;
+  } else {
+    box.style.display = 'none';
+  }
+
   document.getElementById('vid-scenes').innerHTML = r.scenes.map(s => {
     const isAvatar = s.kind === 'avatar';
     const badge = isAvatar
@@ -2060,7 +2101,7 @@ function vidRenderRecipe() {
           <span style="color:#666;font-size:12px;font-weight:600">${s.index}</span>
           ${badge}
           <span style="color:#666;font-size:11px">${s.duration}s</span>
-          ${s.use_product_image ? '<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#2a2a3a;color:#93c5fd">PRODUCT PHOTO</span>' : ''}
+          ${s.shows_product ? '<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#2a2a3a;color:#93c5fd">REAL PRODUCT</span>' : ''}
           <span style="flex:1"></span>
           ${s.on_screen_text ? `<span style="color:#fbbf24;font-size:11px">“${vidEsc(s.on_screen_text)}”</span>` : ''}
         </div>
