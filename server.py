@@ -727,9 +727,9 @@ def video_analyze_start():
         except ValueError:
             product = None
     notes = (request.form.get("notes") or "").strip() or None
-    mode = request.form.get("mode") or "same_product"
-    if mode not in ("same_product", "my_product"):
-        mode = "same_product"
+    mode = request.form.get("mode") or "recreate"
+    if mode not in ("recreate", "same_product", "my_product"):
+        mode = "recreate"
 
     target_duration = None
     raw_target = (request.form.get("target_duration") or "").strip()

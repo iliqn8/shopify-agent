@@ -114,6 +114,98 @@ def extract_frames(video_bytes, max_frames=ANALYSIS_FRAMES):
             os.remove(tmp_path)
 
 
+def _encode_frame(frame, max_side=768, quality=82):
+    h, w = frame.shape[:2]
+    scale = max_side / max(h, w)
+    if scale < 1:
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return base64.b64encode(buf.tobytes()).decode() if ok else None
+
+
+def detect_shots(video_bytes, min_shot=0.5, cut_threshold=0.55):
+    """Split the reference into its real shots, at its real cut points.
+
+    Sampling 16 evenly-spaced frames tells you nothing about where the editor
+    actually cut, and produces "scenes" that do not exist in the source — an
+    8s single-take clip came back as four invented scenes. Cuts are found by
+    correlating consecutive HSV histograms: a hard cut drops the correlation
+    sharply, while motion within a shot does not.
+
+    Returns [{index, start, end, duration, first_b64, mid_b64, last_b64}].
+    A clip with no cuts yields exactly one shot covering the whole thing.
+    """
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total <= 0 or fps <= 0:
+            cap.release()
+            return []
+
+        # Decode straight through and histogram every Nth frame. Seeking to
+        # each sample instead would mean thousands of keyframe seeks on a long
+        # clip, which takes minutes; sequential decode takes seconds.
+        step = max(1, int(round(fps / 10)))
+        boundaries, prev_hist, idx = [0], None, 0
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx % step == 0:
+                ok, frame = cap.retrieve()
+                if not ok:
+                    break
+                small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+                hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+                hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
+                cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+                if prev_hist is not None:
+                    corr = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
+                    if corr < cut_threshold and (idx - boundaries[-1]) / fps >= min_shot:
+                        boundaries.append(idx)
+                prev_hist = hist
+            idx += 1
+        total = max(total, idx)
+        boundaries.append(total)
+
+        shots = []
+        for i in range(len(boundaries) - 1):
+            a, b = boundaries[i], boundaries[i + 1]
+            if (b - a) / fps < min_shot and shots:
+                continue
+            picks = {}
+            for name, pos in (("first", a + max(1, (b - a) // 12)),
+                              ("mid", (a + b) // 2),
+                              ("last", max(a, b - max(2, (b - a) // 12)))):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, min(pos, total - 1))
+                ok, frame = cap.read()
+                picks[name] = _encode_frame(frame) if ok else None
+            if not picks["first"]:
+                continue
+            shots.append({
+                "index": len(shots) + 1,
+                "start": round(a / fps, 2),
+                "end": round(b / fps, 2),
+                "duration": round((b - a) / fps, 2),
+                "first_b64": picks["first"],
+                "mid_b64": picks["mid"],
+                "last_b64": picks["last"],
+            })
+        cap.release()
+        return shots
+    except Exception:
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 def transcribe(video_bytes):
     """Whisper transcription of the reference audio. Returns '' when there is no
     usable audio track or no OpenAI key — a silent reference is still analysable."""
@@ -156,6 +248,81 @@ def transcribe(video_bytes):
 
 
 # ── Analysis prompt ────────────────────────────────────────────────────────
+
+RECREATE_PROMPT = """You are reconstructing a short-form video ad shot for shot.
+
+The reference has been cut into its REAL shots at its REAL cut points. For each shot you get three
+frames — its opening, middle and closing frame — labelled with the shot number and its measured
+duration.
+
+You are NOT designing a new ad. Each shot will be regenerated starting from ITS OWN OPENING FRAME
+of the reference, then animated. Your job is to say what ACTUALLY HAPPENS inside each shot so the
+motion can be reproduced. Do not invent new staging, new locations, new actions or extra shots.
+
+{product_block}
+
+## REFERENCE METADATA
+{metadata}
+
+## REFERENCE TRANSCRIPT
+{transcript}
+
+## EXTRA INSTRUCTIONS FROM THE USER
+{notes}
+
+## WHAT TO PRODUCE
+
+Return ONE JSON object inside a ```json fenced block. No prose outside the block.
+
+{{
+  "title": "short name for this video project",
+  "format_analysis": "2-3 sentences: what happens in this ad and why it works",
+  "product_identity": "one precise sentence naming what the product physically is, including its distinguishing visual features. Read it off the frames.",
+  "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
+  "scenes": [
+    {{
+      "index": <shot number, matching the frames above — one entry per shot, no more, no fewer>,
+      "shot_description": "what is in this shot, one sentence",
+      "motion_prompt": "WHAT MOVES between the opening and closing frame of THIS shot. Compare the three frames and describe the actual change: which way the subject moves, which way the camera moves, what enters or leaves frame. If the frames are nearly identical, say so — e.g. 'the dog stays still, floating gently; almost no camera movement'. Never invent motion that is not evidenced by the frames.",
+      "shows_product": <true/false — is the product visible in this shot>,
+      "voiceover": "what is said over this shot, taken from the transcript. \\"\\" if nothing is said.",
+      "on_screen_text": "text actually visible on screen in this shot, or \\"\\" if none"
+    }}
+  ]
+}}
+
+## HARD RULES
+
+1. ONE SCENE PER DETECTED SHOT. Exactly {shot_count}. Do not split, merge, add or drop shots. Do not
+   set durations — they are measured from the video and will be applied for you.
+2. MOTION MUST BE READ OFF THE FRAMES, not imagined. A static shot must stay static. This is the
+   single most important rule: invented motion is what makes a recreation look like a different
+   video.
+3. DESCRIBE, DO NOT REDESIGN. Same location, same subject, same action, same camera. No new angles,
+   no added props, no "improvements".
+4. VOICEOVER COMES FROM THE TRANSCRIPT. Split the transcript across shots by what is said when. If
+   the reference is silent, every voiceover is "".
+5. WRITE EVERYTHING IN ENGLISH.
+
+Now analyse the shots and return the JSON."""
+
+
+RECREATE_SAME_PRODUCT = """## THE PRODUCT
+
+Keep the product exactly as it appears in the reference — this is a reconstruction of the same ad
+for the same product. Nothing about it changes."""
+
+
+RECREATE_SWAP_PRODUCT = """## THE PRODUCT — IT IS BEING SWAPPED
+
+The reference shows one product; the new video must show a DIFFERENT one, attached above as YOUR
+PRODUCT photos. Everything else stays identical — same scene, same subject, same action, same
+camera. Only the product itself is replaced.
+
+Describe YOUR PRODUCT (from its photos, not the reference's) in `product_identity`.
+
+{product}"""
+
 
 MODE_SAME_PRODUCT = """## WHAT THIS VIDEO IS FOR
 
@@ -398,21 +565,176 @@ def _normalise_recipe(recipe, meta, target_duration=None):
     return recipe
 
 
+# ── Phase 1a: shot-for-shot reconstruction ─────────────────────────────────
+
+def _analyze_recreate(video_bytes, product, notes, product_images, target_duration):
+    """Build a recipe that rebuilds the reference shot for shot.
+
+    The difference from the other modes is where each shot's first frame comes
+    from: here it is the reference's own opening frame for that shot, uploaded
+    as-is, rather than an image invented from a text prompt. That is what keeps
+    the subject, framing, location and action the same instead of merely
+    similar.
+    """
+    try:
+        yield {"type": "status", "text": "🎞️ Reading video…"}
+        meta = probe_video(video_bytes)
+        if meta["duration"] <= 0:
+            yield {"type": "done", "error": "Could not read this video file. Try re-exporting it as MP4 (H.264)."}
+            return
+        yield {"type": "status",
+               "text": f"🎞️ {meta['duration']}s · {meta['width']}×{meta['height']} · {meta['aspect_ratio']}"}
+
+        yield {"type": "status", "text": "✂️ Finding the real cut points…"}
+        shots = detect_shots(video_bytes)
+        if not shots:
+            yield {"type": "done", "error": "Could not read any shots from this video."}
+            return
+        yield {"type": "status", "text": (
+            f"✂️ {len(shots)} shot(s): "
+            + ", ".join(f"{s['duration']}s" for s in shots[:8])
+            + (" …" if len(shots) > 8 else ""))}
+
+        yield {"type": "status", "text": "🎙️ Transcribing audio…"}
+        transcript = transcribe(video_bytes)
+        yield {"type": "status", "text": (
+            f"🎙️ Transcript: {len(transcript.split())} words" if transcript
+            else "🎙️ No speech — the recreation will be silent too")}
+
+        swapping = bool(product_images) or bool((product or {}).get("image"))
+        yield {"type": "status", "text": "🧠 Reading what happens in each shot…"}
+
+        content = []
+        for s in shots:
+            content.append({"type": "text",
+                            "text": f"SHOT {s['index']} — {s['duration']}s "
+                                    f"({s['start']}s to {s['end']}s). Opening frame:"})
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg", "data": s["first_b64"]}})
+            for name in ("mid_b64", "last_b64"):
+                if s.get(name):
+                    content.append({"type": "text",
+                                    "text": f"SHOT {s['index']} — {name.split('_')[0]} frame:"})
+                    content.append({"type": "image", "source": {
+                        "type": "base64", "media_type": "image/jpeg", "data": s[name]}})
+
+        for i, img in enumerate(product_images, start=1):
+            content.append({"type": "text", "text": f"YOUR PRODUCT — PHOTO {i}:"})
+            content.append({"type": "image", "source": {
+                "type": "base64",
+                "media_type": img.get("media_type", "image/jpeg"),
+                "data": img["b64"]}})
+
+        product_block = (RECREATE_SWAP_PRODUCT.format(product=_format_product(product, len(product_images)))
+                         if swapping else RECREATE_SAME_PRODUCT)
+        content.append({"type": "text", "text": RECREATE_PROMPT.format(
+            product_block=product_block,
+            metadata=json.dumps(meta),
+            transcript=transcript or "(silent)",
+            notes=notes or "(none)",
+            shot_count=len(shots),
+        )})
+
+        resp = client.messages.create(model=MODEL, max_tokens=8000,
+                                      messages=[{"role": "user", "content": content}])
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        recipe = _extract_json(text)
+
+        # Pair the model's descriptions with the measured shots. Durations come
+        # from the video, never from the model — it has no way to know them and
+        # every past attempt to let it guess produced the wrong runtime.
+        described = {s.get("index"): s for s in (recipe.get("scenes") or [])}
+        scenes = []
+        for shot in shots:
+            d = described.get(shot["index"], {})
+            scenes.append({
+                "index": shot["index"],
+                "duration": shot["duration"],
+                "kind": "broll",
+                "shot_description": d.get("shot_description") or "",
+                "motion_prompt": d.get("motion_prompt") or "",
+                "image_prompt": "",
+                "avatar_line": "",
+                "shows_product": bool(d.get("shows_product", True)),
+                "voiceover": d.get("voiceover") or "",
+                "on_screen_text": d.get("on_screen_text") or "",
+                "source_start": shot["start"],
+            })
+        recipe["scenes"] = scenes
+
+        recipe.setdefault("title", "Recreated video")
+        recipe["aspect_ratio"] = meta["aspect_ratio"]
+        if recipe.get("voice") not in fal_client.AVATAR_VOICES:
+            recipe["voice"] = "Sarah"
+        recipe["mode"] = "recreate"
+        recipe["source_duration"] = meta["duration"]
+        recipe.setdefault("product_identity", "")
+
+        if target_duration and abs(float(target_duration) - meta["duration"]) > 0.5:
+            was = _fit_to_target(scenes, float(target_duration))
+            if was is not None:
+                recipe["duration_corrected_from"] = was
+                yield {"type": "status",
+                       "text": f"⏱️ Reference is {was}s — scaled shots to your {target_duration}s target"}
+        recipe["total_duration"] = round(sum(s["duration"] for s in scenes), 2)
+        recipe["target_duration"] = recipe["total_duration"]
+
+        # Each shot's own opening frame is the visual base for regenerating it.
+        yield {"type": "status", "text": f"📤 Uploading {len(shots)} opening frames…"}
+        for scene, shot in zip(scenes, shots):
+            try:
+                scene["base_image_url"] = fal_client.upload_bytes(
+                    base64.b64decode(shot["first_b64"]),
+                    f"shot_{shot['index']}_open.jpg", "image/jpeg")
+            except Exception as e:
+                yield {"type": "status", "text": f"⚠️ Shot {shot['index']} frame upload failed: {e}"}
+
+        refs = []
+        for i, img in enumerate(product_images):
+            try:
+                refs.append(fal_client.upload_bytes(
+                    base64.b64decode(img["b64"]), f"product_photo_{i}.jpg",
+                    img.get("media_type", "image/jpeg")))
+            except Exception as e:
+                yield {"type": "status", "text": f"⚠️ Could not upload product photo {i + 1}: {e}"}
+        if not refs and (product or {}).get("image"):
+            refs = [product["image"]]
+        recipe["product_reference_urls"] = refs
+        recipe["product_swap"] = bool(refs)
+        recipe["product_source"] = (f"{len(refs)} photo(s) — swapped into every shot"
+                                    if refs else "kept from the reference video")
+
+        yield {"type": "status", "text": (
+            f"✅ Recipe ready — {len(scenes)} shot(s), {recipe['total_duration']}s, "
+            + ("product swapped in" if refs else "original product kept"))}
+        yield {"type": "done", "recipe": recipe, "transcript": transcript}
+
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
 # ── Phase 1: analysis ──────────────────────────────────────────────────────
 
-def analyze_stream(video_bytes, product=None, notes=None, mode="same_product",
+def analyze_stream(video_bytes, product=None, notes=None, mode="recreate",
                    product_images=None, target_duration=None):
     """Yields {'type': 'status'|'done', ...}. Final event carries the recipe.
 
-    `mode` is "same_product" (rebuild an ad for the product that appears in the
-    reference clip) or "my_product" (borrow the format for a different product).
+    `mode`:
+      "recreate"     — reconstruct the reference shot for shot, starting each
+                       shot from its own opening frame. Optionally swaps in a
+                       different product. This is what "make a similar video"
+                       actually means.
+      "same_product" — keep the reference's product but design new shots.
+      "my_product"   — borrow only the format for a different product.
 
     `product_images` is a list of {"b64", "media_type"} for photos the user
-    uploaded directly — usable on their own, so a product that is not in the
-    Shopify store yet still works, and stackable with the other sources to give
-    the edit model more angles to work from.
+    uploaded directly, so a product that is not in the Shopify store yet works.
     """
     product_images = product_images or []
+    if mode == "recreate":
+        yield from _analyze_recreate(video_bytes, product, notes, product_images,
+                                     target_duration)
+        return
     try:
         yield {"type": "status", "text": "🎞️ Reading video…"}
         meta = probe_video(video_bytes)
@@ -561,6 +883,22 @@ def rewrite_stream(recipe, instructions):
         )
         text = "".join(b.text for b in resp.content if b.type == "text")
         updated = _normalise_recipe(_extract_json(text), {"aspect_ratio": recipe.get("aspect_ratio", "9:16")})
+
+        # The model rewrites the JSON it was shown and has no reason to carry
+        # these through, but losing them would silently downgrade a recreation
+        # back to invented shots. Re-attach them from the original by index.
+        for key in ("mode", "product_reference_urls", "product_swap", "product_source",
+                    "product_identity", "source_duration"):
+            if key in recipe:
+                updated.setdefault(key, recipe[key])
+        originals = {s.get("index"): s for s in (recipe.get("scenes") or [])}
+        for s in updated["scenes"]:
+            src = originals.get(s["index"])
+            if src:
+                for key in ("base_image_url", "source_start"):
+                    if src.get(key) and not s.get(key):
+                        s[key] = src[key]
+
         yield {"type": "status", "text": f"✅ Updated — {len(updated['scenes'])} scenes, {updated['total_duration']}s"}
         yield {"type": "done", "recipe": updated}
     except Exception as e:
@@ -643,10 +981,15 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         if product_image_url and product_image_url not in product_refs:
             product_refs.append(product_image_url)
 
-        product_scenes = [s for s in scenes if s.get("kind") == "broll" and s.get("shows_product")]
-        if product_scenes and not product_refs:
+        # Only shots built from a text prompt need product references. A
+        # recreation starts from the reference's own frame, which already shows
+        # the product, so it needs none unless one is being swapped in.
+        invented = [s for s in scenes
+                    if s.get("kind") == "broll" and s.get("shows_product")
+                    and not s.get("base_image_url")]
+        if invented and not product_refs:
             yield {"type": "done", "error": (
-                f"{len(product_scenes)} scene(s) show the product, but there are no product "
+                f"{len(invented)} scene(s) show the product, but there are no product "
                 "reference images. Re-run Analyse, or pick a Shopify product that has a photo — "
                 "without one the product would be invented rather than reproduced."
             )}
@@ -722,6 +1065,33 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                     on_status=status,
                 )
                 yield from drain(label)
+            elif s.get("base_image_url"):
+                # Recreation: this shot's own opening frame from the reference
+                # is the starting image, so composition, subject, location and
+                # framing are inherited rather than reinvented.
+                if product_refs and s.get("shows_product"):
+                    swap = (
+                        "Replace the product in this photo with the product shown in the "
+                        "other reference images. Keep EVERYTHING else exactly as it is: the "
+                        "same subject, pose, position, background, lighting, colours, camera "
+                        "angle and framing. Change nothing except the product itself, and "
+                        "match its real colours and markings from the reference images."
+                    )
+                    image_url = fal_client.edit_image(
+                        [s["base_image_url"]] + product_refs, swap,
+                        aspect_ratio=aspect, on_status=status)
+                    yield from drain(label)
+                    yield {"type": "status", "text": f"   {label} · product swapped into the original frame"}
+                else:
+                    image_url = s["base_image_url"]
+                    yield {"type": "status", "text": f"   {label} · using the reference's own frame"}
+
+                url = fal_client.generate_broll(
+                    video_model, image_url,
+                    s.get("motion_prompt") or s.get("shot_description") or "",
+                    s["duration"], aspect_ratio=aspect, on_status=status)
+                yield from drain(label)
+
             else:
                 prompt = s.get("image_prompt") or s.get("shot_description")
                 if s.get("shows_product") and product_refs:

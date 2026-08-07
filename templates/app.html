@@ -397,8 +397,9 @@
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">WHICH PRODUCT?</label>
         <select id="vid-mode" onchange="vidModeChanged()" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px">
-          <option value="same_product">The same product that's in the reference video</option>
-          <option value="my_product">A product from my Shopify store</option>
+          <option value="recreate">Recreate this video shot for shot — same scenes, same actions</option>
+          <option value="same_product">Same format, new shots — product from the clip</option>
+          <option value="my_product">Same format, new shots — a product of mine</option>
         </select>
         <div id="vid-mode-note" style="color:#666;font-size:11px;margin-top:5px"></div>
       </div>
@@ -419,9 +420,7 @@
       </div>
 
       <div id="vid-extra-photos-row">
-        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">
-          EXTRA PRODUCT PHOTOS <span style="color:#555">(optional — more angles make the product shots more accurate)</span>
-        </label>
+        <label id="vid-extra-photos-label" style="color:#aaa;font-size:12px;display:block;margin-bottom:6px"></label>
         <input type="file" id="vid-extra-photos" accept="image/*" multiple style="display:none" onchange="vidHandleProductPhotos(this)">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <button class="btn-sm" onclick="document.getElementById('vid-extra-photos').click()">📷 Add photos</button>
@@ -1996,12 +1995,19 @@ function vidMode() {
 }
 
 function vidModeChanged() {
-  const same = vidMode() === 'same_product';
-  document.getElementById('vid-product-row').style.display = same ? 'none' : 'block';
-  document.getElementById('vid-extra-photos-row').style.display = same ? 'block' : 'none';
-  document.getElementById('vid-mode-note').textContent = same
-    ? 'Product shots are rebuilt from real frames of your clip, so the product stays identical.'
-    : 'Product shots are rebuilt from real photos. The product does not need to be in your store yet — uploaded photos are enough.';
+  const m = vidMode();
+  // Recreate mode reuses the clip's own frames, so a product photo is optional
+  // there — supply one only if you want your product swapped into them.
+  document.getElementById('vid-product-row').style.display = m === 'my_product' ? 'block' : 'none';
+  document.getElementById('vid-extra-photos-row').style.display = m === 'recreate' ? 'block' : 'none';
+  document.getElementById('vid-mode-note').textContent = {
+    recreate: 'Every shot is rebuilt starting from that shot’s own frame in your clip, keeping the same scenes, framing and actions. Upload a product photo below only if you want your product swapped in; leave it empty to keep the original.',
+    same_product: 'Keeps the product from the clip but designs new shots around it. The result will look different from the reference.',
+    my_product: 'Borrows only the pacing and structure. New shots, your product. The result will look different from the reference.',
+  }[m] || '';
+  document.getElementById('vid-extra-photos-label').textContent = m === 'recreate'
+    ? 'SWAP IN MY PRODUCT (optional — leave empty to keep the product from the clip)'
+    : 'EXTRA PRODUCT PHOTOS (optional — more angles make the product shots more accurate)';
 }
 
 let vidProductPhotos = [];
