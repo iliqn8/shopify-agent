@@ -13,7 +13,9 @@ the UI before spending any credits — generation is the expensive half.
 import os
 import re
 import json
+import math
 import base64
+import shutil
 import tempfile
 import subprocess
 
@@ -516,7 +518,7 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
     {{
       "index": <shot number, matching the frames above — one entry per shot, no more, no fewer>,
       "shot_description": "what is in this shot, one sentence",
-      "motion_prompt": "WHAT MOVES between the opening and closing frame of THIS shot. Compare the three frames and describe the actual change: which way the subject moves, which way the camera moves, what enters or leaves frame. If the frames are nearly identical, say so — e.g. 'the dog stays still, floating gently; almost no camera movement'. Never invent motion that is not evidenced by the frames.",
+      "motion_prompt": "WHAT MOVES between the opening and closing frame of THIS shot. Compare the three frames and describe the actual change: which way the subject moves, which way the camera moves, what enters or leaves frame. If the frames are nearly identical, say so — e.g. 'the dog stays still, floating gently; almost no camera movement'. Never invent motion that is not evidenced by the frames. Then, in the SAME string, add one short physical-contact sentence — see PHYSICAL GROUNDING below. It is part of this field, not a separate one.",
       "shows_product": <true/false — is the product visible in this shot>,
       "product_count": <how many SEPARATE copies of the product are visible in this shot. Count the wearers/holders: three dogs each in their own life jacket is 3, not 1. 0 if the product is not in this shot. This is used to make a swap replace EVERY copy — the usual failure is that only the most prominent one is changed.>,
       "voiceover": "what is said over this shot, taken from the transcript. \\"\\" if nothing is said.",
@@ -537,6 +539,32 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
 4. VOICEOVER COMES FROM THE TRANSCRIPT. Split the transcript across shots by what is said when. If
    the reference is silent, every voiceover is "".
 5. WRITE EVERYTHING IN ENGLISH.
+
+## PHYSICAL GROUNDING — END EVERY `motion_prompt` WITH THIS
+
+The video model is given your `motion_prompt` and one still frame. It does not know what is solid,
+what floats, what bears weight or what is holding still. Left unsaid it guesses, and it guesses
+badly: paws sink through a floating mat, a dog that "walks toward the water" walks ON the water,
+and a floating platform nobody described as stationary drifts off into the distance like it is
+flying away. Every one of those came from a motion_prompt that described the action correctly and
+said nothing about the physics.
+
+So finish each `motion_prompt` with one sentence, in plain words, covering whichever apply:
+
+- **What carries the subject's weight**, and that it stays solid — "the mat stays rigid and level
+  under the dog, taking its weight, and the paws rest ON its surface, never sinking into or
+  through it".
+- **What is stationary**, named — "the yellow mat, the boat and the shoreline stay exactly where
+  they are in frame; only the dog moves". Anything the subject is not carrying is stationary unless
+  the frames show otherwise. Say it even when it feels obvious.
+- **Where the waterline sits** on a swimming subject — "the dog is IN the water, chest-deep, body
+  submerged with only its head and the top of the jacket above the surface, legs paddling under
+  the water, never standing on top of it".
+- **Contact through a transition** — if the subject enters water, say it displaces water and sinks
+  in before surfacing, rather than landing on top of it.
+
+Do NOT use "walks", "steps" or "runs" for anything happening in or on water — those words make the
+model put the animal on the surface. Say "paddles", "swims", "pushes off", "slides in".
 
 Now analyse the shots and return the JSON."""
 
@@ -688,6 +716,11 @@ REWRITE_PROMPT = """Here is an existing video recipe JSON and a change request f
 Apply ONLY the requested change. Keep every other field byte-identical. Return the full updated
 JSON object in a ```json fenced block, no prose outside it.
 
+`duration` normally comes from the reference and must not be touched — but if the user explicitly
+asks for a scene to be longer or shorter ("make the last shot 4 seconds", "hold on the product a
+bit"), change that scene's `duration` to what they asked for. Leave the other scenes' durations
+alone; the video simply gets longer or shorter.
+
 ## CURRENT RECIPE
 ```json
 {recipe}
@@ -737,6 +770,48 @@ COMPOSITION_MIN = 0.45
 # Below this, the reference had no real narration — a stray name or two — and
 # reading it aloud produces an obviously synthetic voice over silent footage.
 NARRATION_MIN_WORDS = 6
+
+
+# Words that show the prompt already pins down contact, weight and what holds
+# still. If none appear, the model wrote a pure description of the action and
+# left the physics to the video model, which is what sinks paws through mats
+# and floats props away into the distance.
+_GROUNDING_HINTS = (
+    "stationary", "stays fixed", "stays put", "stays in place", "does not move",
+    "doesn't move", "without drifting", "bearing", "bears the", "takes its weight",
+    "waterline", "buoyant", "rigid", "supports the", "no solid ground",
+    "remains still", "holds still", "fixed in one spot",
+)
+
+
+def _ground_motion_prompt(text, props=None):
+    """Append a physics sentence when the prompt has none.
+
+    The analysis prompt asks for one, and usually gets it — but not reliably:
+    the same request produced a grounded prompt on one run and "the dog walks
+    toward the water" on the next. Rather than re-word the instruction and hope,
+    anything that comes back without grounding gets a generic one appended. It
+    is weaker than a specific sentence, but it is never absent.
+    """
+    body = (text or "").strip()
+    if not body:
+        return body
+    low = body.lower()
+    if any(h in low for h in _GROUNDING_HINTS):
+        return body
+
+    named = [p for p in (props or []) if isinstance(p, str) and p.strip()][:4]
+    if named:
+        listed = ", ".join(p.strip() for p in named)
+        fixed = (f"The {listed} stay exactly where they are in frame and do not drift, "
+                 "slide or recede into the distance")
+    else:
+        fixed = ("Everything the subject is not carrying stays exactly where it is in "
+                 "frame and does not drift, slide or recede into the distance")
+    return (f"{body.rstrip('. ')}. {fixed}; any surface the subject rests on is rigid and "
+            "bears its weight without the feet sinking through it; anything in water is "
+            "IN the water at a believable waterline, never standing or walking on the "
+            "surface.")
 
 
 def _as_count(value):
@@ -978,6 +1053,59 @@ def _fit_to_target(scenes, target):
         head["duration"] = max(MIN_SCENE, round(head["duration"] - drift, 2))
 
     return round(current, 2)
+
+
+def _playable_minimum(model_key):
+    """Shortest slot a model's clip can be retimed into without being cut.
+
+    Video models only emit fixed lengths — Kling does 5s or 10s — so a 1.3s
+    scene is generated as a 5s clip and then has to fit a 1.3s slot. Assembly
+    retimes up to MAX_SPEEDUP and cuts beyond it, so anything under
+    shortest_clip / MAX_SPEEDUP shows only the opening fraction of an action
+    that was performed over five seconds. That is why a "dog settles its head
+    onto the chin rest" scene came back as a dog that never gets there.
+    """
+    spec = fal_client.VIDEO_MODELS.get(model_key) or {}
+    durations = [float(d) for d in (spec.get("durations") or [5])]
+    # Round UP: rounding 1.923 down to 1.92 leaves the ratio at 2.604, which is
+    # over the cap, so the scene would still be cut by a hair.
+    return math.ceil(min(durations) / video_assembler.MAX_SPEEDUP * 100) / 100
+
+
+def _fit_slots_to_model(scenes, model_key):
+    """Raise any slot too short for the model to play out, keeping total length.
+
+    Time is taken from the longest scenes, which have the most slack before the
+    pacing visibly changes. Returns a list of (index, old, new) for reporting —
+    the user should be told their 1.3s beat became 1.9s, not silently see it.
+    """
+    floor = _playable_minimum(model_key)
+    short = [s for s in scenes if s.get("kind") == "broll" and s["duration"] < floor]
+    if not short:
+        return []
+
+    changed = [(s["index"], s["duration"], floor) for s in short]
+    debt = round(sum(floor - s["duration"] for s in short), 2)
+    for s in short:
+        s["duration"] = floor
+
+    # Repay from the longest scenes first, never taking one below the floor.
+    for _ in range(len(scenes) * 2):
+        if debt <= 0.05:
+            break
+        donors = sorted((s for s in scenes
+                         if s["duration"] > floor and s.get("kind") == "broll"),
+                        key=lambda s: -s["duration"])
+        if not donors:
+            break
+        head = donors[0]
+        take = min(debt, round(head["duration"] - floor, 2))
+        if take <= 0:
+            break
+        head["duration"] = round(head["duration"] - take, 2)
+        debt = round(debt - take, 2)
+
+    return changed
 
 
 def _normalise_recipe(recipe, meta, target_duration=None):
@@ -1487,6 +1615,13 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         aspect = recipe.get("aspect_ratio", "9:16")
         voice = recipe.get("voice", "Sarah")
 
+        # Do this before anything is billed: a slot the model cannot play out
+        # wastes the whole clip, and the fix is free if applied up front.
+        for idx, was, now in _fit_slots_to_model(scenes, video_model):
+            yield {"type": "status", "text": (
+                f"⏱️ Scene {idx} was {was}s — too short for {video_model} to play out "
+                f"a whole action, widened to {now}s (taken from the longest scene)")}
+
         product_refs = list(recipe.get("product_reference_urls") or [])
         if product_image_url and product_image_url not in product_refs:
             product_refs.append(product_image_url)
@@ -1569,6 +1704,7 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
             label = f"Scene {s['index']}/{total}"
             yield {"type": "status", "text": f"🎬 {label} ({s['kind']}, {s['duration']}s) — {s.get('shot_description', '')[:80]}"}
 
+            image_url = None      # avatar scenes have none; must not leak from the last loop
             if s["kind"] == "avatar":
                 url = avatar_registry.generate(
                     avatar_model,
@@ -1602,7 +1738,9 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
-                    s.get("motion_prompt") or s.get("shot_description") or "",
+                    _ground_motion_prompt(
+                        s.get("motion_prompt") or s.get("shot_description") or "",
+                        recipe.get("location_props")),
                     s["duration"], aspect_ratio=aspect, on_status=status)
                 yield from drain(label)
 
@@ -1644,6 +1782,11 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 yield from drain(label)
 
             clip = {"scene": s, "url": url}
+            # Keep the exact frame this scene was animated from — swaps and all.
+            # Re-running a single scene later then costs one video call instead
+            # of repeating the whole edit ladder that produced this frame.
+            if s["kind"] != "avatar" and image_url:
+                clip["image_url"] = image_url
 
             # Providers that derive length from the script (HeyGen) can return a
             # clip longer than the recipe's slot. Trimming it would cut the actor
@@ -1666,24 +1809,64 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
         global_audio_url = None
         if narration != "off" and not per_scene_voice:
-            script = " ".join(
-                (s.get("voiceover") or "").strip()
-                for s in scenes if s.get("kind") == "broll" and (s.get("voiceover") or "").strip()
-            ).strip()
+            spoken = [s for s in scenes
+                      if s.get("kind") == "broll" and (s.get("voiceover") or "").strip()]
+            word_count = sum(len(s["voiceover"].split()) for s in spoken)
             # "auto" skips narration the reference never really had — a couple
             # of stray words become a synthetic-sounding voiceover over footage
             # that was essentially silent.
-            if narration == "auto" and len(script.split()) < NARRATION_MIN_WORDS:
-                if script:
+            if narration == "auto" and word_count < NARRATION_MIN_WORDS:
+                if word_count:
                     yield {"type": "status", "text": (
-                        f"🔇 Reference is essentially silent ({len(script.split())} words) — "
+                        f"🔇 Reference is essentially silent ({word_count} words) — "
                         "skipping narration")}
-                script = ""
-            if script:
-                yield {"type": "status", "text": "🔊 Recording narration in one take…"}
-                global_audio_url = fal_client.generate_voiceover(
-                    script, voice=narrator_voice or voice, on_status=status)
-                yield from drain("Narration")
+                spoken = []
+
+            if spoken:
+                # Each line is recorded on its own and placed at the moment its
+                # scene appears. Read as one continuous take they finished well
+                # before the picture did and matched nothing on screen, and
+                # running separate shouts together with no gaps is most of what
+                # made the delivery sound synthetic.
+                starts, t = {}, 0.0
+                for s in scenes:
+                    starts[s["index"]] = t
+                    t += float(s.get("duration") or 0)
+
+                lines = []
+                for s in spoken:
+                    yield {"type": "status", "text": (
+                        f"🔊 Recording line for scene {s['index']} "
+                        f"at {starts[s['index']]:.1f}s: “{s['voiceover'][:48]}”")}
+                    lines.append({
+                        "url": fal_client.generate_voiceover(
+                            s["voiceover"].strip(), voice=narrator_voice or voice,
+                            on_status=status),
+                        "start": starts[s["index"]],
+                    })
+                    yield from drain("Narration")
+
+                track_dir = tempfile.mkdtemp(prefix="vidcloner_vo_")
+                try:
+                    track = video_assembler.build_narration_track(
+                        lines, t, os.path.join(track_dir, "narration.mp3"), track_dir)
+                    # Uploaded rather than kept on disk so a later free
+                    # Reassemble can still reach it.
+                    global_audio_url = fal_client.upload_bytes(
+                        open(track, "rb").read(), "narration.mp3", "audio/mpeg")
+                    yield {"type": "status", "text": (
+                        f"🔊 {len(lines)} line(s) placed on the timeline, "
+                        "each at its own scene")}
+                except Exception as e:
+                    yield {"type": "status", "text": (
+                        f"⚠️ Could not place lines on the timeline ({e}) — "
+                        "falling back to one continuous read")}
+                    global_audio_url = fal_client.generate_voiceover(
+                        " ".join(s["voiceover"].strip() for s in spoken),
+                        voice=narrator_voice or voice, on_status=status)
+                    yield from drain("Narration")
+                finally:
+                    shutil.rmtree(track_dir, ignore_errors=True)
 
         yield {"type": "status", "text": "✂️ Assembling final video…"}
         try:
@@ -1828,10 +2011,289 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
 
 
 def _serialisable(clips):
-    """Everything assembly needs to run again, without the generation cost."""
+    """Everything assembly needs to run again, without the generation cost.
+
+    `image_url` is not used by assembly — it is kept so a single scene can be
+    re-animated later from the frame it already had, skipping the edit ladder.
+    """
     return [{"scene": c["scene"], "url": c["url"],
+             "image_url": c.get("image_url"),
              "voiceover_url": c.get("voiceover_url"),
              "keep_full_length": c.get("keep_full_length", False)} for c in clips]
+
+
+REVISE_PROMPT = """A video has already been generated from this recipe. The user has watched it and
+wants specific things fixed. Work out which scenes have to be re-animated, and how their prompts
+should change.
+
+Re-animating a scene costs real money, so choose the SMALLEST set that satisfies the request. A
+complaint about one moment means one scene. Only touch a scene the user's words actually point at.
+
+## THE RECIPE
+```json
+{recipe}
+```
+
+## WHAT THE USER WANTS FIXED
+{instructions}
+
+## HOW TO WRITE THE REPLACEMENT PROMPTS
+
+The scene's still opening frame is kept — only the motion is generated again. So `motion_prompt` is
+the only lever you have over what happens, and it is what went wrong last time. Rewrite it to be
+explicit about the thing the user complained about.
+
+The model does not know what is solid, what floats, what bears weight or what is holding still, and
+guesses badly when unsaid — paws sink through a floating mat, an animal told it "walks toward the
+water" walks ON the water, a floating platform nobody called stationary drifts off into the
+distance. So every `motion_prompt` you write must end with a physical-contact sentence: what carries
+the subject's weight and stays rigid, which objects are stationary (name them), and where the
+waterline sits on a swimming subject. Never use "walks", "steps" or "runs" for movement in water —
+use "paddles", "swims", "pushes off", "slides in".
+
+If the user asks for a scene to be longer or shorter, set its `duration` to what they asked for.
+If they ask for different words to be said over a scene, set its `voiceover`.
+
+## WHAT TO RETURN
+
+One JSON object in a ```json fenced block, no prose outside it:
+
+{{
+  "summary": "one sentence, plain English, on what you are changing",
+  "scenes": [
+    {{
+      "index": <the scene number to re-animate>,
+      "why": "what was wrong with it, in the user's terms",
+      "motion_prompt": "the full replacement motion prompt, ending with the physical-contact sentence",
+      "duration": <new length in seconds — omit entirely to keep the current one>,
+      "voiceover": "<new line — omit entirely to keep the current one>"
+    }}
+  ]
+}}
+
+If nothing in the request needs a scene re-animated (for example it only asks for different
+narration or a different length), still return the scene entries with the changed fields — leave
+`motion_prompt` out and it will not be re-animated, only re-timed."""
+
+
+def plan_revision(recipe, instructions):
+    """Work out which scenes a change request actually touches.
+
+    Returns {"summary": str, "scenes": [{index, motion_prompt?, duration?, ...}]}.
+    """
+    slim = {
+        "title": recipe.get("title"),
+        "total_duration": recipe.get("total_duration"),
+        "scenes": [{k: v for k, v in s.items()
+                    if k in ("index", "duration", "shot_description", "motion_prompt",
+                             "voiceover", "shows_product")}
+                   for s in (recipe.get("scenes") or [])],
+    }
+    resp = client.messages.create(
+        model=MODEL, max_tokens=4000,
+        messages=[{"role": "user", "content": REVISE_PROMPT.format(
+            recipe=json.dumps(slim, indent=2), instructions=instructions)}])
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    plan = _extract_json(text)
+
+    valid = {s["index"] for s in (recipe.get("scenes") or [])}
+    cleaned = []
+    for item in plan.get("scenes") or []:
+        try:
+            idx = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if idx not in valid:
+            continue
+        entry = {"index": idx, "why": str(item.get("why") or "")}
+        if str(item.get("motion_prompt") or "").strip():
+            entry["motion_prompt"] = item["motion_prompt"].strip()
+        if item.get("duration") is not None:
+            try:
+                entry["duration"] = max(MIN_SCENE, round(float(item["duration"]), 2))
+            except (TypeError, ValueError):
+                pass
+        if str(item.get("voiceover") or "").strip():
+            entry["voiceover"] = item["voiceover"].strip()
+        cleaned.append(entry)
+    return {"summary": str(plan.get("summary") or ""), "scenes": cleaned}
+
+
+def revise_stream(recipe, clips, instructions, video_model=DEFAULT_VIDEO_MODEL,
+                  burn_subtitles=False, output_dir=None, narration="auto",
+                  narrator_voice=None, ambient=True, output_filename=None):
+    """Re-animate only the scenes a change request touches, then rebuild.
+
+    Every other scene keeps the clip it already has, so a fix to one moment
+    costs one video call rather than the whole video again.
+    """
+    output_dir = output_dir or video_assembler.OUTPUT_DIR
+    try:
+        by_index = {c["scene"]["index"]: c for c in clips if c.get("scene")}
+        if not by_index:
+            yield {"type": "done", "error": "This project has no saved scenes to revise."}
+            return
+
+        yield {"type": "status", "text": "🧠 Working out what needs redoing…"}
+        plan = plan_revision(recipe, instructions)
+        if not plan["scenes"]:
+            yield {"type": "done", "error": (
+                "Could not tell which scene to change from that. Try naming it — "
+                "e.g. \"scene 3: the mat should stay still\".")}
+            return
+        if plan["summary"]:
+            yield {"type": "status", "text": f"📝 {plan['summary']}"}
+
+        aspect = recipe.get("aspect_ratio", "9:16")
+        scenes_by_index = {s["index"]: s for s in (recipe.get("scenes") or [])}
+        pending = []
+
+        def status(text):
+            pending.append(text)
+
+        def drain(lbl):
+            while pending:
+                yield {"type": "status", "text": f"   {lbl} · {pending.pop(0)}"}
+
+        reanimated = 0
+        for item in plan["scenes"]:
+            idx = item["index"]
+            clip = by_index.get(idx)
+            scene = scenes_by_index.get(idx)
+            if not clip or not scene:
+                continue
+            label = f"Scene {idx}"
+
+            for field in ("duration", "voiceover"):
+                if field in item:
+                    value = item[field]
+                    if field == "duration":
+                        # Same trap as first generation: a slot under the model's
+                        # shortest clip divided by MAX_SPEEDUP gets cut instead of
+                        # retimed, so the action never finishes on screen.
+                        floor = _playable_minimum(video_model)
+                        if value < floor:
+                            yield {"type": "status", "text": (
+                                f"⏱️ {label} · {value}s is too short for {video_model} to "
+                                f"play out an action — using {floor}s")}
+                            value = floor
+                    scene[field] = value
+                    clip["scene"][field] = value
+
+            if "motion_prompt" not in item:
+                yield {"type": "status", "text": (
+                    f"⏱️ {label} · re-timed only, no re-animation needed")}
+                continue
+
+            scene["motion_prompt"] = item["motion_prompt"]
+            clip["scene"]["motion_prompt"] = item["motion_prompt"]
+
+            frame = clip.get("image_url") or scene.get("base_image_url")
+            if not frame:
+                yield {"type": "status", "text": (
+                    f"⚠️ {label} · no stored frame to re-animate from, skipping")}
+                continue
+
+            if item.get("why"):
+                yield {"type": "status", "text": f"🎬 {label} — {item['why'][:100]}"}
+            yield {"type": "status", "text": (
+                f"🎬 {label} · re-animating {scene['duration']}s from its existing frame")}
+
+            clip["url"] = fal_client.generate_broll(
+                video_model, frame,
+                _ground_motion_prompt(item["motion_prompt"],
+                                      recipe.get("location_props")),
+                scene["duration"], aspect_ratio=aspect, on_status=status)
+            yield from drain(label)
+            reanimated += 1
+            yield {"type": "scene", "index": idx, "url": clip["url"], "kind": "broll"}
+
+        # Slots may have moved, so narration has to be re-placed even when no
+        # scene was re-animated — a line pinned to the old timeline would drift.
+        ordered = [by_index[i] for i in sorted(by_index)]
+        for c in ordered:
+            s = scenes_by_index.get(c["scene"]["index"])
+            if s:
+                c["scene"] = s
+        recipe["total_duration"] = round(
+            sum(float(c["scene"].get("duration") or 0) for c in ordered), 2)
+
+        yield {"type": "status", "text": "✂️ Rebuilding the video…"}
+        filename = video_assembler.assemble(
+            ordered, aspect_ratio=aspect, burn_subtitles=burn_subtitles,
+            output_dir=output_dir, filename=output_filename)
+
+        global_audio_url = None
+        spoken = [c["scene"] for c in ordered
+                  if (c["scene"].get("voiceover") or "").strip()]
+        if narration != "off" and spoken:
+            word_count = sum(len(s["voiceover"].split()) for s in spoken)
+            if narration == "auto" and word_count < NARRATION_MIN_WORDS:
+                spoken = []
+        if spoken:
+            yield {"type": "status", "text": "🔊 Re-recording the lines on the new timing…"}
+            starts, t = {}, 0.0
+            for c in ordered:
+                starts[c["scene"]["index"]] = t
+                t += float(c["scene"].get("duration") or 0)
+            lines = []
+            for s in spoken:
+                lines.append({
+                    "url": fal_client.generate_voiceover(
+                        s["voiceover"].strip(),
+                        voice=narrator_voice or recipe.get("voice", "Sarah"),
+                        on_status=status),
+                    "start": starts[s["index"]],
+                })
+                yield from drain("Narration")
+            track_dir = tempfile.mkdtemp(prefix="vidcloner_vo_")
+            try:
+                track = video_assembler.build_narration_track(
+                    lines, t, os.path.join(track_dir, "narration.mp3"), track_dir)
+                global_audio_url = fal_client.upload_bytes(
+                    open(track, "rb").read(), "narration.mp3", "audio/mpeg")
+            finally:
+                shutil.rmtree(track_dir, ignore_errors=True)
+
+        ambient_url = None
+        soundscape = (recipe.get("soundscape") or "").strip()
+        if ambient and soundscape:
+            try:
+                yield {"type": "status", "text": "🌊 Re-recording the ambience…"}
+                cut_url = fal_client.upload_bytes(
+                    open(os.path.join(output_dir, filename), "rb").read(),
+                    "cut.mp4", "video/mp4")
+                ambient_url = fal_client.generate_ambient(
+                    cut_url, soundscape, recipe.get("total_duration") or 8,
+                    on_status=status)
+                yield from drain("Sound")
+            except Exception as e:
+                yield {"type": "status", "text": f"⚠️ Could not generate ambience: {e}"}
+
+        if ambient_url or global_audio_url:
+            cut_path = os.path.join(output_dir, filename)
+            mixed = video_assembler.add_soundtrack(
+                cut_path, output_dir, narration_url=global_audio_url,
+                ambient_url=ambient_url)
+            try:
+                os.remove(cut_path)
+            except OSError:
+                pass
+            filename = mixed
+
+        yield {"type": "status", "text": (
+            f"✅ Done — {reanimated} scene(s) re-animated, the rest reused")}
+        yield {"type": "done", "filename": filename, "recipe": recipe,
+               "scene_urls": [c["url"] for c in ordered],
+               "clips": _serialisable(ordered),
+               "global_audio_url": global_audio_url,
+               "ambient_audio_url": ambient_url,
+               "reanimated": reanimated}
+
+    except fal_client.FalError as e:
+        yield {"type": "done", "error": str(e)}
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
 
 
 def reassemble_stream(clips, aspect_ratio="9:16", burn_subtitles=True, output_dir=None,

@@ -560,6 +560,21 @@
       <h2 style="color:#fff;font-size:16px;margin:0 0 12px">✅ Result</h2>
       <video id="vid-player" controls style="width:100%;max-width:380px;border-radius:12px;background:#000;display:block"></video>
       <a id="vid-download" class="btn-sm" style="display:inline-block;margin-top:10px;text-decoration:none" download>⬇️ Download MP4</a>
+
+      <!-- Fix specific moments without paying for the whole video again. -->
+      <div id="vid-revise-box" style="display:none;margin-top:22px;border-top:1px solid #2a2a2a;padding-top:18px">
+        <h3 style="color:#fff;font-size:14px;margin:0 0 4px">🔧 Something wrong? Describe the fix</h3>
+        <div style="color:#666;font-size:12px;margin-bottom:10px;line-height:1.5">
+          Name the moment and what is wrong with it. Only the scenes you point at are generated
+          again — everything else is reused, so a fix costs about $0.35 a scene rather than a whole
+          new video.<br>
+          <span style="color:#555">e.g. “scene 3: the yellow mat drifts away — it must stay still” ·
+          “the last scene should be 4s, dog resting its head on the chin float”</span>
+        </div>
+        <textarea id="vid-revise-text" rows="3" placeholder="What should be changed?"
+          style="width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+        <button id="vid-revise-btn" class="btn-sm" style="margin-top:10px" onclick="vidRevise()">🔧 Apply fixes</button>
+      </div>
     </div>
 
     <!-- History -->
@@ -2355,6 +2370,7 @@ async function vidGenerate() {
     });
     const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
+    vidProjectId = d.project_id || null;
 
     vidPoll(d.job_id,
       t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
@@ -2362,17 +2378,82 @@ async function vidGenerate() {
         btn.disabled = false;
         btn.textContent = '🎬 Generate video';
         if (ev.error) { log.textContent += '\n❌ ' + ev.error; log.scrollTop = log.scrollHeight; return; }
-        const src = '/generated-videos/' + ev.filename;
-        document.getElementById('vid-player').src = src;
-        const dl = document.getElementById('vid-download');
-        dl.href = src;
-        dl.setAttribute('download', ev.filename);
-        document.getElementById('vid-result').style.display = 'block';
+        vidShowResult(ev.filename, ev.project_id || vidProjectId);
         vidLoadHistory();
       });
   } catch (e) {
     btn.disabled = false;
     btn.textContent = '🎬 Generate video';
+    log.textContent += '\n❌ ' + e.message;
+  }
+}
+
+// Which project the result panel is currently showing, so "apply fixes" knows
+// what to revise — set both after a fresh generate and after replaying history.
+let vidProjectId = null;
+
+function vidShowResult(filename, projectId) {
+  if (projectId) vidProjectId = projectId;
+  const src = '/generated-videos/' + filename;
+  document.getElementById('vid-player').src = src;
+  const dl = document.getElementById('vid-download');
+  dl.href = src;
+  dl.setAttribute('download', filename);
+  document.getElementById('vid-result').style.display = 'block';
+  // Revising needs the saved per-scene clips, which only exist per project.
+  document.getElementById('vid-revise-box').style.display = vidProjectId ? 'block' : 'none';
+}
+
+// Loads a past video into the result panel so its fixes can be described.
+function vidOpenRevise(id, filename) {
+  vidShowResult(filename, id);
+  const box = document.getElementById('vid-revise-text');
+  document.getElementById('vid-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  box.focus();
+}
+
+// Re-animates only the scenes the note points at; the rest are reused free.
+async function vidRevise() {
+  const box = document.getElementById('vid-revise-text');
+  const instructions = (box.value || '').trim();
+  if (!instructions) { box.focus(); return; }
+  if (!vidProjectId) { alert('Open a video from History first.'); return; }
+
+  const btn = document.getElementById('vid-revise-btn');
+  const log = document.getElementById('vid-gen-log');
+  btn.disabled = true;
+  btn.textContent = '⏳ Applying…';
+  log.style.display = 'block';
+  log.textContent = '🔧 Applying fixes…';
+
+  try {
+    const r = await fetch('/api/video-revise/' + vidProjectId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instructions,
+        burn_subtitles: document.getElementById('vid-subs').checked,
+        narration: document.getElementById('vid-narration').value,
+        narrator_voice: document.getElementById('vid-narrator-voice').value || null,
+        ambient: document.getElementById('vid-ambient').checked
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
+      ev => {
+        btn.disabled = false;
+        btn.textContent = '🔧 Apply fixes';
+        if (ev.error) { log.textContent += '\n❌ ' + ev.error; log.scrollTop = log.scrollHeight; return; }
+        box.value = '';
+        vidShowResult(ev.filename, ev.project_id);
+        vidLoadHistory();
+      });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '🔧 Apply fixes';
     log.textContent += '\n❌ ' + e.message;
   }
 }
@@ -2396,6 +2477,7 @@ async function vidLoadHistory() {
           </div>
           <span style="font-size:10px;padding:2px 8px;border-radius:10px;background:${badge[0]};color:${badge[1]}">${p.status}</span>
           ${p.filename ? `<a class="btn-sm" style="text-decoration:none" href="/generated-videos/${p.filename}" target="_blank">▶︎</a>` : ''}
+          ${p.filename && p.can_reassemble ? `<button class="btn-sm" onclick="vidOpenRevise(${p.id}, '${p.filename}')" title="Describe what to fix — only the scenes you name are generated again">🔧 Fix</button>` : ''}
           ${p.can_reassemble ? `<button class="btn-sm" onclick="vidReassemble(${p.id})" title="Rebuild the video from clips already generated — costs nothing">🔁 Reassemble</button>` : ''}
           <button class="btn-sm" onclick="vidDelete(${p.id})">🗑</button>
         </div>`;
@@ -2423,12 +2505,7 @@ async function vidReassemble(id) {
       t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
       ev => {
         if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
-        const src = '/generated-videos/' + ev.filename;
-        document.getElementById('vid-player').src = src;
-        const dl = document.getElementById('vid-download');
-        dl.href = src;
-        dl.setAttribute('download', ev.filename);
-        document.getElementById('vid-result').style.display = 'block';
+        vidShowResult(ev.filename, ev.project_id || id);
         vidLoadHistory();
       });
   } catch (e) {

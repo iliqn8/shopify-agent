@@ -334,8 +334,16 @@ def generate_broll(model_key, image_url, motion_prompt, seconds, aspect_ratio="9
         raise FalError(f"Unknown video model '{model_key}'")
     duration = _billable_duration(seconds, spec["durations"])
 
+    # The second half is physics, not fidelity. Without it Kling sinks paws
+    # through solid surfaces, walks animals across open water, and drifts
+    # stationary props away from camera as though they were flying off.
     negative = ("blur, distort, warped hands, extra fingers, low quality, "
-                "watermark, text artifacts")
+                "watermark, text artifacts, "
+                "limbs sinking through solid surfaces, feet clipping through floor, "
+                "animal walking on top of water, standing on water surface, "
+                "stationary objects drifting or floating away, background objects "
+                "sliding, props receding into the distance, scene elements "
+                "detaching, morphing anatomy, sudden scale changes")
 
     if model_key == "kling-2.6-pro":
         # 2.6 renamed the input image field. Sending `image_url` here is

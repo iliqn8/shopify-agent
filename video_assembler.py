@@ -339,6 +339,68 @@ def _apply_audio(video_path, tmpdir, out_path, narration_url=None, ambient_url=N
     return out_path
 
 
+# A line read slightly fast still sounds like a person; past this it sounds
+# like a chipmunk, so a line that will not fit its gap is left to run over into
+# the next scene instead, exactly as an excited voice does in real footage.
+MAX_LINE_SPEEDUP = 1.35
+
+
+def build_narration_track(lines, total_duration, out_path, tmpdir):
+    """Place each scene's line at the moment that scene appears.
+
+    `lines` is [{"url": ..., "start": <seconds into the finished cut>}].
+
+    The previous approach concatenated every line into one string and read it
+    as a single take. Thirty words of shouted encouragement read end to end is
+    about eleven seconds, so on a twenty-second video the voice finished long
+    before the picture did and nothing lined up with what was on screen. It
+    also removed every pause: the reference had gaps between shouts, and
+    running them together is most of what made the delivery sound synthetic.
+
+    Returns out_path, or None if there is nothing to lay down.
+    """
+    usable = [ln for ln in (lines or []) if ln.get("url")]
+    if not usable:
+        return None
+
+    usable.sort(key=lambda ln: ln["start"])
+    args, parts, labels = ["-y"], [], []
+
+    for i, ln in enumerate(usable):
+        src = _download(ln["url"], os.path.join(tmpdir, f"vo_{i}.mp3"))
+        args += ["-i", src]
+
+        # How long this line has before the next one starts. Overrunning that
+        # is fine and natural; overrunning it by a lot muddles both lines.
+        nxt = usable[i + 1]["start"] if i + 1 < len(usable) else total_duration
+        gap = max(0.4, nxt - ln["start"])
+        dur = _probe_duration(src) or gap
+
+        chain = f"[{i}:a]"
+        if dur > gap * 1.15:
+            factor = min(dur / gap, MAX_LINE_SPEEDUP)
+            chain += f"atempo={factor:.4f},"
+        delay = max(0, int(round(ln["start"] * 1000)))
+        chain += f"adelay={delay}|{delay},aresample=48000[l{i}]"
+        parts.append(chain)
+        labels.append(f"[l{i}]")
+
+    if len(labels) == 1:
+        parts.append(f"{labels[0]}anull[a]")
+    else:
+        parts.append(f"{''.join(labels)}amix=inputs={len(labels)}:"
+                     f"duration=longest:normalize=0[a]")
+
+    args += ["-filter_complex", ";".join(parts), "-map", "[a]",
+             "-t", f"{max(total_duration, 0.5):.3f}",
+             "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", out_path]
+
+    code, err = _run(args)
+    if code != 0 or not os.path.exists(out_path):
+        raise AssemblyError(f"ffmpeg failed building narration: {err[-600:]}")
+    return out_path
+
+
 def add_soundtrack(cut_path, output_dir, narration_url=None, ambient_url=None,
                    filename=None):
     """Mux narration/ambience onto an already-assembled cut, into a new file.

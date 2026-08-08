@@ -912,6 +912,80 @@ def video_reassemble(pid):
     return jsonify({"job_id": job_id, "project_id": pid})
 
 
+@app.route("/api/video-revise/<int:pid>", methods=["POST"])
+def video_revise(pid):
+    """Fix specific things in an already-generated video.
+
+    Only the scenes the request actually touches are animated again; every
+    other scene reuses the clip it already has, so a note about one moment
+    costs one video call instead of the whole video.
+    """
+    import uuid as _uuid_v5
+    import video_cloner
+
+    data = request.json or {}
+    instructions = (data.get("instructions") or "").strip()
+    if not instructions:
+        return jsonify({"error": "Say what should be changed."}), 400
+
+    row = kb.get_video_project(pid)
+    if not row:
+        return jsonify({"error": "Project not found"}), 404
+
+    try:
+        stored = json.loads(row.get("clips_json") or "[]")
+    except ValueError:
+        stored = []
+    clips = stored.get("clips") if isinstance(stored, dict) else stored
+    if not clips:
+        return jsonify({"error": "This project has no saved scenes, so there is "
+                                 "nothing to revise — it would have to be generated "
+                                 "again from the recipe."}), 400
+
+    try:
+        recipe = json.loads(row.get("recipe_json") or "{}")
+    except ValueError:
+        recipe = {}
+
+    job_id = str(_uuid_v5.uuid4())
+
+    def factory():
+        for event in video_cloner.revise_stream(
+            recipe, clips, instructions,
+            video_model=row.get("video_model") or video_cloner.DEFAULT_VIDEO_MODEL,
+            burn_subtitles=data.get("burn_subtitles", False),
+            narration=data.get("narration") or "auto",
+            narrator_voice=data.get("narrator_voice") or None,
+            ambient=data.get("ambient", True),
+        ):
+            if event.get("type") == "done":
+                fields = {}
+                if event.get("clips"):
+                    fields["clips_json"] = json.dumps({
+                        "clips": event["clips"],
+                        "global_audio_url": event.get("global_audio_url"),
+                        "ambient_audio_url": event.get("ambient_audio_url"),
+                    })
+                    fields["scene_urls"] = json.dumps([c["url"] for c in event["clips"]])
+                if event.get("recipe"):
+                    # Durations and prompts moved; the stored recipe has to
+                    # follow or a later revision would plan against stale text.
+                    fields["recipe_json"] = json.dumps(event["recipe"])
+                if event.get("error"):
+                    fields["status"] = "failed"
+                else:
+                    fields["status"] = "done"
+                    fields["filename"] = event.get("filename")
+                kb.update_video_project(pid, **fields)
+                event["project_id"] = pid
+                event.pop("clips", None)
+                event.pop("recipe", None)
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id, "project_id": pid})
+
+
 @app.route("/api/video-poll/<job_id>")
 def video_poll(job_id):
     job = _video_jobs.get(job_id)
