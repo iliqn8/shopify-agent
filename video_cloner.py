@@ -114,6 +114,24 @@ def extract_frames(video_bytes, max_frames=ANALYSIS_FRAMES):
             os.remove(tmp_path)
 
 
+def _media_type(raw):
+    """The real image type of a downloaded byte string.
+
+    Claimed types are not interchangeable: the API rejects a PNG declared as
+    JPEG outright. `_verify_swap` used to hardcode image/jpeg for every URL it
+    fetched, so one PNG product photo turned the whole check into a 400, which
+    the caller swallowed as "verification unavailable" and treated as a pass —
+    silently disabling the swap check for every project with a PNG upload.
+    """
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:3] == b"GIF":
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
 def _layout_similarity(url_a, url_b):
     """How much two images share a layout, 0..1. None if either can't be read.
 
@@ -216,7 +234,7 @@ SWAP_ORDER = ["environment", "subject", "product"]
 
 
 def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=None,
-                 masked=False, parts=None):
+                 masked=False, parts=None, count=1):
     """Ask the vision model whether the swap did what was asked.
 
     Pixel heuristics cannot answer this. A whole-frame colour histogram scores
@@ -236,7 +254,7 @@ def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=N
             return [
                 {"type": "text", "text": label},
                 {"type": "image", "source": {
-                    "type": "base64", "media_type": "image/jpeg",
+                    "type": "base64", "media_type": _media_type(raw),
                     "data": base64.b64encode(raw).decode()}},
             ]
 
@@ -284,13 +302,28 @@ def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=N
             "images.\n\n"
             "Judge the CONTENT of the scene, not the file. Ignore resolution, image size, "
             "compression and small crop differences at the edges — those are expected and "
-            "harmless." + props_note + "\n\n"
+            "harmless.\n\n"
+            "Every one of these models repaints the WHOLE frame; it cannot edit a region in "
+            "isolation. So background texture WILL come back slightly different — foliage with "
+            "different leaves, a fence with different grain, softer or sharper detail, small "
+            "shifts in tone. That is the cost of the edit, not a failure, and rejecting it "
+            "sends back the untouched original instead, which is a worse outcome. Judge whether "
+            "it is still the SAME SHOT: same place, same subjects, same number of them, same "
+            "poses and positions, same camera angle and framing, same time of day and lighting "
+            "mood." + props_note + "\n\n"
             "Answer with JSON only, no prose:\n"
             '{"scene_kept": <true if everything OUTSIDE the replaced ' + spec['noun'] + ' is '
-            'unchanged: ' + spec['keep'] + '. false only if something outside it was restaged, '
-            'moved or redrawn>, '
+            'recognisably the same: ' + spec['keep'] + '. false only if it is genuinely a '
+            'different shot — a subject moved, was added, removed or changed identity, the '
+            'setting became a different place, or the camera moved. Re-rendered background '
+            'detail alone is NOT false>, '
             '"swapped": <true ONLY if the ' + spec['noun'] + ' in B has been COMPLETELY '
             'replaced by the one in C. ' + spec['completeness']
+            + (f" A has {count} SEPARATE copies of the product, one per subject. Count them in "
+               f"B and check EACH ONE: all {count} must now be the C product. If even one is "
+               "still the original, this is false — say which. Also false if B is a grid, "
+               "collage or set of variations rather than the single scene from A."
+               if count and count > 1 else "")
             + (" Go through these parts ONE BY ONE and confirm each has taken the C "
                "product's colour and form: " + "; ".join(parts[:8]) + "."
                if parts else "") + '>, '
@@ -303,8 +336,11 @@ def _verify_swap(base_url, edited_url, ref_urls, slot="product", removed_props=N
         data = _extract_json(text)
         return (bool(data.get("scene_kept")), bool(data.get("swapped")),
                 str(data.get("note") or ""))
-    except Exception:
-        return True, True, "(verification unavailable)"
+    except Exception as e:
+        # Still fails open — a broken checker must not block generation — but it
+        # says what broke. The silent version hid a hard 400 behind a status line
+        # that read like a pass.
+        return True, True, f"(verification unavailable: {type(e).__name__}: {e})"
 
 
 def _encode_frame(frame, max_side=768, quality=82):
@@ -482,6 +518,7 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
       "shot_description": "what is in this shot, one sentence",
       "motion_prompt": "WHAT MOVES between the opening and closing frame of THIS shot. Compare the three frames and describe the actual change: which way the subject moves, which way the camera moves, what enters or leaves frame. If the frames are nearly identical, say so — e.g. 'the dog stays still, floating gently; almost no camera movement'. Never invent motion that is not evidenced by the frames.",
       "shows_product": <true/false — is the product visible in this shot>,
+      "product_count": <how many SEPARATE copies of the product are visible in this shot. Count the wearers/holders: three dogs each in their own life jacket is 3, not 1. 0 if the product is not in this shot. This is used to make a swap replace EVERY copy — the usual failure is that only the most prominent one is changed.>,
       "voiceover": "what is said over this shot, taken from the transcript. \\"\\" if nothing is said.",
       "on_screen_text": "text actually visible on screen in this shot, or \\"\\" if none"
     }}
@@ -517,6 +554,11 @@ PRODUCT photos. Everything else stays identical — same scene, same subject, sa
 camera. Only the product itself is replaced.
 
 Describe YOUR PRODUCT (from its photos, not the reference's) in `product_identity`.
+
+A shot may show the product MORE THAN ONCE — several subjects each wearing or holding their own
+copy, and often in different colours from each other. Count the copies per shot in
+`product_count`. Every copy gets replaced, so an undercount leaves the reference's product visibly
+in the finished video.
 
 {product}"""
 
@@ -697,6 +739,41 @@ COMPOSITION_MIN = 0.45
 NARRATION_MIN_WORDS = 6
 
 
+def _as_count(value):
+    """A scene's product_count, normalised. 1 when the model didn't say.
+
+    Older recipes predate the field, and 1 is what the whole swap path assumed
+    before it existed, so that is the safe default.
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(0, min(n, 12))
+
+
+def _instances_clause(count):
+    """Spell out that several copies of the product are in frame.
+
+    Everything here used to be phrased in the singular — "the product worn by
+    the subject", "keep the subject in the same pose". Handed a frame with
+    three dogs in three different life jackets, the edit models either changed
+    only the front one or abandoned the frame entirely and returned a collage
+    of three variations of a single dog. Naming the count, and demanding one
+    photograph back, is what makes the edit stay inside the original shot.
+    """
+    if count is None or count < 2:
+        return ""
+    return (f"\n\nIMPORTANT — there are {count} SEPARATE copies of the product in this "
+            f"photograph, worn or held by {count} different subjects. ALL {count} must be "
+            "replaced, including any that are partly hidden, further away, at a different "
+            "angle, or in a different colour from each other. A frame where only the nearest "
+            "or largest one has changed is a FAILURE. The subjects themselves — how many "
+            "there are, which is which, their poses and positions — do not change.\n\n"
+            "Return ONE single photograph of that same scene. Never a grid, a collage, a "
+            "split image, a before/after pair, or several variations.")
+
+
 def _parts_clause(parts):
     """Spell out every component of the product.
 
@@ -761,7 +838,7 @@ def _environment_prompts(ref_count, brief="", props=None):
     ]
 
 
-def _slot_prompts(slot, ref_count, parts=None, brief="", props=None):
+def _slot_prompts(slot, ref_count, parts=None, brief="", props=None, count=1):
     """Escalating edit instructions for one swap slot, best first.
 
     Product and environment have their own hand-tuned wording — they are the
@@ -770,7 +847,7 @@ def _slot_prompts(slot, ref_count, parts=None, brief="", props=None):
     everything named in `preserve` untouched.
     """
     if slot == "product":
-        return _swap_prompts(ref_count, parts)
+        return _swap_prompts(ref_count, parts, count)
     if slot == "environment":
         return _environment_prompts(ref_count, brief, props)
 
@@ -796,25 +873,44 @@ def _slot_prompts(slot, ref_count, parts=None, brief="", props=None):
     ]
 
 
-def _swap_prompts(ref_count, parts=None):
+def _swap_prompts(ref_count, parts=None, count=1):
     """Instructions for swapping a product into an existing frame, best first.
 
     Each pairs with a rung of fal_client.EDIT_LADDER. The first uses Seedream's
     Figure-referencing, which is built for "the thing in Figure 1 becomes the
     thing in Figure 2". The second frames it as inpainting, which is what makes
     Nano Banana actually perform the swap rather than quietly no-op.
+
+    `count` is how many copies of the product are in the frame. Every phrase
+    below has to agree with it: asked to replace "the product worn by the
+    subject" in a shot holding three of them, the models changed one and left
+    two, or gave up on the frame and returned a collage.
     """
     figs = ("Figure 2" if ref_count == 1
             else "Figures 2" + "".join(f", {i}" for i in range(3, ref_count + 2)))
     others = "the image that follows" if ref_count == 1 else f"the {ref_count} images that follow"
-    pc = _parts_clause(parts)
+    many = count and count > 1
+    # "the product worn by the subject" vs "each of the 3 products, one per subject"
+    worn = (f"every one of the {count} products worn by or attached to the {count} subjects"
+            if many else "the product worn by or attached to the subject")
+    region = (f"the product regions — all {count} of them, one on each subject"
+              if many else "the product region — the item worn by or attached to the subject")
+    shown = (f"each of the {count} products worn by or shown with the subjects"
+             if many else "the product worn by or shown with the subject")
+    subj_pose = ("The subjects all stay in the same places in the same poses"
+                 if many else "The subject stays in the same place in the same pose")
+    keep_pose = ("Keep every subject in the same pose and the same position"
+                 if many else "Keep the subject in the same pose and the same position")
+    outside = ("the subjects and their exact poses and positions"
+               if many else "the subject and its exact pose and position")
+    pc = _parts_clause(parts) + _instances_clause(count)
     return [p + pc for p in [
         (
             f"Figure 1 is a photograph. {figs} show a product on its own.\n\n"
-            f"Edit Figure 1 so that the product worn by or attached to the subject is replaced "
+            f"Edit Figure 1 so that {worn} is replaced "
             f"by the product from {figs}, matching its real colour, shape and markings.\n\n"
-            "Change nothing else in Figure 1. Keep the subject in the same pose and the same "
-            "position, keep the background, water, horizon and every other object exactly "
+            f"Change nothing else in Figure 1. {keep_pose}, "
+            "keep the background, water, horizon and every other object exactly "
             "where they are, keep the lighting and the camera viewpoint, and keep the same "
             f"crop and framing. Do not use the background or setting from {figs} — those are "
             "product photos, and only the product itself should be taken from them."
@@ -822,10 +918,10 @@ def _swap_prompts(ref_count, parts=None):
         (
             "You are performing an inpainting edit, not generating a new picture.\n\n"
             "IMAGE 1 is the ONLY image whose scene matters. Reproduce IMAGE 1 exactly. Then "
-            "paint over ONLY the product region — the item worn by or attached to the subject "
-            f"— replacing it with the product shown in {others}.\n\n"
-            "Every pixel outside that product region must be identical to IMAGE 1. The "
-            "subject stays in the same place in the same pose. The background, water depth, "
+            f"paint over ONLY {region}"
+            f", replacing it with the product shown in {others}.\n\n"
+            "Every pixel outside that product region must be identical to IMAGE 1. "
+            f"{subj_pose}. The background, water depth, "
             "shoreline, sky and every other object stay exactly as they are. The camera does "
             "not move. The framing and crop do not change. The reference images contribute "
             "the product's appearance and NOTHING ELSE — ignore their backgrounds entirely.\n\n"
@@ -835,11 +931,11 @@ def _swap_prompts(ref_count, parts=None):
         (
             f"IMAGE 1 is a photograph to edit. {others.capitalize()} show a replacement "
             "product, on its own, for reference only.\n\n"
-            "Return IMAGE 1 with one single change: the product worn by or shown with the "
-            "subject is replaced by the reference product, matching its real colour, shape "
+            f"Return IMAGE 1 with one single change: {shown} "
+            "is replaced by the reference product, matching its real colour, shape "
             "and markings.\n\n"
-            "Everything else in IMAGE 1 must be unchanged — the subject and its exact pose "
-            "and position, the background, the water, the horizon, every other object, the "
+            f"Everything else in IMAGE 1 must be unchanged — {outside}"
+            ", the background, the water, the horizon, every other object, the "
             "lighting, the shadows, the camera angle, the crop and the framing. Do not move "
             "anything. Do not re-stage or re-imagine the scene. Do not borrow the background "
             "or camera angle from the reference images; they are product photos only."
@@ -1028,6 +1124,7 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
                 "image_prompt": "",
                 "avatar_line": "",
                 "shows_product": bool(d.get("shows_product", True)),
+                "product_count": _as_count(d.get("product_count")),
                 "voiceover": d.get("voiceover") or "",
                 "on_screen_text": d.get("on_screen_text") or "",
                 "source_start": shot["start"],
@@ -1293,6 +1390,14 @@ def rewrite_stream(recipe, instructions):
                 for key in ("base_image_url", "source_start"):
                     if src.get(key) and not s.get(key):
                         s[key] = src[key]
+                # How many copies of the product are in frame was counted off the
+                # reference frames. The rewrite may legitimately correct it, but
+                # if it simply doesn't mention it, falling back to the default of
+                # 1 would leave the reference's own product on every subject but
+                # the most prominent — so inherit rather than default.
+                if "product_count" in src and "product_count" not in s:
+                    s["product_count"] = src["product_count"]
+            s["product_count"] = _as_count(s.get("product_count"))
 
         yield {"type": "status", "text": f"✅ Updated — {len(updated['scenes'])} scenes, {updated['total_duration']}s"}
         yield {"type": "done", "recipe": updated}
@@ -1485,10 +1590,15 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                           if refs and (slot != "product" or s.get("shows_product"))]
                 if not wanted:
                     yield {"type": "status", "text": f"   {label} · using the reference's own frame"}
+                n_copies = _as_count(s.get("product_count"))
+                if n_copies > 1 and any(slot == "product" for slot, _ in wanted):
+                    yield {"type": "status", "text": (
+                        f"   {label} · {n_copies} copies of the product in frame — "
+                        "all of them get replaced")}
                 for slot, refs in wanted:
                     image_url = yield from _swap_into(
                         image_url, slot, refs, aspect, label, s["index"], recipe,
-                        status, drain)
+                        status, drain, count=n_copies)
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
@@ -1628,7 +1738,7 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
 
 def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
-               status, drain):
+               status, drain, count=1):
     """Replace one thing in a frame, verifying the result. Yields status events.
 
     Returns the edited image URL, or the untouched input if no rung of the
@@ -1640,7 +1750,8 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
     prompts = _slot_prompts(slot, len(refs),
                             parts=recipe.get("product_parts"),
                             brief=recipe.get("environment_brief", ""),
-                            props=recipe.get("location_props"))
+                            props=recipe.get("location_props"),
+                            count=count)
 
     # Changing the location while keeping the subject identical does not work
     # by instruction alone — every model tested moved the dog, turned it, or
@@ -1693,10 +1804,12 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
         scene_ok, swapped, note = _verify_swap(
             base_url, candidate, refs, slot, removed_props=props,
             masked=bool(use_mask),
-            parts=recipe.get("product_parts") if slot == "product" else None)
+            parts=recipe.get("product_parts") if slot == "product" else None,
+            count=count if slot == "product" else 1)
         if scene_ok and swapped:
             yield {"type": "status", "text": (
                 f"   {label} · {spec['label']} swapped in"
+                + (f" (all {count} copies)" if slot == "product" and count > 1 else "")
                 + (" (subject mask held)" if use_mask else "")
                 + (f", layout {score:.2f}" if score is not None else ""))}
             return candidate

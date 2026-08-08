@@ -2272,7 +2272,7 @@ function vidRenderRecipe() {
           <span style="color:#666;font-size:12px;font-weight:600">${s.index}</span>
           ${badge}
           <span style="color:#666;font-size:11px">${s.duration}s</span>
-          ${s.shows_product ? '<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#2a2a3a;color:#93c5fd">REAL PRODUCT</span>' : ''}
+          ${s.shows_product ? `<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:#2a2a3a;color:#93c5fd">REAL PRODUCT${s.product_count > 1 ? ' ×' + s.product_count : ''}</span>` : ''}
           <span style="flex:1"></span>
           ${s.on_screen_text ? `<span style="color:#fbbf24;font-size:11px">“${vidEsc(s.on_screen_text)}”</span>` : ''}
         </div>
