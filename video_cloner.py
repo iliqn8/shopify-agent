@@ -2136,15 +2136,22 @@ ERASE_MASKED_PROMPT = (
     "Paint into those areas whatever the scene behind them contains — continue the "
     "surrounding surfaces, textures, colours and lighting straight through, so the result "
     "looks like the photograph as it was shot, before any text was added.\n\n"
-    "Add nothing: no new objects, no new text, no letters, no logos, no decoration. Change "
-    "nothing outside the transparent areas."
+    "Add nothing: no new objects, no new text, no letters, no decoration. Change nothing "
+    "outside the transparent areas."
 )
 
+# Deliberately says nothing about watermarks or logos. An earlier wording listed
+# them among the things to take off, and fal returned a hard 422
+# content_policy_violation on the prompt alone — removing a watermark is a
+# copyright-circumvention request to these providers, whatever the actual
+# picture is. What we are doing is repainting a caption a video editor added, so
+# that is what it now says.
 ERASE_PROMPT = (
     "You are performing an inpainting edit on this photograph, not generating a new picture.\n\n"
-    "Remove every piece of text laid over it — captions, subtitles, hook lines, watermarks, "
-    "logo bugs, stickers, any pasted-on lettering — and rebuild what was behind them from the "
-    "surrounding scene, matching its texture, colour and lighting.\n\n"
+    "A caption has been laid over it in a video editor. Repaint the area those letters cover "
+    "with the scene that belongs behind them, continuing the surrounding surfaces, textures, "
+    "colours and lighting straight through, so the picture looks the way it did before the "
+    "caption was added.\n\n"
     "Everything else survives untouched: the same subjects, the same poses and positions, the "
     "same background, the same colours, the same lighting, the same camera viewpoint and "
     "framing. Do not add text of any kind, in any language. Return ONE single photograph of "
@@ -2217,17 +2224,37 @@ def _erase_overlay(base_url, mask_url, boxes, aspect, label, scene_index, status
     of the picture — and it is also the most expensive, so it is not the first
     thing tried.
     """
-    ladder = [r for r in fal_client.EDIT_LADDER if "gpt-image" not in r["id"]]
-    gpt = [r for r in fal_client.EDIT_LADDER if "gpt-image" in r["id"]]
-    cheap = sorted(ladder, key=lambda r: r["usd"])
-    ordered = cheap[:2] + gpt + cheap[2:]
+    # Order is from what these models actually did on this job, not from price.
+    # Seedream went first when this was written, on the assumption that a
+    # caption is a small local edit and the cheap rung would manage it; handed a
+    # real frame it returned an entirely recomposed picture (layout match 0.02
+    # against a floor of 0.40). It is last now. Nano Banana leads because a
+    # localised repaint is what it is good at, and gpt-image-2 follows as the
+    # backstop: with the mask it physically cannot redraw the rest of the shot,
+    # which is the exact failure of the rung before it.
+    preferred = ["nano-banana/edit", "gpt-image-2", "nano-banana-pro", "seedream"]
+    ordered = []
+    for key in preferred:
+        ordered += [r for r in fal_client.EDIT_LADDER
+                    if key in r["id"] and r not in ordered]
+    ordered += [r for r in fal_client.EDIT_LADDER if r not in ordered]
 
     for rung in ordered:
         masked = "gpt-image" in rung["id"]
-        candidate = fal_client.edit_image(
-            [base_url], ERASE_MASKED_PROMPT if masked else ERASE_PROMPT,
-            aspect_ratio=aspect, on_status=status, model_id=rung["id"],
-            seed=7000 + scene_index, mask_url=mask_url if masked else None)
+        # A rung that refuses outright must cost us the next rung, not the whole
+        # video. One returned a hard 422 on the prompt and took a paid run down
+        # with it at scene 1 of 5 — every clip after it was never generated.
+        try:
+            candidate = fal_client.edit_image(
+                [base_url], ERASE_MASKED_PROMPT if masked else ERASE_PROMPT,
+                aspect_ratio=aspect, on_status=status, model_id=rung["id"],
+                seed=7000 + scene_index, mask_url=mask_url if masked else None)
+        except Exception as e:
+            yield from drain(label)      # flush whatever it managed to report
+            yield {"type": "status", "text": (
+                f"   {label} · {rung['label']} refused the edit "
+                f"({type(e).__name__}: {str(e)[:160]}) — escalating")}
+            continue
         yield from drain(label)
 
         gone, ratio = _overlay_erased(base_url, candidate, boxes)
@@ -2313,9 +2340,25 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
         use_mask = mask_url if "gpt-image" in rung["id"] else None
         # Pin the recipe's aspect. "auto" lets the model pick, and it returns a
         # differently-cropped frame that no longer matches the rest of the cut.
-        candidate = fal_client.edit_image(
-            [base_url] + edit_refs, prompt, aspect_ratio=aspect, on_status=status,
-            model_id=rung["id"], seed=attempt * 1000 + scene_index, mask_url=use_mask)
+        # Same reasoning as the erase ladder: one provider refusing has to cost
+        # the next rung, not the rest of the video. The ladder exists precisely
+        # because these models are unreliable, and a hard error is just another
+        # way for a rung to be unreliable.
+        try:
+            candidate = fal_client.edit_image(
+                [base_url] + edit_refs, prompt, aspect_ratio=aspect, on_status=status,
+                model_id=rung["id"], seed=attempt * 1000 + scene_index, mask_url=use_mask)
+        except Exception as e:
+            # `last_note` is deliberately left alone: it is fed to the next
+            # attempt as "here is what was wrong with your result", and a
+            # transport error says nothing about the picture. Pasting a provider
+            # error into the next prompt is also a good way to trip the content
+            # checker that may have caused it.
+            yield from drain(label)
+            yield {"type": "status", "text": (
+                f"   {label} · {rung['label']} failed "
+                f"({type(e).__name__}: {str(e)[:160]}) — escalating")}
+            continue
         yield from drain(label)
 
         # The edit model will happily compose a brand-new scene out of all the
