@@ -337,8 +337,14 @@ def generate_broll(model_key, image_url, motion_prompt, seconds, aspect_ratio="9
     # The second half is physics, not fidelity. Without it Kling sinks paws
     # through solid surfaces, walks animals across open water, and drifts
     # stationary props away from camera as though they were flying off.
+    # Any lettering left in the starting frame gets repainted frame by frame and
+    # dissolves into crawling mush — the single most obvious "this is AI" tell.
+    # Captions are stripped from the frame upstream; this is the second line of
+    # defence, and it also stops the model inventing text of its own.
     negative = ("blur, distort, warped hands, extra fingers, low quality, "
-                "watermark, text artifacts, "
+                "watermark, text, letters, words, captions, subtitles, "
+                "on-screen text, overlaid text, logo, signage, typography, "
+                "garbled text, morphing letters, flickering text, "
                 "limbs sinking through solid surfaces, feet clipping through floor, "
                 "animal walking on top of water, standing on water surface, "
                 "stationary objects drifting or floating away, background objects "

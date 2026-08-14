@@ -437,6 +437,121 @@ def detect_shots(video_bytes, min_shot=0.5, cut_threshold=0.55):
             os.remove(tmp_path)
 
 
+def detect_overlay_regions(shots, tolerance=10, pad=10):
+    """Find caption text burned into the reference's pixels.
+
+    A reference ad almost always carries a hook caption ("watch my nervous
+    dachshund…") baked into the footage. It arrives in every opening frame we
+    hand to the video model, which then tries to *redraw* those letters — they
+    smear, wobble and dissolve across the clip, and that artefact alone is
+    enough to make a recreation read as AI-generated.
+
+    Detection is free and needs no OCR: an overlay is by definition the part of
+    the picture that does NOT change when the editor cuts to a different shot.
+    Comparing frames from different shots, pixels whose value never moves are
+    either pasted-on graphics or flat bars, and the two are told apart by
+    texture — lettering has strong local contrast, a letterbox bar has none.
+
+    Returns {"boxes": [(x, y, w, h)], "size": (w, h), "preview_b64": str,
+    "mask_png": bytes} or None. `mask_png` follows the gpt-image-2 convention
+    used for the environment swap: transparent = the part it may repaint.
+    """
+    try:
+        import numpy as np
+
+        frames, shot_ids = [], set()
+        for s in shots:
+            for name in ("first_b64", "mid_b64", "last_b64"):
+                if not s.get(name):
+                    continue
+                arr = cv2.imdecode(
+                    np.frombuffer(base64.b64decode(s[name]), np.uint8), cv2.IMREAD_COLOR)
+                if arr is not None:
+                    frames.append((s["index"], arr))
+                    shot_ids.add(s["index"])
+        if len(frames) < 4:
+            return None
+        h, w = frames[0][1].shape[:2]
+        frames = [(i, f) for i, f in frames if f.shape[:2] == (h, w)]
+        if len(frames) < 4:
+            return None
+
+        grey = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for _, f in frames]).astype(np.int16)
+        spread = (grey.max(axis=0) - grey.min(axis=0)).astype(np.uint8)
+        static = spread <= tolerance
+
+        # With only one shot there is no cut to compare across, so a locked-off
+        # camera makes the whole frame "static" and every guess is a false one.
+        # Require most of the picture to have actually moved before believing
+        # that the still parts are pasted on.
+        if static.mean() > 0.55 or len(shot_ids) < 2:
+            return None
+
+        median = np.median(grey, axis=0).astype(np.uint8)
+        edges = np.abs(cv2.Laplacian(median, cv2.CV_32F, ksize=3))
+
+        # Glyph strokes are two or three pixels wide, so the usual
+        # opening-to-remove-speckle erases the very thing being looked for.
+        # Density does the same job without touching the strokes: a static
+        # pixel counts only where its neighbourhood is static too, which is
+        # true along lettering and not true of scattered coincidences in the
+        # picture.
+        density = cv2.boxFilter(static.astype(np.float32), -1, (9, 9), normalize=True)
+        mask = ((static & (density > 0.05)).astype(np.uint8) * 255)
+        # Letters are separate blobs; joining them sideways turns a line of text
+        # into one region instead of thirty.
+        mask = cv2.dilate(mask, np.ones((5, 21), np.uint8), iterations=1)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+
+        frame_area = float(h * w)
+        boxes = []
+        for i in range(1, n):
+            x, y, bw, bh, area = stats[i]
+            if not (0.0008 * frame_area <= area <= 0.15 * frame_area):
+                continue
+            region = labels[y:y + bh, x:x + bw] == i
+            if region.sum() < 40:
+                continue
+            # Flat regions — black bars, blown sky, a uniform backdrop — are
+            # static too. Text is not flat: it is bright glyphs on something
+            # darker, with hard edges.
+            if float(median[y:y + bh, x:x + bw][region].std()) < 18:
+                continue
+            if float(edges[y:y + bh, x:x + bw][region].mean()) < 6:
+                continue
+            boxes.append((max(0, x - pad), max(0, y - pad),
+                          min(w, x + bw + pad) - max(0, x - pad),
+                          min(h, y + bh + pad) - max(0, y - pad)))
+
+        if not boxes:
+            return None
+        if sum(b[2] * b[3] for b in boxes) > 0.25 * frame_area:
+            return None    # too much of the picture to be an overlay
+
+        # Opaque everywhere, transparent over the text: exactly what the masked
+        # edit model treats as "you may repaint only this".
+        rgba = np.zeros((h, w, 4), np.uint8)
+        rgba[:, :, :3] = frames[0][1]
+        rgba[:, :, 3] = 255
+        preview = frames[0][1].copy()
+        for x, y, bw, bh in boxes:
+            rgba[y:y + bh, x:x + bw, 3] = 0
+            cv2.rectangle(preview, (x, y), (x + bw, y + bh), (0, 0, 255), 2)
+
+        ok_mask, mask_buf = cv2.imencode(".png", rgba)
+        ok_prev, prev_buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if not (ok_mask and ok_prev):
+            return None
+        return {
+            "boxes": [list(map(int, b)) for b in boxes],
+            "size": [int(w), int(h)],
+            "mask_png": mask_buf.tobytes(),
+            "preview_b64": base64.b64encode(prev_buf.tobytes()).decode(),
+        }
+    except Exception:
+        return None
+
+
 def transcribe(video_bytes):
     """Whisper transcription of the reference audio. Returns '' when there is no
     usable audio track or no OpenAI key — a silent reference is still analysable."""
@@ -512,6 +627,7 @@ Return ONE JSON object inside a ```json fenced block. No prose outside the block
   "product_parts": ["every separately-coloured or separately-shaped part of the product, named as it would be seen — e.g. 'main body panel', 'chin-rest float', 'fin spikes', 'buckle straps', 'grab handle'. This list is used to make sure a product swap replaces ALL of it, not just the largest part."],
   "location_props": ["objects visible in the reference that belong to its LOCATION rather than to the subject or the product — e.g. 'inflatable paddleboard', 'wooden jetty', 'beach umbrella', 'kitchen counter'. Exclude the product and anything the subject wears or holds. If the location is later changed these have to be removed, so name them even when they seem incidental."],
   "environment_brief": "<only if NEW LOCATION photos were attached> one or two sentences describing the kind of place the action moves to — ground/surface, water, terrain, vegetation, structures, time of day, quality of light. Otherwise \\"\\".",
+  "burned_in_text": <true/false — only meaningful if an OVERLAY CANDIDATE image is attached at the end. It marks in red the pixels that are identical in every shot of the reference. Answer true if those regions are lettering or graphics PASTED ON TOP of the footage — a hook caption, subtitles, a watermark, a logo bug, a sticker. Answer false if they are part of the filmed scene itself, or if no OVERLAY CANDIDATE image was attached. Getting this wrong in either direction is costly: a false positive erases real scenery, a false negative leaves text that the video model will smear into unreadable mush.>,
   "soundscape": "the diegetic sound this footage would really have, as a comma-separated list of sources, ordered loudest first — e.g. 'gentle water lapping against an inflatable board, light sea breeze, distant seabirds, occasional small splash'. Describe only sound that the pictured place and action would actually make. No music. No speech.",
   "voice": "<one of: Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill>",
   "scenes": [
@@ -913,7 +1029,28 @@ def _environment_prompts(ref_count, brief="", props=None):
     ]
 
 
-def _slot_prompts(slot, ref_count, parts=None, brief="", props=None, count=1):
+def _continuity_clause(slot):
+    """Tell the model the last image is continuity, not a second thing to copy.
+
+    Without it the frame handed back from the previous shot reads as another
+    reference to blend with, and the model starts borrowing its composition.
+    """
+    spec = SWAP_SLOTS[slot]
+    return (
+        f"\n\nCONTINUITY — READ THIS ABOUT THE LAST ATTACHED IMAGE.\n"
+        f"The FINAL image is not a new thing to put in the shot. It is a frame from an "
+        f"EARLIER SHOT OF THIS SAME VIDEO, in which the {spec['noun']} was already replaced "
+        f"and accepted. The {spec['noun']} you produce must be the SAME ONE seen there — "
+        f"same identity, same colours, same markings, same materials and proportions — so "
+        f"that the finished video does not visibly change it halfway through.\n"
+        f"Take ONLY appearance from that frame. Ignore its composition, its camera angle, "
+        f"its pose and everything else in it; the shot being edited is Figure 1 and only "
+        f"Figure 1."
+    )
+
+
+def _slot_prompts(slot, ref_count, parts=None, brief="", props=None, count=1,
+                  continuity=False):
     """Escalating edit instructions for one swap slot, best first.
 
     Product and environment have their own hand-tuned wording — they are the
@@ -921,6 +1058,9 @@ def _slot_prompts(slot, ref_count, parts=None, brief="", props=None, count=1):
     description, being the straightforward case: replace one thing, leave
     everything named in `preserve` untouched.
     """
+    if continuity:
+        tail = _continuity_clause(slot)
+        return [p + tail for p in _slot_prompts(slot, ref_count, parts, brief, props, count)]
     if slot == "product":
         return _swap_prompts(ref_count, parts, count)
     if slot == "environment":
@@ -1221,6 +1361,18 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
                 "`soundscape` must then describe what the NEW location sounds like, not the "
                 "original one."})
 
+        # Free, pixel-level: what never moves between cuts is probably pasted on.
+        # The model only has to say whether it is text, not find it.
+        overlay = detect_overlay_regions(shots)
+        if overlay:
+            content.append({"type": "text", "text": (
+                "OVERLAY CANDIDATE — the red boxes mark every pixel region that is IDENTICAL "
+                "in all of the frames above, across different shots. Decide whether they are "
+                "burned-in text/graphics pasted over the footage, and answer in `burned_in_text`.")})
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": overlay["preview_b64"]}})
+
         product_block = (RECREATE_SWAP_PRODUCT.format(product=_format_product(product, len(product_images)))
                          if swapping else RECREATE_SAME_PRODUCT)
         content.append({"type": "text", "text": RECREATE_PROMPT.format(
@@ -1279,6 +1431,28 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
                        "text": f"⏱️ Reference is {was}s — scaled shots to your {target_duration}s target"}
         recipe["total_duration"] = round(sum(s["duration"] for s in scenes), 2)
         recipe["target_duration"] = recipe["total_duration"]
+
+        # The reference's own caption is baked into every frame we are about to
+        # use as a starting image. Left there, the video model repaints the
+        # letters and they crawl and dissolve through the whole clip.
+        recipe["overlay_boxes"] = []
+        recipe["overlay_mask_url"] = ""
+        if overlay and bool(recipe.get("burned_in_text")):
+            try:
+                recipe["overlay_mask_url"] = fal_client.upload_bytes(
+                    overlay["mask_png"], "overlay_mask.png", "image/png")
+                recipe["overlay_boxes"] = overlay["boxes"]
+                yield {"type": "status", "text": (
+                    f"🧽 Burned-in text found in the reference "
+                    f"({len(overlay['boxes'])} region(s)) — it will be erased from each "
+                    "starting frame before animation")}
+            except Exception as e:
+                yield {"type": "status",
+                       "text": f"⚠️ Could not prepare the text-removal mask: {e}"}
+        elif overlay:
+            yield {"type": "status",
+                   "text": "🧽 Static regions checked — not pasted-on text, left alone"}
+        recipe.pop("burned_in_text", None)
 
         # Each shot's own opening frame is the visual base for regenerating it.
         yield {"type": "status", "text": f"📤 Uploading {len(shots)} opening frames…"}
@@ -1508,7 +1682,8 @@ def rewrite_stream(recipe, instructions):
         # back to invented shots. Re-attach them from the original by index.
         for key in ("mode", "product_reference_urls", "product_swap", "product_source",
                     "product_identity", "product_parts", "soundscape", "source_duration",
-                    "subject_reference_urls", "environment_reference_urls"):
+                    "subject_reference_urls", "environment_reference_urls",
+                    "overlay_mask_url", "overlay_boxes"):
             if key in recipe:
                 updated.setdefault(key, recipe[key])
         originals = {s.get("index"): s for s in (recipe.get("scenes") or [])}
@@ -1560,6 +1735,14 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
         if recipe.get("product_reference_urls" if slot == "product"
                       else f"{slot}_reference_urls"))
 
+    # Erasing the reference's burned-in caption is one more edit per shot.
+    # Unlike a swap it leads with the cheap rungs — the check that accepts it
+    # is free, so a failed cheap attempt costs only itself — and two of them
+    # is the realistic worst case before it lands.
+    erase_cost = 0.0
+    if recipe.get("overlay_mask_url") and recipe.get("overlay_boxes"):
+        erase_cost = 2 * min(r["usd"] for r in fal_client.EDIT_LADDER)
+
     fal_usd = 0.0
     avatar_usd = 0.0
     for s in recipe.get("scenes", []):
@@ -1574,6 +1757,8 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
             # the reference's own, costing nothing; otherwise it is generated.
             if not s.get("base_image_url"):
                 fal_usd += fal_client.USD_PER_IMAGE
+            else:
+                fal_usd += erase_cost
             fal_usd += swap_cost
             fal_usd += billed * per_second
             if (s.get("voiceover") or "").strip():
@@ -1679,9 +1864,20 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
             return
         yield {"type": "status", "text": f"🔧 {msg}"}
 
+        overlay_mask_url = recipe.get("overlay_mask_url") or ""
+        overlay_boxes = recipe.get("overlay_boxes") or []
+        if overlay_mask_url and overlay_boxes:
+            yield {"type": "status", "text": (
+                f"🧽 Erasing the reference's burned-in text from every starting frame "
+                f"({len(overlay_boxes)} region(s))")}
+
         clips = []
         total = len(scenes)
         locked_frame = None      # first rendered product shot, reused to stop drift
+        # Same idea, per swap slot, for the recreation path: the first accepted
+        # subject / product / location frame becomes a reference for the rest,
+        # so identity holds across the cut instead of being re-rolled per shot.
+        locked_slots = {}
 
         # One continuous read sounds human; the same words rendered as separate
         # per-scene clips come out clipped and robotic, because a two-second
@@ -1722,6 +1918,13 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 # is the starting image, so composition, subject, location and
                 # framing are inherited rather than reinvented.
                 image_url = s["base_image_url"]
+                # First, take the reference's own caption off the plate. Doing
+                # it before the swaps means no later edit has to preserve
+                # lettering that should not be in the finished video at all.
+                if overlay_mask_url and overlay_boxes:
+                    image_url = yield from _erase_overlay(
+                        image_url, overlay_mask_url, overlay_boxes, aspect,
+                        label, s["index"], status, drain)
                 wanted = [(slot, refs) for slot, refs in swap_refs.items()
                           if refs and (slot != "product" or s.get("shows_product"))]
                 if not wanted:
@@ -1732,9 +1935,16 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                         f"   {label} · {n_copies} copies of the product in frame — "
                         "all of them get replaced")}
                 for slot, refs in wanted:
+                    before = image_url
                     image_url = yield from _swap_into(
                         image_url, slot, refs, aspect, label, s["index"], recipe,
-                        status, drain, count=n_copies)
+                        status, drain, count=n_copies,
+                        continuity_url=locked_slots.get(slot))
+                    # Only a swap that was actually accepted is worth locking:
+                    # on failure `_swap_into` hands back the untouched frame,
+                    # which still shows the reference's own subject.
+                    if image_url != before and slot not in locked_slots:
+                        locked_slots[slot] = image_url
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
@@ -1920,8 +2130,138 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
 
 
+ERASE_MASKED_PROMPT = (
+    "The transparent areas of the mask cover lettering that was pasted on top of this "
+    "photograph after it was taken.\n\n"
+    "Paint into those areas whatever the scene behind them contains — continue the "
+    "surrounding surfaces, textures, colours and lighting straight through, so the result "
+    "looks like the photograph as it was shot, before any text was added.\n\n"
+    "Add nothing: no new objects, no new text, no letters, no logos, no decoration. Change "
+    "nothing outside the transparent areas."
+)
+
+ERASE_PROMPT = (
+    "You are performing an inpainting edit on this photograph, not generating a new picture.\n\n"
+    "Remove every piece of text laid over it — captions, subtitles, hook lines, watermarks, "
+    "logo bugs, stickers, any pasted-on lettering — and rebuild what was behind them from the "
+    "surrounding scene, matching its texture, colour and lighting.\n\n"
+    "Everything else survives untouched: the same subjects, the same poses and positions, the "
+    "same background, the same colours, the same lighting, the same camera viewpoint and "
+    "framing. Do not add text of any kind, in any language. Return ONE single photograph of "
+    "that same scene — never a grid, a collage or a before/after pair."
+)
+
+
+def _overlay_erased(base_url, cand_url, boxes):
+    """Did the text actually go, without the rest of the frame being redrawn?
+
+    Free and specific: lettering is dense high-frequency detail, so the edge
+    energy inside the marked boxes collapses when it is genuinely painted out
+    and barely moves when the model returns the frame unchanged. A vision call
+    would cost money to answer a question pixels already answer.
+
+    Returns (gone, ratio) — ratio is the fraction of the original edge energy
+    that survived, or (None, None) when it could not be measured.
+    """
+    try:
+        import numpy as np
+        import requests as _rq
+
+        mats = []
+        for url in (base_url, cand_url):
+            raw = (base64.b64decode(url.split(",", 1)[1]) if url.startswith("data:")
+                   else _rq.get(url, timeout=120).content)
+            arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+            if arr is None:
+                return None, None
+            mats.append(arr)
+        base, cand = mats
+        # The edit models return whatever resolution they like. Rescaling only
+        # the candidate would soften it and make an untouched frame look as
+        # though the text had been half removed, so both are brought to the
+        # smaller of the two and the boxes are scaled with them.
+        scale = 1.0
+        if cand.shape != base.shape:
+            th = min(base.shape[0], cand.shape[0])
+            tw = max(1, int(round(base.shape[1] * th / base.shape[0])))
+            scale = th / base.shape[0]
+            base = cv2.resize(base, (tw, th), interpolation=cv2.INTER_AREA)
+            cand = cv2.resize(cand, (tw, th), interpolation=cv2.INTER_AREA)
+            boxes = [[max(1, int(round(v * scale))) for v in b] for b in boxes]
+
+        before = after = 0.0
+        h, w = base.shape
+        for x, y, bw, bh in boxes:
+            x2, y2 = min(w, x + bw), min(h, y + bh)
+            if x2 <= x or y2 <= y:
+                continue
+            before += float(np.abs(cv2.Laplacian(base[y:y2, x:x2], cv2.CV_32F, ksize=3)).sum())
+            after += float(np.abs(cv2.Laplacian(cand[y:y2, x:x2], cv2.CV_32F, ksize=3)).sum())
+        if before <= 0:
+            return None, None
+        ratio = after / before
+        return ratio <= 0.6, ratio
+    except Exception:
+        return None, None
+
+
+def _erase_overlay(base_url, mask_url, boxes, aspect, label, scene_index, status, drain):
+    """Paint the reference's burned-in caption out of a starting frame.
+
+    Runs before any swap, so every later edit works on a clean plate rather
+    than on letters that the swap models would try to preserve.
+
+    Cheap rungs first, which is the opposite of a swap: the check here costs
+    nothing, so a $0.04 attempt that fails is only $0.04 wasted. The masked
+    model is the backstop — it is the one that physically cannot touch the rest
+    of the picture — and it is also the most expensive, so it is not the first
+    thing tried.
+    """
+    ladder = [r for r in fal_client.EDIT_LADDER if "gpt-image" not in r["id"]]
+    gpt = [r for r in fal_client.EDIT_LADDER if "gpt-image" in r["id"]]
+    cheap = sorted(ladder, key=lambda r: r["usd"])
+    ordered = cheap[:2] + gpt + cheap[2:]
+
+    for rung in ordered:
+        masked = "gpt-image" in rung["id"]
+        candidate = fal_client.edit_image(
+            [base_url], ERASE_MASKED_PROMPT if masked else ERASE_PROMPT,
+            aspect_ratio=aspect, on_status=status, model_id=rung["id"],
+            seed=7000 + scene_index, mask_url=mask_url if masked else None)
+        yield from drain(label)
+
+        gone, ratio = _overlay_erased(base_url, candidate, boxes)
+        if gone is None:
+            yield {"type": "status", "text": (
+                f"   {label} · text removal could not be measured — keeping "
+                f"{rung['label']}'s frame")}
+            return candidate
+
+        # A model that repaints the caption away but restages the shot has cost
+        # us more than the caption did.
+        score = _layout_similarity(base_url, candidate)
+        if score is not None and score < 0.40:
+            yield {"type": "status", "text": (
+                f"   {label} · {rung['label']} redrew the shot while erasing the text "
+                f"(layout {score:.2f}) — escalating")}
+            continue
+        if gone:
+            yield {"type": "status", "text": (
+                f"   {label} · burned-in text erased by {rung['label']} "
+                f"({int((1 - ratio) * 100)}% of it gone)")}
+            return candidate
+        yield {"type": "status", "text": (
+            f"   {label} · {rung['label']} left the text in place "
+            f"({int(ratio * 100)}% still there) — escalating")}
+
+    yield {"type": "status", "text": (
+        f"   ⚠️ {label} · could not erase the reference's text cleanly, keeping the "
+        "original frame")}
+    return base_url
+
+
 def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
-               status, drain, count=1):
+               status, drain, count=1, continuity_url=None):
     """Replace one thing in a frame, verifying the result. Yields status events.
 
     Returns the edited image URL, or the untouched input if no rung of the
@@ -1934,7 +2274,14 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
                             parts=recipe.get("product_parts"),
                             brief=recipe.get("environment_brief", ""),
                             props=recipe.get("location_props"),
-                            count=count)
+                            count=count,
+                            continuity=bool(continuity_url))
+    # Every shot is swapped on its own, so nothing ties one shot's result to
+    # the next: a single uploaded photo of a poodle came back as a poodle in
+    # four shots and a golden retriever in the fifth. Handing back the frame
+    # that was already accepted pins the later shots to what was actually
+    # rendered, not just to the source photos.
+    edit_refs = refs + ([continuity_url] if continuity_url else [])
 
     # Changing the location while keeping the subject identical does not work
     # by instruction alone — every model tested moved the dog, turned it, or
@@ -1967,7 +2314,7 @@ def _swap_into(base_url, slot, refs, aspect, label, scene_index, recipe,
         # Pin the recipe's aspect. "auto" lets the model pick, and it returns a
         # differently-cropped frame that no longer matches the rest of the cut.
         candidate = fal_client.edit_image(
-            [base_url] + refs, prompt, aspect_ratio=aspect, on_status=status,
+            [base_url] + edit_refs, prompt, aspect_ratio=aspect, on_status=status,
             model_id=rung["id"], seed=attempt * 1000 + scene_index, mask_url=use_mask)
         yield from drain(label)
 

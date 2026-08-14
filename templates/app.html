@@ -2243,7 +2243,15 @@ function vidRenderRecipe() {
   document.getElementById('vid-format-analysis').textContent = r.format_analysis || '';
 
   const sc = document.getElementById('vid-soundscape');
-  sc.textContent = r.soundscape ? '🌊 ' + r.soundscape : '';
+  const bits = [];
+  if (r.soundscape) bits.push('🌊 ' + r.soundscape);
+  // The reference's own caption is baked into the frames we start from; say so,
+  // because erasing it is an extra paid edit per shot.
+  if (r.overlay_mask_url && (r.overlay_boxes || []).length) {
+    bits.push(`🧽 Burned-in text found in the reference (${r.overlay_boxes.length} region(s)) — ` +
+              'it will be erased from each starting frame before animation');
+  }
+  sc.textContent = bits.join('  ·  ');
 
   // The recipe picks a voice; let it be overridden without editing the JSON.
   const vsel = document.getElementById('vid-narrator-voice');
