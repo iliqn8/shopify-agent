@@ -1878,6 +1878,11 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
         # subject / product / location frame becomes a reference for the rest,
         # so identity holds across the cut instead of being re-rolled per shot.
         locked_slots = {}
+        attempted = set()        # slots that have had at least one shot at them
+        # Anything that quietly fell back to the reference's own footage. These
+        # scroll past in the status feed and get lost, so they are collected and
+        # repeated at the end where they cannot be missed.
+        warnings = []
 
         # One continuous read sounds human; the same words rendered as separate
         # per-scene clips come out clipped and robotic, because a two-second
@@ -1922,9 +1927,18 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 # it before the swaps means no later edit has to preserve
                 # lettering that should not be in the finished video at all.
                 if overlay_mask_url and overlay_boxes:
-                    image_url = yield from _erase_overlay(
+                    erased = yield from _erase_overlay(
                         image_url, overlay_mask_url, overlay_boxes, aspect,
                         label, s["index"], status, drain)
+                    if erased == image_url:
+                        # Warned, not fatal. A caption that survives is the
+                        # defect this whole step exists to remove, but it does
+                        # not make the finished ad unusable the way the wrong
+                        # product does, and stopping here would leave no way
+                        # past a caption the models simply cannot repaint.
+                        warnings.append(
+                            f"scene {s['index']}: the reference's caption is still in the frame")
+                    image_url = erased
                 wanted = [(slot, refs) for slot, refs in swap_refs.items()
                           if refs and (slot != "product" or s.get("shows_product"))]
                 if not wanted:
@@ -1943,8 +1957,40 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                     # Only a swap that was actually accepted is worth locking:
                     # on failure `_swap_into` hands back the untouched frame,
                     # which still shows the reference's own subject.
-                    if image_url != before and slot not in locked_slots:
-                        locked_slots[slot] = image_url
+                    if image_url != before:
+                        if slot not in locked_slots:
+                            locked_slots[slot] = image_url
+                    else:
+                        first_go = slot not in attempted
+                        if first_go:
+                            # The first shot that needs a slot is the cheap
+                            # canary. If no model can do it there, none of the
+                            # remaining shots will do it either, and finishing
+                            # the run means paying for a whole video that still
+                            # advertises the reference's own product. Stop while
+                            # the loss is one shot instead of five.
+                            yield {"type": "done", "error": (
+                                f"Scene {s['index']} is the first shot that needed the "
+                                f"{SWAP_SLOTS[slot]['label']} replaced, and none of the four "
+                                f"edit models managed it — the frame still shows the "
+                                f"reference's own {SWAP_SLOTS[slot]['noun']}.\n\n"
+                                "Stopped here rather than generating the rest, because every "
+                                "later shot would have failed the same way and the finished "
+                                f"video would have been unusable. About "
+                                f"${sum(r['usd'] for r in fal_client.EDIT_LADDER):.2f} was "
+                                "spent — one shot's worth of edits, not the whole video.\n\n"
+                                "The status lines above say what each model got wrong. Usually "
+                                f"it is the {SWAP_SLOTS[slot]['noun']} photo: try one shot "
+                                "against a plain background, from a similar angle to the "
+                                "reference, with nothing else in the picture.")}
+                            return
+                        # Later shots are different: the earlier ones are paid
+                        # for and fine, and a single bad shot is repairable with
+                        # 🔧 Fix for the price of one clip.
+                        warnings.append(
+                            f"scene {s['index']}: kept the reference's own "
+                            f"{SWAP_SLOTS[slot]['noun']}")
+                    attempted.add(slot)
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
@@ -2119,10 +2165,22 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 pass
             filename = mixed
 
-        yield {"type": "status", "text": "✅ Done"}
+        if warnings:
+            # Said again at the end, and carried on the done event, because the
+            # one line that reported each of these went past forty status lines
+            # ago. A shot that kept the reference's own footage is exactly what
+            # the viewer will notice, and 🔧 Fix re-animates just that shot.
+            yield {"type": "status", "text": (
+                f"⚠️ {len(warnings)} shot(s) did not come out as asked — "
+                "use 🔧 Fix on them rather than regenerating the whole video:")}
+            for w in warnings:
+                yield {"type": "status", "text": f"   ⚠️ {w}"}
+
+        yield {"type": "status", "text": "✅ Done" + (f" (with {len(warnings)} warning(s))"
+                                                     if warnings else "")}
         yield {"type": "done", "filename": filename, "scene_urls": [c["url"] for c in clips],
                "clips": _serialisable(clips), "global_audio_url": global_audio_url,
-               "ambient_audio_url": ambient_url}
+               "ambient_audio_url": ambient_url, "warnings": warnings}
 
     except fal_client.FalError as e:
         yield {"type": "done", "error": str(e)}
