@@ -7,10 +7,18 @@ do NOT map 1:1 onto the status path, so the returned URLs are the only safe rout
 """
 
 import os
+import math
 import base64
 import time
 import mimetypes
 import requests
+
+# For the retiming tolerances only. The assembler is what actually stretches or
+# compresses a clip, so the limits live there and are imported rather than
+# copied — the clip length bought here and the retiming done there have to agree
+# or the estimate and the cut drift apart. video_assembler imports nothing from
+# here, so this does not cycle.
+import video_assembler
 
 QUEUE_BASE = "https://queue.fal.run"
 STORAGE_INITIATE = "https://rest.alpha.fal.ai/storage/upload/initiate"
@@ -269,15 +277,43 @@ def download(url, timeout=600):
 # ── Payload builders (schemas differ per model family) ─────────────────────
 
 def _billable_duration(seconds, allowed):
-    """Shortest allowed clip length that still covers the scene.
+    """Clip length to buy for a scene of this length.
 
-    Must round UP, not to the nearest: a 7s scene on a model offering 5s and
-    10s would otherwise get a 5s clip and come back two seconds short, since
-    assembly can trim a long clip but cannot invent footage for a short one.
+    Models sell fixed lengths, so the clip almost never matches the slot and
+    assembly retimes it. This picks whichever length needs the least retiming,
+    which is not always the next one up.
+
+    It used to always round up, on the grounds that assembly can trim a long
+    clip but cannot invent footage for a short one. Assembly no longer trims —
+    it retimes — and rounding up meant a 5.7s shot bought a 10s clip and then
+    played it at 1.75x, which looks like fast-forward. Buying the 5s clip and
+    easing it out by 1.14x is both less visible and cheaper.
+
+    A shorter clip is only considered when the stretch stays within
+    MAX_SLOWDOWN; otherwise the shot would visibly drag. If nothing qualifies,
+    the smallest speed-up wins and `_fit_slots_to_model` will already have
+    widened the slot so that speed-up is small.
     """
     options = sorted(allowed, key=float)
+    want = float(seconds)
+    if want <= 0:
+        return options[0]
+
+    best, best_cost = None, None
     for d in options:
-        if float(d) >= float(seconds) - 0.01:
+        have = float(d)
+        factor = have / want                    # >1 speeds up, <1 stretches
+        if factor < 1 and (1 / factor) > video_assembler.MAX_SLOWDOWN:
+            continue                            # too much drag to consider
+        cost = abs(math.log(factor))            # symmetric: 2x fast == 2x slow
+        if best_cost is None or cost < best_cost:
+            best, best_cost = d, cost
+    if best is not None:
+        return best
+
+    # Nothing within the stretch allowance: fall back to the old rule.
+    for d in options:
+        if float(d) >= want - 0.01:
             return d
     return options[-1]
 

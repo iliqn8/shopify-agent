@@ -194,7 +194,19 @@ def _download(url, dest):
 
 # Beyond this, compressing a clip to its slot stops looking like real motion
 # and starts looking sped up, so the excess is trimmed instead.
-MAX_SPEEDUP = 2.6
+# How far a generated clip may be retimed to land in its slot.
+#
+# The speed cap used to be 2.6, chosen as the point where motion stops looking
+# real. Watching an actual cut says otherwise: at 2.48x a dog swimming read as
+# fast-forward, at 1.52x it was still visibly hurried, and 1.35x passed without
+# comment. So the cap is what the eye accepts, not what the maths tolerates.
+#
+# Stretching is allowed too, and it is the more useful direction. Kling only
+# emits 5s and 10s, so a 5.7s shot used to be generated as 10s and crammed back
+# down by 1.75x; taking the 5s clip and easing it out by 1.14x is far less
+# visible than that, and cheaper.
+MAX_SPEEDUP = 1.35
+MAX_SLOWDOWN = 1.15
 
 
 def _normalise_segment(src, dest, duration, width, height, caption, voiceover_path, tmpdir, tag,
@@ -249,11 +261,15 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
     retime = ""
     if fit == "speed" and duration:
         src_dur = _probe_duration(src)
-        if src_dur and src_dur > duration + 0.05:
+        if src_dur and abs(src_dur - duration) > 0.05:
+            # One expression covers both directions: factor above 1 compresses
+            # the clip into a shorter slot, below 1 eases it out into a longer
+            # one. `_fit_slots_to_model` has already moved the slots so this
+            # lands inside the caps; anything still outside them is cut by -t
+            # rather than turned into obvious fast-forward.
             factor = src_dur / duration
-            if factor <= MAX_SPEEDUP:
+            if 1 / MAX_SLOWDOWN <= factor <= MAX_SPEEDUP:
                 retime = f"setpts=PTS/{factor:.4f},"
-            # Past the cap the clip is simply cut; -t below handles that.
 
     chain = (f"[0:v]{retime}scale={width}:{height}:force_original_aspect_ratio=increase,"
              f"crop={width}:{height},fps={FPS}")
@@ -282,10 +298,13 @@ def _normalise_segment(src, dest, duration, width, height, caption, voiceover_pa
 
 # Integrated loudness targets, LUFS. Generated ambience comes back around 9 dB
 # quieter than real phone footage, so it is normalised rather than scaled by a
-# guessed factor; under narration it sits well below it.
+# guessed factor.
 LOUDNESS_AMBIENT_ALONE = -18
-LOUDNESS_AMBIENT_UNDER_SPEECH = -28
 LOUDNESS_NARRATION = -16
+# Only reached if the sidechain duck below is unavailable. It is a whole-track
+# attenuation, which is why it is the fallback: it quietens the ambience for the
+# entire video because narration exists *somewhere* in it.
+LOUDNESS_AMBIENT_UNDER_SPEECH = -28
 
 
 def _apply_audio(video_path, tmpdir, out_path, narration_url=None, ambient_url=None):
@@ -302,40 +321,80 @@ def _apply_audio(video_path, tmpdir, out_path, narration_url=None, ambient_url=N
         return out_path
 
     video_dur = _probe_duration(video_path)
-    args = ["-y", "-i", video_path]
-    idx, parts, labels = 1, [], []
+    amb_path = (_download(ambient_url, os.path.join(tmpdir, "ambient_source.mp4"))
+                if ambient_url else None)
+    vo_path = (_download(narration_url, os.path.join(tmpdir, "narration.mp3"))
+               if narration_url else None)
 
-    if ambient_url:
-        # MMAudio hands back a video with the ambience muxed in; ffmpeg reads
-        # the audio stream straight out of it.
-        args += ["-i", _download(ambient_url, os.path.join(tmpdir, "ambient_source.mp4"))]
-        target = LOUDNESS_AMBIENT_UNDER_SPEECH if narration_url else LOUDNESS_AMBIENT_ALONE
-        parts.append(f"[{idx}:a]loudnorm=I={target}:TP=-1.5:LRA=11,apad,aresample=48000[amb]")
-        labels.append("[amb]")
-        idx += 1
+    def build(duck):
+        """Filter graph. `duck` picks dynamic sidechain over flat attenuation."""
+        args = ["-y", "-i", video_path]
+        idx, parts, labels = 1, [], []
 
-    if narration_url:
-        args += ["-i", _download(narration_url, os.path.join(tmpdir, "narration.mp3"))]
-        parts.append(f"[{idx}:a]loudnorm=I={LOUDNESS_NARRATION}:TP=-1.5:LRA=11,"
-                     f"apad,aresample=48000[vo]")
-        labels.append("[vo]")
-        idx += 1
+        if amb_path:
+            # MMAudio hands back a video with the ambience muxed in; ffmpeg
+            # reads the audio stream straight out of it.
+            args += ["-i", amb_path]
+            target = (LOUDNESS_AMBIENT_ALONE if duck or not vo_path
+                      else LOUDNESS_AMBIENT_UNDER_SPEECH)
+            parts.append(
+                f"[{idx}:a]loudnorm=I={target}:TP=-1.5:LRA=11,apad,aresample=48000[amb]")
+            labels.append("[amb]")
+            idx += 1
 
-    if len(labels) == 2:
-        # `longest` with apad on both would run forever; -t bounds the output.
-        parts.append(f"{labels[0]}{labels[1]}amix=inputs=2:duration=longest:normalize=0[a]")
-    else:
-        parts.append(f"{labels[0]}anull[a]")
+        if vo_path:
+            args += ["-i", vo_path]
+            parts.append(f"[{idx}:a]loudnorm=I={LOUDNESS_NARRATION}:TP=-1.5:LRA=11,"
+                         f"apad,aresample=48000[vo]")
+            labels.append("[vo]")
+            idx += 1
 
-    args += ["-filter_complex", ";".join(parts), "-map", "0:v:0", "-map", "[a]",
-             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
-    if video_dur:
-        args += ["-t", f"{video_dur:.3f}"]
-    args += ["-movflags", "+faststart", out_path]
+        if len(labels) == 2:
+            if duck:
+                # The ambience is pulled down only while someone is actually
+                # speaking, and comes straight back up in the gaps. Attenuating
+                # the whole track instead — which is what this used to do —
+                # silenced every shot that had no line of its own: the last
+                # scene of a five-scene cut had no narration, so there was
+                # nothing to duck under, and it simply played 10 dB too quiet.
+                # apad makes the key track silent past the last line, so the
+                # compressor stops pulling exactly when the speech stops.
+                # The key is gated first. loudnorm raises the whole narration
+                # track to -16 LUFS, and most of that track is the silence
+                # between lines, so it lifts the encoder's noise floor with it —
+                # enough to hold the compressor open for the entire video and
+                # undo the point of ducking dynamically at all. The gate puts
+                # the gaps back to true silence.
+                parts.append("[vo]asplit=2[vo_out][vo_pre]")
+                parts.append("[vo_pre]agate=threshold=0.02:ratio=20:attack=5:"
+                             "release=250[vo_key]")
+                parts.append("[amb][vo_key]sidechaincompress="
+                             "threshold=0.03:ratio=12:attack=20:release=500[amb_duck]")
+                parts.append("[amb_duck][vo_out]amix=inputs=2:duration=longest:"
+                             "normalize=0[a]")
+            else:
+                # `longest` with apad on both would run forever; -t bounds it.
+                parts.append(
+                    f"{labels[0]}{labels[1]}amix=inputs=2:duration=longest:normalize=0[a]")
+        else:
+            parts.append(f"{labels[0]}anull[a]")
 
-    code, err = _run(args)
+        args += ["-filter_complex", ";".join(parts), "-map", "0:v:0", "-map", "[a]",
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        if video_dur:
+            args += ["-t", f"{video_dur:.3f}"]
+        args += ["-movflags", "+faststart", out_path]
+        return args
+
+    # sidechaincompress is a core filter, but the static ffmpeg that ships with
+    # imageio-ffmpeg has already been caught missing one filter this pipeline
+    # assumed it had, and a build without it must not cost a finished video.
+    code, err = _run(build(duck=True))
     if code != 0 or not os.path.exists(out_path):
-        raise AssemblyError(f"ffmpeg failed muxing audio: {err[-600:]}")
+        first = err
+        code, err = _run(build(duck=False))
+        if code != 0 or not os.path.exists(out_path):
+            raise AssemblyError(f"ffmpeg failed muxing audio: {first[-400:]} / {err[-400:]}")
     return out_path
 
 

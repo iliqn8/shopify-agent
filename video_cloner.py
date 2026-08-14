@@ -1195,56 +1195,83 @@ def _fit_to_target(scenes, target):
     return round(current, 2)
 
 
-def _playable_minimum(model_key):
-    """Shortest slot a model's clip can be retimed into without being cut.
+def _playable_windows(model_key):
+    """Slot lengths a model can fill without visible retiming, as ranges.
 
-    Video models only emit fixed lengths — Kling does 5s or 10s — so a 1.3s
-    scene is generated as a 5s clip and then has to fit a 1.3s slot. Assembly
-    retimes up to MAX_SPEEDUP and cuts beyond it, so anything under
-    shortest_clip / MAX_SPEEDUP shows only the opening fraction of an action
-    that was performed over five seconds. That is why a "dog settles its head
-    onto the chin rest" scene came back as a dog that never gets there.
+    A model sells fixed clip lengths. For each length L the slots it can fill
+    honestly run from L / MAX_SPEEDUP (compressed as far as the eye allows) to
+    L * MAX_SLOWDOWN (eased out as far as the eye allows). Kling's 5s and 10s
+    give [3.7, 5.75] and [7.41, 11.5] — note the gap between them, which is
+    real: there is no way to fill a 6.5s slot from a 5s or 10s clip without
+    something looking wrong.
+
+    Returned sorted and rounded up/down inwards, so a value inside a window is
+    genuinely inside it after floating point.
     """
     spec = fal_client.VIDEO_MODELS.get(model_key) or {}
-    durations = [float(d) for d in (spec.get("durations") or [5])]
-    # Round UP: rounding 1.923 down to 1.92 leaves the ratio at 2.604, which is
-    # over the cap, so the scene would still be cut by a hair.
-    return math.ceil(min(durations) / video_assembler.MAX_SPEEDUP * 100) / 100
+    windows = []
+    for d in sorted({float(x) for x in (spec.get("durations") or [5])}):
+        lo = math.ceil(d / video_assembler.MAX_SPEEDUP * 100) / 100
+        hi = math.floor(d * video_assembler.MAX_SLOWDOWN * 100) / 100
+        if hi >= lo:
+            windows.append((lo, hi))
+    return windows or [(3.7, 5.75)]
+
+
+def _playable_minimum(model_key):
+    """Shortest slot this model can fill without the result looking retimed."""
+    return _playable_windows(model_key)[0][0]
+
+
+def _nearest_playable(duration, windows):
+    """Smallest honest slot length that is at least `duration`.
+
+    Slots only ever grow. Shrinking one to reach a nearer window would need the
+    time back from somewhere else, and every scene it came from would then be
+    wrong instead — the reference's pacing is the thing being preserved, so the
+    cut gets longer rather than differently wrong.
+    """
+    for lo, hi in windows:
+        if duration < lo:
+            return lo
+        if duration <= hi:
+            return duration
+    return windows[-1][1]
 
 
 def _fit_slots_to_model(scenes, model_key):
-    """Raise any slot too short for the model to play out, keeping total length.
+    """Widen any slot the model cannot fill without visible retiming.
 
-    Time is taken from the longest scenes, which have the most slack before the
-    pacing visibly changes. Returns a list of (index, old, new) for reporting —
-    the user should be told their 1.3s beat became 1.9s, not silently see it.
+    This used to raise only the slots that were too SHORT for the model's
+    briefest clip, and it kept the total length by taking the time back from the
+    longest scenes. Both halves were wrong.
+
+    Too-short was never the only failure: a 2.02s slot bought a 5s clip and
+    played it at 2.48x, which reads as fast-forward, and a 5.7s slot bought a
+    10s clip and played it at 1.75x. Slots between the model's clip lengths are
+    just as unplayable as slots below the shortest one.
+
+    And taking the time back from other scenes moved the problem rather than
+    fixing it — every donor scene got closer to needing a speed-up of its own.
+    The cut now grows instead, and the caller reports the new length: a longer
+    video that moves at the reference's pace is what was actually asked for,
+    where a video of exactly the requested length that fast-forwards is not.
+
+    Returns [(index, old, new)] for reporting.
     """
-    floor = _playable_minimum(model_key)
-    short = [s for s in scenes if s.get("kind") == "broll" and s["duration"] < floor]
-    if not short:
-        return []
-
-    changed = [(s["index"], s["duration"], floor) for s in short]
-    debt = round(sum(floor - s["duration"] for s in short), 2)
-    for s in short:
-        s["duration"] = floor
-
-    # Repay from the longest scenes first, never taking one below the floor.
-    for _ in range(len(scenes) * 2):
-        if debt <= 0.05:
-            break
-        donors = sorted((s for s in scenes
-                         if s["duration"] > floor and s.get("kind") == "broll"),
-                        key=lambda s: -s["duration"])
-        if not donors:
-            break
-        head = donors[0]
-        take = min(debt, round(head["duration"] - floor, 2))
-        if take <= 0:
-            break
-        head["duration"] = round(head["duration"] - take, 2)
-        debt = round(debt - take, 2)
-
+    windows = _playable_windows(model_key)
+    changed = []
+    for s in scenes:
+        if s.get("kind") != "broll":
+            continue
+        want = _nearest_playable(s["duration"], windows)
+        # Durations carry two decimals and the window edges are rounded inwards
+        # to match, so the tolerance has to be finer than one of those steps —
+        # at 0.01 a 3.70s slot counted as already inside a window that starts at
+        # 3.71, and stayed a hair over the speed cap.
+        if want > s["duration"] + 0.005:
+            changed.append((s["index"], s["duration"], want))
+            s["duration"] = want
     return changed
 
 
@@ -1743,9 +1770,16 @@ def estimate_cost(recipe, video_model=DEFAULT_VIDEO_MODEL,
     if recipe.get("overlay_mask_url") and recipe.get("overlay_boxes"):
         erase_cost = 2 * min(r["usd"] for r in fal_client.EDIT_LADDER)
 
+    # Generation widens any slot the model cannot fill honestly, which can buy a
+    # longer clip. Estimating against the un-widened recipe would quote a price
+    # the run then exceeds, so the same fitting is applied here — on copies, so
+    # the recipe the user is still reviewing is not altered behind their back.
+    scenes = [dict(s) for s in recipe.get("scenes", [])]
+    _fit_slots_to_model(scenes, video_model)
+
     fal_usd = 0.0
     avatar_usd = 0.0
-    for s in recipe.get("scenes", []):
+    for s in scenes:
         # Models only offer fixed clip lengths and bill the whole one, even
         # though assembly trims it down — a 2s scene still costs Kling's 5s
         # minimum. Same helper as generation, so the two cannot drift apart.
@@ -1802,10 +1836,22 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
         # Do this before anything is billed: a slot the model cannot play out
         # wastes the whole clip, and the fix is free if applied up front.
-        for idx, was, now in _fit_slots_to_model(scenes, video_model):
+        was_total = round(sum(s["duration"] for s in scenes), 2)
+        widened = _fit_slots_to_model(scenes, video_model)
+        for idx, was, now in widened:
             yield {"type": "status", "text": (
-                f"⏱️ Scene {idx} was {was}s — too short for {video_model} to play out "
-                f"a whole action, widened to {now}s (taken from the longest scene)")}
+                f"⏱️ Scene {idx}: {was}s → {now}s — {video_model} only makes clips of "
+                f"{', '.join(fal_client.VIDEO_MODELS[video_model]['durations'])}s, and "
+                f"{was}s could only be filled by speeding one up until it looked like "
+                "fast-forward")}
+        if widened:
+            now_total = round(sum(s["duration"] for s in scenes), 2)
+            recipe["total_duration"] = now_total
+            yield {"type": "status", "text": (
+                f"⏱️ The cut is {now_total}s rather than {was_total}s. A shorter one is "
+                f"possible only by speeding the action up, which is what made the last "
+                f"version look wrong. Seedance 2.5 takes any whole number of seconds, so "
+                f"it can hold a tighter cut — at seven times the price per second.")}
 
         product_refs = list(recipe.get("product_reference_urls") or [])
         if product_image_url and product_image_url not in product_refs:
