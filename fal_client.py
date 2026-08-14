@@ -54,6 +54,24 @@ VIDEO_MODELS = {
         "usd_per_second": 0.07,
         "note": "Same price as 2.6. Fall back here if 2.6 misreads a shot.",
     },
+    "seedance-2.5": {
+        "id": "bytedance/seedance-2.5/image-to-video",
+        "label": "Seedance 2.5 — $0.47/s (any length 4-30s, no rounding waste)",
+        # The only model here that is not sold in fixed blocks. Kling bills a 5s
+        # or 10s clip whatever the scene needs, so a 25.9s reference is billed as
+        # 40s; this one bills 30s for the same cut. That narrows the real gap a
+        # long way below the headline 7x.
+        "durations": [str(d) for d in range(4, 31)],
+        # $0.0214 per 1000 tokens, tokens = h * w * seconds * 24 / 1024. At 720p
+        # that is fal's published ~$0.4730/s. 480p would be ~$0.2205/s, which is
+        # not offered here: kling-2.5-standard already covers cheap drafting and
+        # does it at a twentieth of the price.
+        "usd_per_second": 0.4730,
+        "note": "Sharpest model available and the only one that takes a scene's "
+                "real length instead of rounding it up to a fixed block, so no "
+                "footage is retimed or cut to fit. Seven times Kling Pro per "
+                "second — a hero shot, not a test run.",
+    },
     "seedance-pro": {
         "id": "bytedance/seedance-2.0/image-to-video",
         "label": "Seedance 2.0 — $0.30/s (highest fidelity, 4x the price)",
@@ -372,7 +390,24 @@ def generate_broll(model_key, image_url, motion_prompt, seconds, aspect_ratio="9
             "negative_prompt": negative,
             "cfg_scale": 0.5,
         }
-    else:  # seedance
+    elif spec["id"].startswith("bytedance/seedance-2.5"):
+        # Takes any whole number of seconds from 4 to 30, so a scene gets a clip
+        # close to its real length rather than the next fixed block up.
+        # generate_audio defaults to TRUE, the same trap Kling 2.6 has: it bills
+        # for a track the assembler overwrites anyway.
+        # aspect_ratio is always "auto" on this model — it comes from the
+        # starting frame, which is the reference's own, so it is already right.
+        # It has no negative_prompt either, which means the burned-in captions in
+        # the reference can only be dealt with by erasing them from the frame
+        # before it gets here. See detect_overlay_regions in video_cloner.
+        payload = {
+            "prompt": motion_prompt,
+            "image_url": image_url,
+            "duration": int(float(duration)),
+            "resolution": "720p",
+            "generate_audio": False,
+        }
+    else:  # seedance 2.0
         payload = {
             "prompt": motion_prompt,
             "image_url": image_url,
