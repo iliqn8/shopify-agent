@@ -633,6 +633,12 @@
         </div>
       </div>
 
+      <!-- Model -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">MODEL</label>
+        <div id="clip-models" style="display:grid;gap:8px"></div>
+      </div>
+
       <!-- Aspect ratio -->
       <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">ASPECT RATIO</label>
@@ -641,7 +647,7 @@
       </div>
 
       <!-- Resolution -->
-      <div>
+      <div id="clip-resolution-row">
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">RESOLUTION</label>
         <div id="clip-resolutions" style="display:flex;gap:10px;flex-wrap:wrap"></div>
       </div>
@@ -651,25 +657,26 @@
         <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
           <label style="color:#aaa;font-size:12px">DURATION</label>
           <span id="clip-seconds-label" style="color:#fff;font-size:15px;font-weight:600">8s</span>
-          <span style="color:#555;font-size:11px">minimum 4s, maximum 30s</span>
+          <span id="clip-seconds-note" style="color:#555;font-size:11px"></span>
         </div>
-        <input type="range" id="clip-seconds" min="4" max="30" step="1" value="8"
-          oninput="clipSecondsChanged()"
-          style="width:100%;accent-color:#6366f1;cursor:pointer">
-        <div style="display:flex;justify-content:space-between;color:#444;font-size:10px;margin-top:2px">
-          <span>4s</span><span>10s</span><span>20s</span><span>30s</span>
+        <div id="clip-seconds-range">
+          <input type="range" id="clip-seconds" min="4" max="30" step="1" value="8"
+            oninput="clipSecondsChanged()"
+            style="width:100%;accent-color:#6366f1;cursor:pointer">
+          <div id="clip-seconds-ticks" style="display:flex;justify-content:space-between;color:#444;font-size:10px;margin-top:2px"></div>
         </div>
+        <div id="clip-seconds-choice" style="display:none;gap:8px;flex-wrap:wrap"></div>
       </div>
 
       <!-- Audio + format -->
       <div style="display:flex;gap:28px;flex-wrap:wrap">
-        <div>
+        <div id="clip-audio-row">
           <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">AUDIO</label>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="clip-audio" checked style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
             <span style="color:#ddd;font-size:13px">Generate AI audio synchronised with the video</span>
           </label>
-          <div style="color:#666;font-size:11px;margin-top:4px">Sound effects, ambience and lip-synced speech. Costs nothing extra.</div>
+          <div id="clip-audio-note" style="color:#666;font-size:11px;margin-top:4px">Sound effects, ambience and lip-synced speech.</div>
         </div>
         <div>
           <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">FORMAT</label>
@@ -2654,9 +2661,12 @@ async function vidDelete(id) {
 
 let clipOpts = null;
 let clipInited = false;
+let clipModel = null;
 let clipAspect = '16:9';
 let clipResolution = '720p';
 let clipFormat = 'mp4';
+let clipSeconds = 8;
+let clipAudioWanted = true;   // the preference, separate from what a model allows
 let clipRefUrl = null;
 // Kept so the reference can be re-cropped when the aspect ratio changes —
 // the shape of the starting frame IS the shape of the output on this model.
@@ -2694,16 +2704,120 @@ function clipDrawAspects() {
   document.getElementById('clip-aspect-note').textContent = cur ? cur.note : '';
 }
 
+function clipSpec() {
+  return (clipOpts.models || []).find(m => m.key === clipModel) || clipOpts.models[0];
+}
+
+function clipDrawModels() {
+  const wrap = document.getElementById('clip-models');
+  wrap.innerHTML = clipOpts.models.map(m => {
+    const on = m.key === clipModel;
+    let price;
+    if (m.flat_usd_per_second) {
+      const a = m.flat_usd_per_second.audio, s = m.flat_usd_per_second.silent;
+      price = a === s ? `$${s.toFixed(3)}/s` : `$${s.toFixed(3)}/s · $${a.toFixed(3)}/s with audio`;
+    } else {
+      const rates = m.resolutions.map(r => r.usd_per_second[clipAspect]);
+      price = `$${Math.min(...rates).toFixed(3)}–$${Math.max(...rates).toFixed(3)}/s`;
+    }
+    return `
+      <div onclick="clipPickModel('${m.key}')"
+           style="cursor:pointer;padding:10px 14px;border-radius:10px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};display:flex;align-items:center;gap:12px">
+        <div style="flex:1;min-width:0">
+          <div style="color:${on ? '#fff' : '#ccc'};font-size:14px;font-weight:600">
+            ${m.label}${m.recommended ? ' <span style="color:#4ade80;font-size:10px;font-weight:500">★ recommended</span>' : ''}
+          </div>
+          <div style="color:#666;font-size:11px;margin-top:2px">${m.tagline}</div>
+        </div>
+        <div style="color:#888;font-size:11px;text-align:right;white-space:nowrap">${price}</div>
+      </div>`;
+  }).join('');
+}
+
+function clipPickModel(key) {
+  clipModel = key;
+  const m = clipSpec();
+  // Carry the current choices over where the new model supports them, and fall
+  // back to its own defaults where it does not.
+  if (m.resolutions.length) {
+    if (!m.resolutions.some(r => r.key === clipResolution)) {
+      clipResolution = m.default_resolution || m.resolutions[0].key;
+    }
+  } else {
+    clipResolution = null;
+  }
+  clipDrawModels();
+  clipDrawResolutions();
+  clipDrawDuration();
+  clipDrawAudio();
+  clipUpdateCost();
+}
+
+function clipDrawAudio() {
+  const m = clipSpec();
+  const row = document.getElementById('clip-audio-row');
+  const box = document.getElementById('clip-audio');
+  row.style.display = m.audio.supported ? 'block' : 'none';
+  // Remember what was actually wanted. Switching to a model with no audio and
+  // back again should not quietly leave the clip silent.
+  box.checked = m.audio.supported ? clipAudioWanted : false;
+  document.getElementById('clip-audio-note').innerHTML = m.audio.free
+    ? 'Sound effects, ambience and lip-synced speech. Costs nothing extra.'
+    : 'Sound effects, ambience and speech. <span style="color:#fbbf24">Doubles the price on this model.</span>';
+}
+
+function clipDrawDuration() {
+  const m = clipSpec();
+  const d = m.duration;
+  const rangeBox = document.getElementById('clip-seconds-range');
+  const choiceBox = document.getElementById('clip-seconds-choice');
+  const note = document.getElementById('clip-seconds-note');
+
+  if (d.mode === 'range') {
+    rangeBox.style.display = 'block';
+    choiceBox.style.display = 'none';
+    const sl = document.getElementById('clip-seconds');
+    sl.min = d.min; sl.max = d.max;
+    if (clipSeconds < d.min) clipSeconds = d.min;
+    if (clipSeconds > d.max) clipSeconds = d.max;
+    sl.value = clipSeconds;
+    note.textContent = `minimum ${d.min}s, maximum ${d.max}s`;
+    const ticks = [d.min, Math.round(d.max / 3), Math.round(d.max * 2 / 3), d.max];
+    document.getElementById('clip-seconds-ticks').innerHTML =
+      ticks.map(t => `<span>${t}s</span>`).join('');
+  } else {
+    rangeBox.style.display = 'none';
+    choiceBox.style.display = 'flex';
+    // This model sells fixed blocks only — snap to the nearest one rather than
+    // letting a slider imply lengths it will quietly round away.
+    if (!d.values.includes(clipSeconds)) {
+      clipSeconds = d.values.reduce((best, v) =>
+        Math.abs(v - clipSeconds) < Math.abs(best - clipSeconds) ? v : best, d.values[0]);
+    }
+    choiceBox.innerHTML = d.values.map(v => `
+      <div onclick="clipPickSeconds(${v})"
+           style="cursor:pointer;padding:8px 18px;border-radius:8px;border:2px solid ${v === clipSeconds ? '#6366f1' : '#2a2a2a'};background:${v === clipSeconds ? '#1a1a2e' : '#141414'};color:${v === clipSeconds ? '#fff' : '#999'};font-size:13px;font-weight:600">${v}s</div>`).join('');
+    note.textContent = 'this model sells only these lengths';
+  }
+  document.getElementById('clip-seconds-label').textContent = clipSeconds + 's';
+}
+
+function clipPickSeconds(v) { clipSeconds = v; clipDrawDuration(); clipUpdateCost(); }
+
 function clipDrawResolutions() {
+  const m = clipSpec();
+  const row = document.getElementById('clip-resolution-row');
+  if (!m.resolutions.length) { row.style.display = 'none'; return; }
+  row.style.display = 'block';
   const wrap = document.getElementById('clip-resolutions');
-  wrap.innerHTML = clipOpts.resolutions.map(r => {
+  wrap.innerHTML = m.resolutions.map(r => {
     const per = r.usd_per_second[clipAspect] || 0;
     const on = r.key === clipResolution;
     const pricey = r.key === '1080p';
     return `
       <div onclick="clipPickResolution('${r.key}')"
            style="cursor:pointer;padding:10px 14px;border-radius:10px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};min-width:132px">
-        <div style="color:${on ? '#fff' : '#ccc'};font-size:14px;font-weight:600">${r.label}${pricey ? ' <span style="color:#fbbf24;font-size:10px">$$$</span>' : ''}</div>
+        <div style="color:${on ? '#fff' : '#ccc'};font-size:14px;font-weight:600">${r.key}${pricey ? ' <span style="color:#fbbf24;font-size:10px">$$$</span>' : ''}</div>
         <div style="color:#666;font-size:10px;margin-top:2px">${r.dimensions[clipAspect]}</div>
         <div style="color:${pricey ? '#fbbf24' : '#888'};font-size:11px;margin-top:3px">$${per.toFixed(3)}/s</div>
       </div>`;
@@ -2722,10 +2836,11 @@ function clipDrawFormats() {
 function clipPickAspect(key) {
   clipAspect = key;
   clipDrawAspects();
+  clipDrawModels();
   clipDrawResolutions();
   clipUpdateCost();
-  // The reference has to be re-cropped: on image-to-video the output shape
-  // comes from the starting frame, not from any parameter we send.
+  // The reference has to be re-cropped: on some image-to-video endpoints the
+  // output shape comes from the starting frame, not from any parameter we send.
   if (clipRefSource) clipUploadRef();
 }
 
@@ -2733,25 +2848,41 @@ function clipPickResolution(key) { clipResolution = key; clipDrawResolutions(); 
 function clipPickFormat(key) { clipFormat = key; clipDrawFormats(); clipUpdateCost(); }
 
 function clipSecondsChanged() {
-  document.getElementById('clip-seconds-label').textContent =
-    document.getElementById('clip-seconds').value + 's';
+  clipSeconds = parseInt(document.getElementById('clip-seconds').value, 10);
+  document.getElementById('clip-seconds-label').textContent = clipSeconds + 's';
   clipUpdateCost();
 }
 
 function clipUpdateCost() {
   if (!clipOpts) return;
-  const secs = parseInt(document.getElementById('clip-seconds').value, 10);
-  const r = clipOpts.resolutions.find(x => x.key === clipResolution);
-  const per = r ? (r.usd_per_second[clipAspect] || 0) : 0;
-  const total = per * secs;
-  document.getElementById('clip-cost').textContent = '≈ $' + total.toFixed(2);
+  const m = clipSpec();
+  const audio = document.getElementById('clip-audio').checked && m.audio.supported;
+  let per;
+  if (m.flat_usd_per_second) {
+    per = audio ? m.flat_usd_per_second.audio : m.flat_usd_per_second.silent;
+  } else {
+    const r = m.resolutions.find(x => x.key === clipResolution) || m.resolutions[0];
+    per = r ? (r.usd_per_second[clipAspect] || 0) : 0;
+  }
+  document.getElementById('clip-cost').textContent = '≈ $' + (per * clipSeconds).toFixed(2);
   document.getElementById('clip-summary').textContent =
-    `${secs}s · ${clipResolution} ${clipAspect} · ${clipFormat.toUpperCase()}` +
-    (document.getElementById('clip-audio').checked ? ' · with audio' : ' · silent');
+    [m.label, clipSeconds + 's', (clipResolution ? clipResolution + ' ' : '') + clipAspect,
+     clipFormat.toUpperCase(), audio ? 'with audio' : 'silent'].join(' · ');
+
+  // A model with no text-to-video endpoint cannot run without a reference.
+  const btn = document.getElementById('clip-generate-btn');
+  const blocked = !m.text_to_video && !clipRefUrl;
+  btn.disabled = blocked;
+  btn.title = blocked
+    ? m.label + ' can only animate an image — add a product photo or an image URL.'
+    : '';
 }
 
 async function clipInit() {
-  document.getElementById('clip-audio').addEventListener('change', clipUpdateCost);
+  document.getElementById('clip-audio').addEventListener('change', e => {
+    if (clipSpec().audio.supported) clipAudioWanted = e.target.checked;
+    clipUpdateCost();
+  });
   if (clipInited) { clipLoadHistory(); return; }
   clipInited = true;
   try {
@@ -2759,12 +2890,12 @@ async function clipInit() {
     clipOpts = await r.json();
     document.getElementById('clip-account').textContent = clipOpts.account_message || '';
     document.getElementById('clip-account').style.color = clipOpts.account_ok ? '#4ade80' : '#f87171';
-    const slider = document.getElementById('clip-seconds');
-    slider.min = clipOpts.min_seconds;
-    slider.max = clipOpts.max_seconds;
-    if (parseInt(slider.value, 10) < clipOpts.min_seconds) slider.value = clipOpts.min_seconds;
-    clipDrawAspects(); clipDrawResolutions(); clipDrawFormats();
-    clipSecondsChanged();
+    clipModel = clipOpts.default_model;
+    const m = clipSpec();
+    clipResolution = m.resolutions.length ? (m.default_resolution || m.resolutions[0].key) : null;
+    clipDrawAspects(); clipDrawModels(); clipDrawResolutions();
+    clipDrawDuration(); clipDrawAudio(); clipDrawFormats();
+    clipUpdateCost();
   } catch (e) {
     document.getElementById('clip-account').textContent = 'Could not load options: ' + e.message;
     document.getElementById('clip-account').style.color = '#f87171';
@@ -2892,7 +3023,8 @@ async function clipGenerate() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt,
-        seconds: parseInt(document.getElementById('clip-seconds').value, 10),
+        model: clipModel,
+        seconds: clipSeconds,
         resolution: clipResolution,
         aspect: clipAspect,
         audio: document.getElementById('clip-audio').checked,
@@ -2916,9 +3048,11 @@ async function clipGenerate() {
         dl.href = url;
         dl.setAttribute('download', ev.filename);
         document.getElementById('clip-result-meta').textContent =
-          `${ev.seconds}s · ${ev.resolution} ${ev.aspect} · ${ev.container.toUpperCase()}`
-          + (ev.audio ? ' · with audio' : ' · silent')
-          + (ev.cost ? ` · $${ev.cost.toFixed(2)}` : '');
+          [ev.model_label, ev.seconds + 's',
+           (ev.resolution ? ev.resolution + ' ' : '') + ev.aspect,
+           (ev.container || 'mp4').toUpperCase(),
+           ev.audio ? 'with audio' : 'silent',
+           ev.cost ? '$' + ev.cost.toFixed(2) : null].filter(Boolean).join(' · ');
         clipLoadHistory();
       });
   } catch (e) {
@@ -2939,7 +3073,7 @@ async function clipLoadHistory() {
     wrap.innerHTML = rows.map(c => {
       let s = {};
       try { s = JSON.parse(c.settings_json || '{}'); } catch (e) {}
-      const meta = [s.seconds ? s.seconds + 's' : null, s.resolution, s.aspect,
+      const meta = [s.model_label, s.seconds ? s.seconds + 's' : null, s.resolution, s.aspect,
                     (s.container || '').toUpperCase(), s.audio ? 'audio' : 'silent']
         .filter(Boolean).join(' · ');
       const url = c.filename ? '/generated-videos/' + c.filename : null;
@@ -2969,11 +3103,14 @@ function clipReuse(id) {
   document.getElementById('clip-prompt').value = row.prompt || '';
   try {
     const s = JSON.parse(row.settings_json || '{}');
+    // Model first: it decides which of the rest are even valid.
+    if (s.model && clipOpts.models.some(m => m.key === s.model)) clipPickModel(s.model);
     if (s.aspect) clipPickAspect(s.aspect);
     if (s.resolution) clipPickResolution(s.resolution);
     if (s.container) clipPickFormat(s.container);
-    if (s.seconds) { document.getElementById('clip-seconds').value = s.seconds; clipSecondsChanged(); }
-    if (typeof s.audio === 'boolean') document.getElementById('clip-audio').checked = s.audio;
+    if (typeof s.audio === 'boolean') clipAudioWanted = s.audio;
+    if (s.seconds) { clipSeconds = s.seconds; clipDrawDuration(); }
+    clipDrawAudio();
     clipUpdateCost();
   } catch (e) {}
   document.getElementById('clip-prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });

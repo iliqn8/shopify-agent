@@ -27,11 +27,107 @@ import requests
 import fal_client
 import video_assembler
 
-I2V_MODEL = "bytedance/seedance-2.5/image-to-video"
-T2V_MODEL = "bytedance/seedance-2.5/text-to-video"
-
 MIN_SECONDS = 4
 MAX_SECONDS = 30
+
+# ── Model registry ─────────────────────────────────────────────────────────
+# Read off each endpoint's own schema, not assumed. The models genuinely differ
+# in what they will accept, and sending a field a model does not have is not an
+# error on fal — it is accepted and silently ignored, so a wrong entry here
+# looks like the model misbehaving rather than like a bug.
+#
+#   duration      "range" takes any whole second in [min,max]; "choice" sells
+#                 only the listed lengths and anything else is rounded to one.
+#   resolutions   None means the endpoint has no resolution field at all.
+#   aspect_from_image
+#                 True when the image-to-video endpoint pins aspect_ratio to
+#                 "auto" and takes the shape from the starting frame. The
+#                 reference is cropped either way; this only decides whether the
+#                 parameter is sent.
+#   audio         supported=False hides the control; free=False means the rate
+#                 doubles with audio on, which is real money on Kling.
+#   pricing       "tokens" bills by pixel count (see USD_PER_1K_TOKENS);
+#                 "flat" is a published per-second rate.
+CLIP_MODELS = {
+    "seedance-2.5": {
+        "label": "Seedance 2.5",
+        "tagline": "Any length 4–30s · 480p/720p/1080p · free audio · sharpest",
+        "i2v": "bytedance/seedance-2.5/image-to-video",
+        "t2v": "bytedance/seedance-2.5/text-to-video",
+        "image_field": "image_url",
+        "duration": {"mode": "range", "min": 4, "max": 30},
+        "resolutions": ["480p", "720p", "1080p"],
+        "default_resolution": "720p",
+        "aspect_from_image": True,
+        "audio": {"supported": True, "free": True},
+        "pricing": {"kind": "tokens", "per_1k": {"480p": 0.0214, "720p": 0.0214, "1080p": 0.0234}},
+        "negative_prompt": False,
+        "recommended": True,
+    },
+    "kling-2.6-pro": {
+        "label": "Kling 2.6 Pro",
+        "tagline": "5s or 10s · most realistic per dollar · audio doubles the rate",
+        "i2v": "fal-ai/kling-video/v2.6/pro/image-to-video",
+        "t2v": "fal-ai/kling-video/v2.6/pro/text-to-video",
+        # 2.6 renamed this field. Sending `image_url` is accepted and ignored,
+        # which quietly downgrades the call to text-to-video.
+        "image_field": "start_image_url",
+        "duration": {"mode": "choice", "values": [5, 10]},
+        "resolutions": None,
+        "aspect_from_image": False,
+        "audio": {"supported": True, "free": False},
+        "pricing": {"kind": "flat", "usd_per_second": 0.07, "audio_multiplier": 2.0},
+        "negative_prompt": True,
+    },
+    "kling-2.5-pro": {
+        "label": "Kling 2.5 Turbo Pro",
+        "tagline": "5s or 10s · same price as 2.6 · no audio on this endpoint",
+        "i2v": "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
+        "t2v": "fal-ai/kling-video/v2.5-turbo/pro/text-to-video",
+        "image_field": "image_url",
+        "duration": {"mode": "choice", "values": [5, 10]},
+        "resolutions": None,
+        "aspect_from_image": False,
+        "audio": {"supported": False, "free": True},
+        "pricing": {"kind": "flat", "usd_per_second": 0.07},
+        "negative_prompt": True,
+    },
+    "seedance-2.0": {
+        "label": "Seedance 2.0",
+        "tagline": "4–12s · finest detail · four times Kling",
+        "i2v": "bytedance/seedance-2.0/image-to-video",
+        "t2v": None,
+        "image_field": "image_url",
+        "duration": {"mode": "choice", "values": [4, 6, 8, 10, 12]},
+        "resolutions": ["480p", "720p", "1080p"],
+        "default_resolution": "720p",
+        "aspect_from_image": True,
+        "audio": {"supported": False, "free": True},
+        # $0.3034/s at 720p 16:9 works back to this rate through the same
+        # token formula, so 1080p scales correctly instead of being guessed.
+        "pricing": {"kind": "tokens", "per_1k": {"480p": 0.01404, "720p": 0.01404, "1080p": 0.01404}},
+        "negative_prompt": False,
+    },
+    "kling-2.5-standard": {
+        "label": "Kling 2.5 Standard",
+        "tagline": "5s or 10s · cheapest · visibly weaker, good for drafts",
+        "i2v": "fal-ai/kling-video/v2.5-turbo/standard/image-to-video",
+        "t2v": "fal-ai/kling-video/v2.5-turbo/standard/text-to-video",
+        "image_field": "image_url",
+        "duration": {"mode": "choice", "values": [5, 10]},
+        "resolutions": None,
+        "aspect_from_image": False,
+        "audio": {"supported": False, "free": True},
+        "pricing": {"kind": "flat", "usd_per_second": 0.042},
+        "negative_prompt": True,
+    },
+}
+
+DEFAULT_MODEL = "seedance-2.5"
+
+
+def model_spec(key):
+    return CLIP_MODELS.get(key) or CLIP_MODELS[DEFAULT_MODEL]
 
 # A resolution label fixes the PIXEL COUNT, not the short edge. Asking for 480p
 # at 1:1 returned a 640x640 clip, not 480x480 — and 640x640 is 409,600 pixels
@@ -54,13 +150,12 @@ FORMATS = {
     "mov": {"label": "MOV", "note": "For Premiere / Final Cut / After Effects"},
 }
 
-# fal bills tokens = height * width * seconds * 24 / 1024, at $0.0214 per 1000
-# tokens for 480p and 720p and $0.0234 for 1080p. Their published per-second
-# figures for 16:9 (~$0.2205 at 480p, ~$0.4730 at 720p) come out a few percent
-# above what the formula gives for exactly 854x480 and 1280x720, so they round
-# the frame up somewhere. The estimate carries that margin rather than
-# understating the bill.
-USD_PER_1K_TOKENS = {"480p": 0.0214, "720p": 0.0214, "1080p": 0.0234}
+# The token-priced models bill tokens = height * width * seconds * 24 / 1024,
+# times a per-1000 rate that lives in each model's `pricing` entry. fal's
+# published per-second figures for Seedance 2.5 at 16:9 (~$0.2205 at 480p,
+# ~$0.4730 at 720p) come out a few percent above what the formula gives for
+# exactly 854x480 and 1280x720, so they round the frame up somewhere. The
+# estimate carries that margin rather than understating the bill.
 ESTIMATE_MARGIN = 1.08
 
 
@@ -85,45 +180,130 @@ def dimensions(resolution, aspect):
     return long_edge, short              # 16:9
 
 
-def usd_per_second(resolution="720p", aspect="16:9"):
-    """Price of one generated second in this shape. Not clamped — a rate, not a clip."""
+def usd_per_second(model=DEFAULT_MODEL, resolution="720p", aspect="16:9", audio=True):
+    """Price of one generated second. Not clamped — a rate, not a clip."""
+    spec = model_spec(model)
+    pricing = spec["pricing"]
+    if pricing["kind"] == "flat":
+        rate = pricing["usd_per_second"]
+        if audio and spec["audio"]["supported"] and not spec["audio"]["free"]:
+            rate *= pricing.get("audio_multiplier", 1.0)
+        return round(rate, 4)
+
     w, h = dimensions(resolution, aspect)
-    rate = USD_PER_1K_TOKENS.get(resolution, 0.0214)
-    return round((w * h * 24) / 1024 / 1000 * rate * ESTIMATE_MARGIN, 4)
+    per_1k = pricing["per_1k"].get(resolution, list(pricing["per_1k"].values())[0])
+    return round((w * h * 24) / 1024 / 1000 * per_1k * ESTIMATE_MARGIN, 4)
 
 
-def clamp_seconds(seconds):
-    try:
-        seconds = int(round(float(seconds)))
-    except (TypeError, ValueError):
-        seconds = MIN_SECONDS
-    return max(MIN_SECONDS, min(MAX_SECONDS, seconds))
+def clamp_seconds(seconds, model=DEFAULT_MODEL):
+    """The length this model will actually sell, nearest to what was asked.
 
-
-def estimate_cost(seconds, resolution="720p", aspect="16:9"):
-    """What this clip will cost, in USD. Same formula fal bills on.
-
-    Keep this separate from `usd_per_second`: this one clamps to a length the
-    model will actually sell, and multiplying a clamped 1 by a per-second rate
-    is not the same thing as the rate itself.
+    Models that sell fixed blocks are the reason this exists: asking Kling for
+    23 seconds and being handed 10 without a word is exactly the kind of silent
+    mismatch that makes a clip look broken rather than mispriced.
     """
-    return round(usd_per_second(resolution, aspect) * clamp_seconds(seconds), 4)
+    spec = model_spec(model)
+    try:
+        want = float(seconds)
+    except (TypeError, ValueError):
+        want = MIN_SECONDS
+
+    d = spec["duration"]
+    if d["mode"] == "choice":
+        return min(d["values"], key=lambda v: (abs(v - want), v))
+    return max(d["min"], min(d["max"], int(round(want))))
+
+
+def estimate_cost(seconds, resolution="720p", aspect="16:9",
+                  model=DEFAULT_MODEL, audio=True):
+    """What this clip will cost, in USD, at the length the model will sell.
+
+    Keep this separate from `usd_per_second`: this one clamps, and multiplying a
+    clamped 1 by a per-second rate is not the same thing as the rate itself.
+    """
+    return round(usd_per_second(model, resolution, aspect, audio)
+                 * clamp_seconds(seconds, model), 4)
+
+
+def normalise(model=DEFAULT_MODEL, resolution=None, aspect="16:9",
+              audio=True, container="mp4", seconds=MIN_SECONDS, has_image=False):
+    """Settle every setting against what the chosen model actually supports.
+
+    One place, used by both the estimate and the generation, so the price quoted
+    is the price of the clip that gets made.
+    """
+    key = model if model in CLIP_MODELS else DEFAULT_MODEL
+    spec = CLIP_MODELS[key]
+
+    if spec["resolutions"]:
+        resolution = resolution if resolution in spec["resolutions"] else \
+            spec.get("default_resolution", spec["resolutions"][0])
+    else:
+        resolution = None
+
+    audio = bool(audio) and spec["audio"]["supported"]
+    if not has_image and not spec["t2v"]:
+        # Nothing to animate and no text-to-video endpoint to fall back on.
+        raise ClipError(
+            f"{spec['label']} can only animate an image. Add a product photo or an "
+            "image URL, or pick a model that generates from text alone.")
+
+    return {
+        "model": key,
+        "spec": spec,
+        "resolution": resolution,
+        "aspect": aspect if aspect in ASPECTS else "16:9",
+        "audio": audio,
+        "container": container if container in FORMATS else "mp4",
+        "seconds": clamp_seconds(seconds, key),
+    }
 
 
 def options():
-    """Everything the UI needs to draw the form, priced from one place."""
+    """Everything the UI needs to draw the form, priced from one place.
+
+    Each model carries its own capabilities so the controls can follow the
+    choice: a model that sells only 5s and 10s should not be offered a slider,
+    and one with no resolution field should not be shown resolutions.
+    """
+    models = []
+    for key, spec in CLIP_MODELS.items():
+        res = spec["resolutions"]
+        models.append({
+            "key": key,
+            "label": spec["label"],
+            "tagline": spec["tagline"],
+            "recommended": spec.get("recommended", False),
+            "duration": spec["duration"],
+            "resolutions": [
+                {"key": r,
+                 "dimensions": {a: "%dx%d" % dimensions(r, a) for a in ASPECTS},
+                 "usd_per_second": {a: usd_per_second(key, r, a, True) for a in ASPECTS}}
+                for r in (res or [])
+            ],
+            "default_resolution": spec.get("default_resolution"),
+            # With no resolution field the rate is flat, so the UI still needs a
+            # number to multiply by. Quote it both ways where audio moves it.
+            "flat_usd_per_second": None if res else {
+                "audio": usd_per_second(key, None, "16:9", True),
+                "silent": usd_per_second(key, None, "16:9", False),
+            },
+            "audio": spec["audio"],
+            "text_to_video": bool(spec["t2v"]),
+            "aspect_from_image": spec["aspect_from_image"],
+        })
+    # Deliberate order, not alphabetical: best first, draft-quality last.
+    # Sorting by label put "Kling 2.5 Standard — visibly weaker" second.
+    rank = {k: i for i, k in enumerate(
+        ("seedance-2.5", "kling-2.6-pro", "kling-2.5-pro",
+         "seedance-2.0", "kling-2.5-standard"))}
+    models.sort(key=lambda m: rank.get(m["key"], 99))
+
     return {
+        "models": models,
+        "default_model": DEFAULT_MODEL,
         "aspects": [{"key": k, **v} for k, v in ASPECTS.items()],
         "formats": [{"key": k, **v} for k, v in FORMATS.items()],
-        "resolutions": [
-            {"key": r,
-             "label": r,
-             "dimensions": {a: "%dx%d" % dimensions(r, a) for a in ASPECTS},
-             # Per shape, because billing is by pixel count: a square 1080p
-             # frame is genuinely cheaper than a 16:9 one with the same label.
-             "usd_per_second": {a: usd_per_second(r, a) for a in ASPECTS}}
-            for r in ("480p", "720p", "1080p")
-        ],
         "min_seconds": MIN_SECONDS,
         "max_seconds": MAX_SECONDS,
     }
@@ -236,21 +416,62 @@ def save_output(video_url, prompt, container="mp4", output_dir=None):
 
 # ── Generation ─────────────────────────────────────────────────────────────
 
+NEGATIVE_PROMPT = "blur, distort, low quality, text, watermark, warped hands"
+
+
+def build_payload(spec, prompt, seconds, resolution, aspect, audio, image_url):
+    """The request body for one model. Kept apart so it can be tested unpaid.
+
+    Every difference here came from that endpoint's own schema. Sending a field
+    a model does not have is not rejected by fal — it is ignored — so a mistake
+    here is invisible until the output is wrong.
+    """
+    payload = {"prompt": prompt}
+
+    if image_url:
+        payload[spec["image_field"]] = image_url
+
+    # Kling wants the length as a string; Seedance wants a number.
+    payload["duration"] = str(seconds) if spec["pricing"]["kind"] == "flat" else int(seconds)
+
+    if spec["resolutions"] and resolution:
+        payload["resolution"] = resolution
+
+    # Only send the ratio where the endpoint honours it. Seedance's
+    # image-to-video pins it to "auto" and takes the shape from the frame, which
+    # is why the reference is cropped before upload either way.
+    if not (image_url and spec["aspect_from_image"]):
+        payload["aspect_ratio"] = aspect
+
+    if spec["audio"]["supported"]:
+        payload["generate_audio"] = bool(audio)
+
+    if spec["negative_prompt"]:
+        payload["negative_prompt"] = NEGATIVE_PROMPT
+
+    return payload
+
+
 def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
-                    audio=True, container="mp4", image_url=None):
+                    audio=True, container="mp4", image_url=None,
+                    model=DEFAULT_MODEL):
     """Make one clip. Yields {"type": "status"|"done"} events."""
     prompt = (prompt or "").strip()
     if not prompt:
         yield {"type": "done", "error": "Write a prompt first — it is the whole instruction."}
         return
 
-    seconds = clamp_seconds(seconds)
-    resolution = resolution if resolution in SHORT_EDGE else "720p"
-    aspect = aspect if aspect in ASPECTS else "16:9"
-    container = container if container in FORMATS else "mp4"
+    try:
+        s = normalise(model=model, resolution=resolution, aspect=aspect, audio=audio,
+                      container=container, seconds=seconds, has_image=bool(image_url))
+    except ClipError as e:
+        yield {"type": "done", "error": str(e)}
+        return
 
-    w, h = dimensions(resolution, aspect)
-    cost = estimate_cost(seconds, resolution, aspect)
+    spec = s["spec"]
+    seconds, resolution, aspect = s["seconds"], s["resolution"], s["aspect"]
+    audio, container = s["audio"], s["container"]
+    cost = estimate_cost(seconds, resolution, aspect, s["model"], audio)
 
     try:
         pending = []
@@ -262,32 +483,17 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
             while pending:
                 yield {"type": "status", "text": "   " + pending.pop(0)}
 
+        shape = f"{resolution} {aspect} (%d×%d)" % dimensions(resolution, aspect) \
+            if resolution else aspect
         yield {"type": "status", "text": (
-            f"🎞️ {seconds}s · {resolution} {aspect} ({w}×{h}) · "
+            f"🎞️ {spec['label']} · {seconds}s · {shape} · "
             f"{'with audio' if audio else 'silent'} · ≈${cost:.2f}")}
 
-        if image_url:
-            # aspect_ratio is not a parameter here — the reference frame was
-            # cropped to the chosen ratio on the way in, and the output follows it.
-            model_id = I2V_MODEL
-            payload = {
-                "prompt": prompt,
-                "image_url": image_url,
-                "duration": seconds,
-                "resolution": resolution,
-                "generate_audio": bool(audio),
-            }
-            yield {"type": "status", "text": "🖼️ Animating your reference image…"}
-        else:
-            model_id = T2V_MODEL
-            payload = {
-                "prompt": prompt,
-                "duration": seconds,
-                "resolution": resolution,
-                "aspect_ratio": aspect,
-                "generate_audio": bool(audio),
-            }
-            yield {"type": "status", "text": "✨ Generating from the prompt alone…"}
+        model_id = spec["i2v"] if image_url else spec["t2v"]
+        payload = build_payload(spec, prompt, seconds, resolution, aspect, audio, image_url)
+        yield {"type": "status", "text": (
+            "🖼️ Animating your reference image…" if image_url
+            else "✨ Generating from the prompt alone…")}
 
         out = fal_client.run(model_id, payload, on_status=status, timeout=1800)
         yield from drain()
@@ -304,7 +510,8 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
         yield {"type": "status", "text": "✅ Done"}
         yield {"type": "done", "filename": filename, "video_url": url,
                "cost": cost, "seconds": seconds, "resolution": resolution,
-               "aspect": aspect, "audio": bool(audio), "container": container}
+               "aspect": aspect, "audio": bool(audio), "container": container,
+               "model": s["model"], "model_label": spec["label"]}
 
     except fal_client.FalError as e:
         yield {"type": "done", "error": str(e)}

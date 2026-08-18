@@ -1063,10 +1063,17 @@ def clip_options():
 def clip_estimate():
     import clip_studio
     d = request.json or {}
-    return jsonify({"usd": clip_studio.estimate_cost(
-        d.get("seconds") or clip_studio.MIN_SECONDS,
-        d.get("resolution") or "720p",
-        d.get("aspect") or "16:9")})
+    model = d.get("model") or clip_studio.DEFAULT_MODEL
+    seconds = clip_studio.clamp_seconds(
+        d.get("seconds") or clip_studio.MIN_SECONDS, model)
+    return jsonify({
+        # The clamped length is returned too: the model may not sell what was
+        # asked for, and the quote has to be for the clip that would be made.
+        "seconds": seconds,
+        "usd": clip_studio.estimate_cost(
+            seconds, d.get("resolution"), d.get("aspect") or "16:9",
+            model, bool(d.get("audio", True))),
+    })
 
 
 @app.route("/api/clip-reference", methods=["POST"])
@@ -1106,8 +1113,9 @@ def clip_generate_start():
         return jsonify({"error": "Write a prompt first."}), 400
 
     settings = {
+        "model": d.get("model") or clip_studio.DEFAULT_MODEL,
         "seconds": d.get("seconds") or clip_studio.MIN_SECONDS,
-        "resolution": d.get("resolution") or "720p",
+        "resolution": d.get("resolution"),
         "aspect": d.get("aspect") or "16:9",
         "audio": bool(d.get("audio", True)),
         "container": d.get("container") or "mp4",
@@ -1120,8 +1128,12 @@ def clip_generate_start():
         for event in clip_studio.generate_stream(prompt, **settings):
             if event.get("type") == "done" and event.get("filename"):
                 try:
-                    kb.save_studio_clip(prompt, _json_c.dumps(
-                        {k: v for k, v in settings.items() if k != "image_url"}),
+                    # Record what was actually made, not what was asked for —
+                    # the model may sell a different length than the one typed.
+                    kb.save_studio_clip(prompt, _json_c.dumps({
+                        k: event.get(k) for k in
+                        ("model", "model_label", "seconds", "resolution",
+                         "aspect", "audio", "container", "cost")}),
                         event["filename"])
                 except Exception:
                     pass          # a history row is not worth losing the clip over
