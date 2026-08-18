@@ -1,5 +1,8 @@
 flask
-anthropic
+# Floor, not a pin: the Clip Studio prompt writer passes `output_config` to
+# messages.stream(), which older clients reject with a TypeError. Unpinned, a
+# stale resolve would break the writer in production and nowhere else.
+anthropic>=0.86.0
 requests
 python-dotenv
 Pillow
