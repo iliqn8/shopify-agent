@@ -378,6 +378,60 @@ def prepare_reference(raw, aspect):
     return fal_client.upload_bytes(data, "clip_reference.jpg", ctype)
 
 
+# ── Images for the prompt writer ───────────────────────────────────────────
+# These are a different thing from the product reference above. That one is
+# uploaded to fal and becomes the clip's first frame; these are shown to Claude
+# so it can see what the user means and write the prompt from it. A photo can be
+# used for both, but the two paths are separate on purpose.
+
+MAX_IDEA_IMAGES = 4
+
+# Claude Opus 5 accepts up to 2576px on the long edge and downscales anything
+# larger itself, so capping here costs no fidelity the model would have used —
+# it just avoids pushing megabytes through the browser and the API for pixels
+# that get thrown away.
+IDEA_IMAGE_MAX_EDGE = 2576
+IDEA_THUMB_EDGE = 160
+
+
+def prepare_idea_image(raw):
+    """Ready one uploaded photo for the prompt writer.
+
+    Returns {"b64", "media_type", "thumb"} — the full image for Claude, and a
+    small data URI so the browser can show a preview without holding the
+    original in memory.
+    """
+    import cv2
+    import numpy as np
+    import base64
+
+    arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if arr is None:
+        raise ClipError("That image could not be read. Use a JPEG, PNG or WebP.")
+
+    def encode(img, quality):
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if not ok:
+            raise ClipError("Could not re-encode that image.")
+        return buf.tobytes()
+
+    def fit(img, edge):
+        h, w = img.shape[:2]
+        if max(h, w) <= edge:
+            return img
+        scale = edge / max(h, w)
+        return cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                          interpolation=cv2.INTER_AREA)
+
+    full = encode(fit(arr, IDEA_IMAGE_MAX_EDGE), 88)
+    thumb = encode(fit(arr, IDEA_THUMB_EDGE), 72)
+    return {
+        "b64": base64.b64encode(full).decode(),
+        "media_type": "image/jpeg",
+        "thumb": "data:image/jpeg;base64," + base64.b64encode(thumb).decode(),
+    }
+
+
 # ── Output ─────────────────────────────────────────────────────────────────
 
 def _safe_stem(prompt):
@@ -471,7 +525,24 @@ at arm's length. Square 1:1 is tight — keep the subject central and lose the w
 16:9 has room for the subject and its surroundings, so the setting can do real work.
 
 Never mention the aspect ratio, the resolution, the duration, or the model's name inside the prompt
-itself. Those are settings, sent separately. Let them shape what you describe, not what you say."""
+itself. Those are settings, sent separately. Let them shape what you describe, not what you say.
+
+WHEN PHOTOS ARE ATTACHED
+
+The user attaches photos to show you what their words cannot. Read them and write from what you
+actually see — the real colour, material, shape, markings, proportions, the light, the place. This
+is the whole point of them: "a bright orange foam vest with black webbing straps and a grab handle"
+beats "a life jacket", and you can only write the first if you looked.
+
+Describe what is in the photo, not the photograph. The user wants the thing, not its snapshot — so
+no "product shot on a white background", no "as pictured", no mention of a studio backdrop or a
+phone camera unless the clip is genuinely meant to be set there. If the photo is a plain catalogue
+shot of a product, take the product's appearance from it and put that product into the scene the
+user described.
+
+The user's words outrank the photos wherever the two disagree. The photos tell you what things look
+like; the words tell you what should happen. If they attach a photo of a jacket on a table and ask
+for a dog wearing it in a pool, write the pool."""
 
 PROMPT_WRITER_SCHEMA = {
     "type": "object",
@@ -492,9 +563,18 @@ PROMPT_WRITER_SCHEMA = {
 }
 
 
-def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9", has_image=False):
+def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
+                  has_image=False, n_photos=0):
     spec = model_spec(model)
-    lines = [
+    lines = []
+    if n_photos:
+        lines += [
+            f"The {n_photos} photo(s) above were attached by the user to show you what they mean. "
+            "Read them and write from what you actually see in them — real colours, materials, "
+            "shapes and markings, not guesses.",
+            "",
+        ]
+    lines += [
         "THE IDEA, in the user's own words:",
         idea.strip(),
         "",
@@ -506,20 +586,26 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9", has_image
     if has_image:
         lines += [
             "",
-            "THEY HAVE ATTACHED A REFERENCE PHOTO OF THEIR PRODUCT, and it becomes the clip's "
-            "first frame. So the subject, the product, the composition and the setting are already "
-            "fixed by that photograph — do not invent them and do not describe the product's own "
-            "appearance, colour or markings. Write about what MOVES and what CHANGES from that "
-            "frame onward: the action, the camera, the light shifting, what enters or leaves. Where "
-            "you must refer to the product, do it generically ('the bottle', 'the jacket') so your "
-            "words cannot contradict the photo.",
+            "SEPARATELY, THEY HAVE SET A PRODUCT REFERENCE THAT BECOMES THE CLIP'S FIRST FRAME. "
+            "(It is not shown to you here.) So the subject, the product, the composition and the "
+            "setting are already fixed by that frame — do not invent them and do not describe the "
+            "product's own appearance, colour or markings, even if a photo above shows them. Write "
+            "about what MOVES and what CHANGES from that frame onward: the action, the camera, the "
+            "light shifting, what enters or leaves. Where you must refer to the product, do it "
+            "generically ('the bottle', 'the jacket') so your words cannot contradict the frame."
+            + (" Use the photos above only for the action, mood and setting you are asked to add."
+               if n_photos else ""),
         ]
     else:
         lines += [
             "",
-            "THERE IS NO REFERENCE PHOTO — the model builds the whole shot from your words alone. "
-            "Describe the subject, the setting and the light as well as the motion, because nothing "
-            "else establishes them.",
+            "THERE IS NO FIRST-FRAME REFERENCE — the model builds the whole shot from your words "
+            "alone. Describe the subject, the setting and the light as well as the motion, because "
+            "nothing else establishes them."
+            + (" This is exactly where the attached photos earn their place: take the real "
+               "appearance of what they show and put it into your description, so the model renders "
+               "the user's actual product rather than a generic stand-in."
+               if n_photos else ""),
         ]
     if spec["audio"]["supported"]:
         lines += [
@@ -550,11 +636,36 @@ def _is_transient(exc):
 WRITER_ATTEMPTS = 3
 
 
+def _writer_content(idea, model, seconds, aspect, has_image, photos):
+    """The user turn: the photos first, then the brief.
+
+    Images go before the text they relate to — the model reads the block order,
+    and a brief that says "the photos above" has to actually follow them.
+    """
+    content = []
+    for i, img in enumerate(photos, start=1):
+        content.append({"type": "text", "text": f"PHOTO {i} FROM THE USER:"})
+        content.append({"type": "image", "source": {
+            "type": "base64",
+            "media_type": img.get("media_type") or "image/jpeg",
+            "data": img["b64"],
+        }})
+    content.append({"type": "text", "text": _writer_brief(
+        idea, model, seconds, aspect, has_image, n_photos=len(photos))})
+    return content
+
+
 def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
-                        has_image=False):
-    """Turn a one-line idea into a finished video prompt. Yields status events."""
+                        has_image=False, photos=None):
+    """Turn a one-line idea into a finished video prompt. Yields status events.
+
+    `photos` are shown to Claude so it can write from what the user's product
+    actually looks like. They are not the clip's first frame — that is the
+    separate product reference, and `has_image` says whether one is set.
+    """
     idea = (idea or "").strip()
-    if not idea:
+    photos = [p for p in (photos or []) if p and p.get("b64")][:MAX_IDEA_IMAGES]
+    if not idea and not photos:
         yield {"type": "done", "error": "Describe your idea first, even in one line."}
         return
 
@@ -562,7 +673,9 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         spec = model_spec(model)
         yield {"type": "status", "text": (
             f"✍️ Writing a {clamp_seconds(seconds, model)}s {aspect} prompt for "
-            f"{spec['label']}{' from your reference photo' if has_image else ''}…")}
+            f"{spec['label']}"
+            + (f", reading your {len(photos)} photo(s)" if photos else "")
+            + (" (a first frame is set)" if has_image else "") + "…")}
 
         message = None
         for attempt in range(1, WRITER_ATTEMPTS + 1):
@@ -580,8 +693,8 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
                         "effort": "medium",
                         "format": {"type": "json_schema", "schema": PROMPT_WRITER_SCHEMA},
                     },
-                    messages=[{"role": "user", "content": _writer_brief(
-                        idea, model, seconds, aspect, has_image)}],
+                    messages=[{"role": "user", "content": _writer_content(
+                        idea, model, seconds, aspect, has_image, photos)}],
                 ) as stream:
                     message = stream.get_final_message()
                 break

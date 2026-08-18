@@ -1101,16 +1101,37 @@ def clip_reference():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/api/clip-idea-image", methods=["POST"])
+def clip_idea_image():
+    """Prepare a photo for the prompt writer to look at.
+
+    Distinct from /api/clip-reference: that one crops and uploads to fal to be
+    the clip's first frame, this one just gets bytes into a shape Claude can
+    read. A user may well use the same photo for both.
+    """
+    import clip_studio
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file"}), 400
+    try:
+        return jsonify(clip_studio.prepare_idea_image(f.read()))
+    except clip_studio.ClipError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/api/clip-write-prompt", methods=["POST"])
 def clip_write_prompt():
-    """Turn a one-line idea into a video prompt. Polls on the shared video job."""
+    """Turn an idea (and any photos) into a video prompt, on the shared job queue."""
     import uuid as _uuid_w
     import clip_studio
 
     d = request.json or {}
     idea = (d.get("idea") or "").strip()
-    if not idea:
-        return jsonify({"error": "Describe your idea first."}), 400
+    photos = d.get("photos") or []
+    if not idea and not photos:
+        return jsonify({"error": "Describe your idea, or attach a photo."}), 400
 
     job_id = str(_uuid_w.uuid4())
     _run_video_job(job_id, lambda: clip_studio.write_prompt_stream(
@@ -1119,6 +1140,7 @@ def clip_write_prompt():
         seconds=d.get("seconds") or clip_studio.MIN_SECONDS,
         aspect=d.get("aspect") or "16:9",
         has_image=bool(d.get("has_image")),
+        photos=photos,
     ))
     return jsonify({"job_id": job_id})
 

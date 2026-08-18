@@ -607,9 +607,16 @@
         </label>
         <textarea id="clip-idea" rows="2" placeholder="e.g. my dog jumping into a pool wearing the life jacket, sunny afternoon"
           style="width:100%;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+
+        <input type="file" id="clip-idea-files" accept="image/*" multiple style="display:none" onchange="clipAddIdeaPhotos(this)">
+        <div id="clip-idea-thumbs" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
+
         <div style="display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap">
           <button class="btn-sm" id="clip-write-btn" onclick="clipWritePrompt()"
             style="border-color:#6366f1;color:#c7d2fe">✨ Write my prompt</button>
+          <button class="btn-sm" onclick="document.getElementById('clip-idea-files').click()"
+            title="Claude looks at these to see what your product really looks like">📷 Add photos</button>
+          <span id="clip-idea-photo-status" style="color:#666;font-size:11px">Claude will read any photos you add</span>
           <span id="clip-write-status" style="color:#666;font-size:11px"></span>
         </div>
       </div>
@@ -2973,9 +2980,71 @@ function clipClearRef() {
 
 // ── Idea → prompt ──
 
+// Photos Claude reads to write the prompt. Not the same thing as clipRefUrl,
+// which is the clip's first frame — the same picture can be used for both.
+let clipIdeaPhotos = [];   // [{b64, media_type, thumb}]
+const CLIP_MAX_IDEA_PHOTOS = 4;
+
+function clipDrawIdeaPhotos() {
+  const wrap = document.getElementById('clip-idea-thumbs');
+  wrap.innerHTML = clipIdeaPhotos.map((p, i) => `
+    <div style="position:relative">
+      <img src="${p.thumb}" style="height:58px;border-radius:6px;display:block;border:1px solid #2a2a3a">
+      <button onclick="clipRemoveIdeaPhoto(${i})" title="Remove"
+        style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
+    </div>`).join('');
+  const s = document.getElementById('clip-idea-photo-status');
+  s.textContent = clipIdeaPhotos.length
+    ? `${clipIdeaPhotos.length} photo(s) — Claude will read ${clipIdeaPhotos.length > 1 ? 'them' : 'it'}`
+    : 'Claude will read any photos you add';
+  s.style.color = clipIdeaPhotos.length ? '#4ade80' : '#666';
+}
+
+function clipRemoveIdeaPhoto(i) { clipIdeaPhotos.splice(i, 1); clipDrawIdeaPhotos(); }
+
+async function clipAddIdeaPhotos(input) {
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (!files.length) return;
+  const status = document.getElementById('clip-idea-photo-status');
+
+  const room = CLIP_MAX_IDEA_PHOTOS - clipIdeaPhotos.length;
+  if (room <= 0) {
+    status.style.color = '#fbbf24';
+    status.textContent = `That's the limit — ${CLIP_MAX_IDEA_PHOTOS} photos max`;
+    return;
+  }
+
+  status.style.color = '#8ab4f8';
+  status.textContent = 'Reading…';
+  for (const f of files.slice(0, room)) {
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const r = await fetch('/api/clip-idea-image', { method: 'POST', body: fd });
+      const d = await vidJson(r);
+      if (d.error) throw new Error(d.error);
+      clipIdeaPhotos.push(d);
+    } catch (e) {
+      status.style.color = '#f87171';
+      status.textContent = '❌ ' + e.message;
+      clipDrawIdeaPhotos();
+      return;
+    }
+  }
+  clipDrawIdeaPhotos();
+  if (files.length > room) {
+    status.style.color = '#fbbf24';
+    status.textContent = `Kept ${room} — ${CLIP_MAX_IDEA_PHOTOS} photos max`;
+  }
+}
+
 async function clipWritePrompt() {
   const idea = document.getElementById('clip-idea').value.trim();
-  if (!idea) { alert('Describe your idea first, even in one line.'); return; }
+  if (!idea && !clipIdeaPhotos.length) {
+    alert('Describe your idea, or attach a photo.');
+    return;
+  }
 
   const btn = document.getElementById('clip-write-btn');
   const status = document.getElementById('clip-write-status');
@@ -2996,6 +3065,8 @@ async function clipWritePrompt() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idea,
+        // Claude reads these to see what the product really looks like.
+        photos: clipIdeaPhotos.map(p => ({ b64: p.b64, media_type: p.media_type })),
         // The writer tailors the prompt to these, so send what is set right now.
         model: clipModel,
         seconds: clipSeconds,
