@@ -531,6 +531,25 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9", has_image
     return "\n".join(lines)
 
 
+def _is_transient(exc):
+    """Is this worth trying again in a few seconds?
+
+    Anthropic reports an overload that lands *mid-stream* with the HTTP status
+    already sent as 200, so `status_code` says 200 and only the error body says
+    what happened — which is how a busy minute produced the useless message
+    "Claude API error 200". Match on the error type in the body, then fall back
+    to the status code for failures that happen before the stream opens.
+    """
+    body = str(getattr(exc, "body", "") or "") + " " + str(exc)
+    if "overloaded_error" in body or "rate_limit_error" in body:
+        return True
+    code = getattr(exc, "status_code", None)
+    return code in (408, 409, 429, 500, 502, 503, 504, 529)
+
+
+WRITER_ATTEMPTS = 3
+
+
 def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
                         has_image=False):
     """Turn a one-line idea into a finished video prompt. Yields status events."""
@@ -545,22 +564,38 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
             f"✍️ Writing a {clamp_seconds(seconds, model)}s {aspect} prompt for "
             f"{spec['label']}{' from your reference photo' if has_image else ''}…")}
 
-        # Streaming so a long think cannot hit the request timeout; structured
-        # output so the result drops straight into the prompt box without a
-        # "Here's your prompt:" preamble to strip. Prefill would have been the
-        # old way to force that and is rejected on this model.
-        with claude.messages.stream(
-            model=PROMPT_WRITER_MODEL,
-            max_tokens=8000,
-            system=PROMPT_WRITER_SYSTEM,
-            output_config={
-                "effort": "medium",
-                "format": {"type": "json_schema", "schema": PROMPT_WRITER_SCHEMA},
-            },
-            messages=[{"role": "user", "content": _writer_brief(
-                idea, model, seconds, aspect, has_image)}],
-        ) as stream:
-            message = stream.get_final_message()
+        message = None
+        for attempt in range(1, WRITER_ATTEMPTS + 1):
+            try:
+                # Streaming so a long think cannot hit the request timeout;
+                # structured output so the result drops straight into the prompt
+                # box without a "Here's your prompt:" preamble to strip. Prefill
+                # would have been the old way to force that and is rejected on
+                # this model.
+                with claude.messages.stream(
+                    model=PROMPT_WRITER_MODEL,
+                    max_tokens=8000,
+                    system=PROMPT_WRITER_SYSTEM,
+                    output_config={
+                        "effort": "medium",
+                        "format": {"type": "json_schema", "schema": PROMPT_WRITER_SCHEMA},
+                    },
+                    messages=[{"role": "user", "content": _writer_brief(
+                        idea, model, seconds, aspect, has_image)}],
+                ) as stream:
+                    message = stream.get_final_message()
+                break
+            except anthropic.APIStatusError as e:
+                # The SDK retries transport-level 429/5xx itself, but an
+                # overload that arrives inside an open stream is not retried —
+                # it surfaces here, and it is exactly the case worth repeating.
+                if not _is_transient(e) or attempt == WRITER_ATTEMPTS:
+                    raise
+                wait = 3 * attempt
+                yield {"type": "status", "text": (
+                    f"⏳ Claude is busy right now — trying again in {wait}s "
+                    f"(attempt {attempt + 1} of {WRITER_ATTEMPTS})")}
+                time.sleep(wait)
 
         if message.stop_reason == "refusal":
             yield {"type": "done", "error": (
@@ -581,7 +616,15 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         yield {"type": "done", "prompt": prompt, "note": note}
 
     except anthropic.APIStatusError as e:
-        yield {"type": "done", "error": f"Claude API error {e.status_code}: {str(e)[:200]}"}
+        if _is_transient(e):
+            # Say what it means, not what the wire said. Quoting `status_code`
+            # here is what produced "Claude API error 200" for a plain overload.
+            yield {"type": "done", "error": (
+                "Claude is overloaded at the moment — this is temporary and not "
+                "a problem with your idea. Press the button again in a minute.")}
+        else:
+            yield {"type": "done",
+                   "error": f"Claude API error {e.status_code}: {str(e)[:200]}"}
     except anthropic.APIConnectionError:
         yield {"type": "done", "error": "Could not reach Claude. Check the network and try again."}
     except json.JSONDecodeError:
