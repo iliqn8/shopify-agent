@@ -110,6 +110,7 @@
   <div class="tab" onclick="switchTab('builder', this)">🛍️ Product Builder</div>
   <div class="tab" onclick="switchTab('sections', this)">🧩 Section Builder</div>
   <div class="tab" onclick="switchTab('video', this)">🎬 Video Cloner</div>
+  <div class="tab" onclick="switchTab('clips', this)">🎞️ Clip Studio</div>
 </div>
 
 <!-- Chat Panel -->
@@ -591,6 +592,127 @@
   </div>
 </div>
 
+<div class="panel" id="panel-clips" style="overflow-y:auto">
+  <div style="max-width:820px;margin:0 auto;padding:24px 20px">
+    <h2 style="color:#fff;font-size:18px;margin:0 0 4px">🎞️ Clip Studio</h2>
+    <p style="color:#888;font-size:13px;margin:0 0 8px">One prompt, one clip. Add a product photo or an image URL to animate your own product instead of an invented one. Runs on Seedance 2.5 — any length from 4 to 30 seconds, with synchronised audio if you want it.</p>
+    <div id="clip-account" style="font-size:12px;margin:0 0 20px;color:#666"></div>
+
+    <div style="display:grid;gap:20px">
+
+      <!-- Prompt -->
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+          <label style="color:#aaa;font-size:12px">PROMPT *</label>
+          <select id="clip-saved" onchange="clipUseSaved()" style="margin-left:auto;background:#1e1e1e;border:1px solid #333;color:#ccc;padding:5px 8px;border-radius:6px;font-size:12px;max-width:280px">
+            <option value="">📁 Saved prompts…</option>
+          </select>
+          <button class="btn-sm" onclick="clipSavePrompt()" title="Save this prompt so you can pick it next time">💾 Save</button>
+          <button class="btn-sm" id="clip-del-saved" onclick="clipDeleteSaved()" style="display:none" title="Delete the selected saved prompt">🗑</button>
+        </div>
+        <textarea id="clip-prompt" rows="4" placeholder="Describe the clip: what is in shot, what moves, the camera, the light, the mood."
+          style="width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      </div>
+
+      <!-- Product reference -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">
+          PRODUCT REFERENCE <span style="color:#555">— optional; upload a photo or paste an image URL</span>
+        </label>
+        <input type="file" id="clip-file" accept="image/*" style="display:none" onchange="clipHandleFile(this)">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <button class="btn-sm" onclick="document.getElementById('clip-file').click()">📷 Upload photo</button>
+          <input id="clip-url" type="text" placeholder="https://…/product.jpg"
+            style="flex:1;min-width:220px;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:7px 10px;font-size:12px">
+          <button class="btn-sm" onclick="clipUseUrl()">Use URL</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <div id="clip-ref-thumb" style="display:none"></div>
+          <span id="clip-ref-status" style="color:#555;font-size:12px">No reference — the clip will be generated from the prompt alone</span>
+          <button class="btn-sm" id="clip-ref-clear" onclick="clipClearRef()" style="display:none">✕ Remove</button>
+        </div>
+      </div>
+
+      <!-- Aspect ratio -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">ASPECT RATIO</label>
+        <div id="clip-aspects" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end"></div>
+        <div id="clip-aspect-note" style="color:#666;font-size:11px;margin-top:8px"></div>
+      </div>
+
+      <!-- Resolution -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">RESOLUTION</label>
+        <div id="clip-resolutions" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+      </div>
+
+      <!-- Duration -->
+      <div>
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+          <label style="color:#aaa;font-size:12px">DURATION</label>
+          <span id="clip-seconds-label" style="color:#fff;font-size:15px;font-weight:600">8s</span>
+          <span style="color:#555;font-size:11px">minimum 4s, maximum 30s</span>
+        </div>
+        <input type="range" id="clip-seconds" min="4" max="30" step="1" value="8"
+          oninput="clipSecondsChanged()"
+          style="width:100%;accent-color:#6366f1;cursor:pointer">
+        <div style="display:flex;justify-content:space-between;color:#444;font-size:10px;margin-top:2px">
+          <span>4s</span><span>10s</span><span>20s</span><span>30s</span>
+        </div>
+      </div>
+
+      <!-- Audio + format -->
+      <div style="display:flex;gap:28px;flex-wrap:wrap">
+        <div>
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">AUDIO</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="clip-audio" checked style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
+            <span style="color:#ddd;font-size:13px">Generate AI audio synchronised with the video</span>
+          </label>
+          <div style="color:#666;font-size:11px;margin-top:4px">Sound effects, ambience and lip-synced speech. Costs nothing extra.</div>
+        </div>
+        <div>
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">FORMAT</label>
+          <div id="clip-formats" style="display:flex;gap:8px"></div>
+        </div>
+      </div>
+
+      <!-- Generate -->
+      <div style="border-top:1px solid #222;padding-top:16px">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <button class="btn" id="clip-generate-btn" onclick="clipGenerate()">🎬 Generate clip</button>
+          <span id="clip-cost" style="color:#fbbf24;font-size:14px;font-weight:600"></span>
+          <span id="clip-summary" style="color:#666;font-size:12px"></span>
+        </div>
+        <pre id="clip-log" style="display:none;margin-top:12px;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:12px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:260px;overflow-y:auto;white-space:pre-wrap"></pre>
+      </div>
+
+      <!-- Result -->
+      <div id="clip-result" style="display:none;border-top:1px solid #222;padding-top:16px">
+        <h3 style="color:#fff;font-size:15px;margin:0 0 10px">✅ Your clip</h3>
+        <video id="clip-player" controls style="width:100%;max-width:420px;border-radius:10px;background:#000"></video>
+        <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <a id="clip-download" class="btn-sm" download style="text-decoration:none">⬇️ Download</a>
+          <span id="clip-result-meta" style="color:#666;font-size:12px"></span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- History -->
+    <div style="margin-top:36px;border-top:1px solid #2a2a2a;padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 style="color:#fff;font-size:16px;margin:0">📚 Clips</h2>
+        <button class="btn-sm" onclick="clipLoadHistory()">↻ Refresh</button>
+      </div>
+      <div id="clip-history" style="display:flex;flex-direction:column;gap:8px">
+        <div style="color:#555;font-size:13px">No clips yet.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <script>
 let sending = false;
 let networkUrl = '';
@@ -679,6 +801,7 @@ function switchTab(tab, el) {
   if (tab === 'builder') pbLoadHistory();
   if (tab === 'sections') secLoadHistory();
   if (tab === 'video') vidInit();
+  if (tab === 'clips') clipInit();
 }
 
 async function loadImageGen() {
@@ -2525,6 +2648,341 @@ async function vidDelete(id) {
   if (!confirm('Delete this video project?')) return;
   await fetch('/api/video-projects/' + id, { method: 'DELETE' });
   vidLoadHistory();
+}
+
+// ── Clip Studio ────────────────────────────────────────────────────────────
+
+let clipOpts = null;
+let clipInited = false;
+let clipAspect = '16:9';
+let clipResolution = '720p';
+let clipFormat = 'mp4';
+let clipRefUrl = null;
+// Kept so the reference can be re-cropped when the aspect ratio changes —
+// the shape of the starting frame IS the shape of the output on this model.
+let clipRefSource = null;   // {kind:'file', file} | {kind:'url', url}
+
+// A little scene drawn at the real proportions, so the shape is something you
+// look at rather than a ratio you have to picture.
+function clipAspectArt(aspect) {
+  const box = { '16:9': [150, 84], '1:1': [120, 120], '9:16': [73, 130] }[aspect];
+  const [w, h] = box;
+  const cx = w / 2, horizon = h * 0.62;
+  const bw = Math.min(w, h) * 0.30, bh = bw * 0.78;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;border-radius:6px">
+    <defs><linearGradient id="sky-${aspect.replace(':','-')}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a8a"/><stop offset="100%" stop-color="#60a5fa"/>
+    </linearGradient></defs>
+    <rect width="${w}" height="${h}" fill="url(#sky-${aspect.replace(':','-')})"/>
+    <circle cx="${w * 0.78}" cy="${h * 0.22}" r="${Math.min(w, h) * 0.09}" fill="#fde68a" opacity="0.9"/>
+    <rect y="${horizon}" width="${w}" height="${h - horizon}" fill="#0f766e"/>
+    <rect x="${cx - bw / 2}" y="${horizon - bh + 4}" width="${bw}" height="${bh}" rx="3" fill="#f472b6"/>
+    <rect x="${cx - bw / 2}" y="${horizon - bh + 4}" width="${bw}" height="${bh * 0.28}" rx="3" fill="#fb7185"/>
+  </svg>`;
+}
+
+function clipDrawAspects() {
+  const wrap = document.getElementById('clip-aspects');
+  wrap.innerHTML = clipOpts.aspects.map(a => `
+    <div onclick="clipPickAspect('${a.key}')" data-aspect="${a.key}"
+         style="cursor:pointer;text-align:center;padding:8px;border-radius:10px;border:2px solid ${a.key === clipAspect ? '#6366f1' : '#2a2a2a'};background:${a.key === clipAspect ? '#1a1a2e' : '#141414'};transition:all .15s">
+      ${clipAspectArt(a.key)}
+      <div style="color:${a.key === clipAspect ? '#fff' : '#999'};font-size:12px;font-weight:600;margin-top:6px">${a.key}</div>
+      <div style="color:#666;font-size:10px">${a.label}</div>
+    </div>`).join('');
+  const cur = clipOpts.aspects.find(a => a.key === clipAspect);
+  document.getElementById('clip-aspect-note').textContent = cur ? cur.note : '';
+}
+
+function clipDrawResolutions() {
+  const wrap = document.getElementById('clip-resolutions');
+  wrap.innerHTML = clipOpts.resolutions.map(r => {
+    const per = r.usd_per_second[clipAspect] || 0;
+    const on = r.key === clipResolution;
+    const pricey = r.key === '1080p';
+    return `
+      <div onclick="clipPickResolution('${r.key}')"
+           style="cursor:pointer;padding:10px 14px;border-radius:10px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};min-width:132px">
+        <div style="color:${on ? '#fff' : '#ccc'};font-size:14px;font-weight:600">${r.label}${pricey ? ' <span style="color:#fbbf24;font-size:10px">$$$</span>' : ''}</div>
+        <div style="color:#666;font-size:10px;margin-top:2px">${r.dimensions[clipAspect]}</div>
+        <div style="color:${pricey ? '#fbbf24' : '#888'};font-size:11px;margin-top:3px">$${per.toFixed(3)}/s</div>
+      </div>`;
+  }).join('');
+}
+
+function clipDrawFormats() {
+  const wrap = document.getElementById('clip-formats');
+  wrap.innerHTML = clipOpts.formats.map(f => {
+    const on = f.key === clipFormat;
+    return `<div onclick="clipPickFormat('${f.key}')" title="${f.note}"
+      style="cursor:pointer;padding:8px 16px;border-radius:8px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};color:${on ? '#fff' : '#999'};font-size:13px;font-weight:600">${f.label}</div>`;
+  }).join('');
+}
+
+function clipPickAspect(key) {
+  clipAspect = key;
+  clipDrawAspects();
+  clipDrawResolutions();
+  clipUpdateCost();
+  // The reference has to be re-cropped: on image-to-video the output shape
+  // comes from the starting frame, not from any parameter we send.
+  if (clipRefSource) clipUploadRef();
+}
+
+function clipPickResolution(key) { clipResolution = key; clipDrawResolutions(); clipUpdateCost(); }
+function clipPickFormat(key) { clipFormat = key; clipDrawFormats(); clipUpdateCost(); }
+
+function clipSecondsChanged() {
+  document.getElementById('clip-seconds-label').textContent =
+    document.getElementById('clip-seconds').value + 's';
+  clipUpdateCost();
+}
+
+function clipUpdateCost() {
+  if (!clipOpts) return;
+  const secs = parseInt(document.getElementById('clip-seconds').value, 10);
+  const r = clipOpts.resolutions.find(x => x.key === clipResolution);
+  const per = r ? (r.usd_per_second[clipAspect] || 0) : 0;
+  const total = per * secs;
+  document.getElementById('clip-cost').textContent = '≈ $' + total.toFixed(2);
+  document.getElementById('clip-summary').textContent =
+    `${secs}s · ${clipResolution} ${clipAspect} · ${clipFormat.toUpperCase()}` +
+    (document.getElementById('clip-audio').checked ? ' · with audio' : ' · silent');
+}
+
+async function clipInit() {
+  document.getElementById('clip-audio').addEventListener('change', clipUpdateCost);
+  if (clipInited) { clipLoadHistory(); return; }
+  clipInited = true;
+  try {
+    const r = await fetch('/api/clip-options');
+    clipOpts = await r.json();
+    document.getElementById('clip-account').textContent = clipOpts.account_message || '';
+    document.getElementById('clip-account').style.color = clipOpts.account_ok ? '#4ade80' : '#f87171';
+    const slider = document.getElementById('clip-seconds');
+    slider.min = clipOpts.min_seconds;
+    slider.max = clipOpts.max_seconds;
+    if (parseInt(slider.value, 10) < clipOpts.min_seconds) slider.value = clipOpts.min_seconds;
+    clipDrawAspects(); clipDrawResolutions(); clipDrawFormats();
+    clipSecondsChanged();
+  } catch (e) {
+    document.getElementById('clip-account').textContent = 'Could not load options: ' + e.message;
+    document.getElementById('clip-account').style.color = '#f87171';
+  }
+  clipLoadPrompts();
+  clipLoadHistory();
+}
+
+// ── Reference image ──
+
+function clipHandleFile(input) {
+  const f = input.files[0];
+  if (!f) return;
+  clipRefSource = { kind: 'file', file: f };
+  clipUploadRef();
+}
+
+function clipUseUrl() {
+  const url = document.getElementById('clip-url').value.trim();
+  if (!url) { alert('Paste an image URL first.'); return; }
+  clipRefSource = { kind: 'url', url };
+  clipUploadRef();
+}
+
+async function clipUploadRef() {
+  const status = document.getElementById('clip-ref-status');
+  status.textContent = 'Cropping to ' + clipAspect + ' and uploading…';
+  status.style.color = '#8ab4f8';
+  const fd = new FormData();
+  fd.append('aspect', clipAspect);
+  if (clipRefSource.kind === 'file') fd.append('file', clipRefSource.file);
+  else fd.append('url', clipRefSource.url);
+  try {
+    const r = await fetch('/api/clip-reference', { method: 'POST', body: fd });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+    clipRefUrl = d.url;
+    document.getElementById('clip-ref-thumb').style.display = 'block';
+    document.getElementById('clip-ref-thumb').innerHTML =
+      `<img src="${d.url}" style="height:56px;border-radius:6px;display:block">`;
+    status.textContent = 'Reference ready — cropped to ' + clipAspect;
+    status.style.color = '#4ade80';
+    document.getElementById('clip-ref-clear').style.display = 'inline-block';
+  } catch (e) {
+    clipRefUrl = null;
+    status.textContent = '❌ ' + e.message;
+    status.style.color = '#f87171';
+  }
+}
+
+function clipClearRef() {
+  clipRefUrl = null; clipRefSource = null;
+  document.getElementById('clip-file').value = '';
+  document.getElementById('clip-url').value = '';
+  document.getElementById('clip-ref-thumb').style.display = 'none';
+  document.getElementById('clip-ref-clear').style.display = 'none';
+  const s = document.getElementById('clip-ref-status');
+  s.textContent = 'No reference — the clip will be generated from the prompt alone';
+  s.style.color = '#555';
+}
+
+// ── Saved prompts ──
+
+async function clipLoadPrompts() {
+  try {
+    const r = await fetch('/api/clip-prompts');
+    const rows = await r.json();
+    const sel = document.getElementById('clip-saved');
+    sel.innerHTML = '<option value="">📁 Saved prompts…</option>' +
+      rows.map(p => `<option value="${p.id}">${(p.title || '').replace(/</g, '&lt;')}</option>`).join('');
+    sel.dataset.prompts = JSON.stringify(rows);
+  } catch (e) { console.error('clip prompts', e); }
+}
+
+function clipUseSaved() {
+  const sel = document.getElementById('clip-saved');
+  const rows = JSON.parse(sel.dataset.prompts || '[]');
+  const row = rows.find(p => String(p.id) === sel.value);
+  document.getElementById('clip-del-saved').style.display = row ? 'inline-block' : 'none';
+  if (row) document.getElementById('clip-prompt').value = row.prompt;
+}
+
+async function clipSavePrompt() {
+  const prompt = document.getElementById('clip-prompt').value.trim();
+  if (!prompt) { alert('Write a prompt first.'); return; }
+  const title = window.prompt('Name this prompt so you can find it later:',
+    prompt.slice(0, 40));
+  if (title === null) return;
+  const r = await fetch('/api/clip-prompts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, title })
+  });
+  const d = await vidJson(r);
+  if (d.error) { alert(d.error); return; }
+  await clipLoadPrompts();
+  document.getElementById('clip-saved').value = d.id;
+  document.getElementById('clip-del-saved').style.display = 'inline-block';
+}
+
+async function clipDeleteSaved() {
+  const sel = document.getElementById('clip-saved');
+  if (!sel.value) return;
+  if (!confirm('Delete this saved prompt?')) return;
+  await fetch('/api/clip-prompts/' + sel.value, { method: 'DELETE' });
+  await clipLoadPrompts();
+  document.getElementById('clip-del-saved').style.display = 'none';
+}
+
+// ── Generate ──
+
+async function clipGenerate() {
+  const prompt = document.getElementById('clip-prompt').value.trim();
+  if (!prompt) { alert('Write a prompt first.'); return; }
+
+  const btn = document.getElementById('clip-generate-btn');
+  const log = document.getElementById('clip-log');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  log.style.display = 'block';
+  log.textContent = 'Starting…';
+  document.getElementById('clip-result').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/clip-generate-start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        seconds: parseInt(document.getElementById('clip-seconds').value, 10),
+        resolution: clipResolution,
+        aspect: clipAspect,
+        audio: document.getElementById('clip-audio').checked,
+        container: clipFormat,
+        image_url: clipRefUrl
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
+      ev => {
+        btn.disabled = false;
+        btn.textContent = '🎬 Generate clip';
+        if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
+        const url = '/generated-videos/' + ev.filename;
+        document.getElementById('clip-result').style.display = 'block';
+        document.getElementById('clip-player').src = url;
+        const dl = document.getElementById('clip-download');
+        dl.href = url;
+        dl.setAttribute('download', ev.filename);
+        document.getElementById('clip-result-meta').textContent =
+          `${ev.seconds}s · ${ev.resolution} ${ev.aspect} · ${ev.container.toUpperCase()}`
+          + (ev.audio ? ' · with audio' : ' · silent')
+          + (ev.cost ? ` · $${ev.cost.toFixed(2)}` : '');
+        clipLoadHistory();
+      });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '🎬 Generate clip';
+    log.textContent += '\n❌ ' + e.message;
+  }
+}
+
+// ── History ──
+
+async function clipLoadHistory() {
+  const wrap = document.getElementById('clip-history');
+  try {
+    const r = await fetch('/api/clip-history');
+    const rows = await r.json();
+    if (!rows.length) { wrap.innerHTML = '<div style="color:#555;font-size:13px">No clips yet.</div>'; return; }
+    wrap.innerHTML = rows.map(c => {
+      let s = {};
+      try { s = JSON.parse(c.settings_json || '{}'); } catch (e) {}
+      const meta = [s.seconds ? s.seconds + 's' : null, s.resolution, s.aspect,
+                    (s.container || '').toUpperCase(), s.audio ? 'audio' : 'silent']
+        .filter(Boolean).join(' · ');
+      const url = c.filename ? '/generated-videos/' + c.filename : null;
+      return `<div style="background:#141414;border:1px solid #222;border-radius:10px;padding:10px 12px">
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="color:#ddd;font-size:13px;margin-bottom:3px">${(c.prompt || '').slice(0, 110).replace(/</g, '&lt;')}${(c.prompt || '').length > 110 ? '…' : ''}</div>
+            <div style="color:#555;font-size:11px">${meta} · ${c.created_at || ''}</div>
+          </div>
+          ${url ? `<a class="btn-sm" href="${url}" download style="text-decoration:none">⬇️</a>` : ''}
+          <button class="btn-sm" onclick="clipReuse(${c.id})" title="Put this prompt back in the box">↩︎</button>
+          <button class="btn-sm" onclick="clipDelete(${c.id})">🗑</button>
+        </div>
+        ${url ? `<video controls preload="none" src="${url}" style="width:100%;max-width:280px;margin-top:8px;border-radius:8px;background:#000"></video>` : ''}
+      </div>`;
+    }).join('');
+    wrap.dataset.rows = JSON.stringify(rows);
+  } catch (e) {
+    wrap.innerHTML = '<div style="color:#f87171;font-size:13px">Could not load clips: ' + e.message + '</div>';
+  }
+}
+
+function clipReuse(id) {
+  const rows = JSON.parse(document.getElementById('clip-history').dataset.rows || '[]');
+  const row = rows.find(c => c.id === id);
+  if (!row) return;
+  document.getElementById('clip-prompt').value = row.prompt || '';
+  try {
+    const s = JSON.parse(row.settings_json || '{}');
+    if (s.aspect) clipPickAspect(s.aspect);
+    if (s.resolution) clipPickResolution(s.resolution);
+    if (s.container) clipPickFormat(s.container);
+    if (s.seconds) { document.getElementById('clip-seconds').value = s.seconds; clipSecondsChanged(); }
+    if (typeof s.audio === 'boolean') document.getElementById('clip-audio').checked = s.audio;
+    clipUpdateCost();
+  } catch (e) {}
+  document.getElementById('clip-prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function clipDelete(id) {
+  if (!confirm('Delete this clip?')) return;
+  await fetch('/api/clip-history/' + id, { method: 'DELETE' });
+  clipLoadHistory();
 }
 </script>
 </body>

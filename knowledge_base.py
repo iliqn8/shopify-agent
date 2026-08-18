@@ -64,6 +64,19 @@ def init_db():
         status TEXT NOT NULL DEFAULT 'recipe',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS saved_prompts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS studio_clips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prompt TEXT NOT NULL,
+        settings_json TEXT,
+        filename TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     for table, col, definition in [
         ("knowledge", "category", "TEXT NOT NULL DEFAULT 'General'"),
@@ -303,6 +316,75 @@ def _video_row(r):
     return {"id": r[0], "title": r[1], "product_name": r[2], "recipe_json": r[3],
             "video_model": r[4], "filename": r[5], "scene_urls": r[6],
             "clips_json": r[7], "status": r[8], "created_at": r[9]}
+
+
+# ── Clip Studio ────────────────────────────────────────────────────────────
+
+def save_prompt(title, prompt):
+    """Store a prompt for reuse. Re-saving the same title overwrites it."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT id FROM saved_prompts WHERE title = ?", (title,)).fetchone()
+    if row:
+        conn.execute("UPDATE saved_prompts SET prompt = ?, created_at = CURRENT_TIMESTAMP "
+                     "WHERE id = ?", (prompt, row[0]))
+        pid = row[0]
+    else:
+        cur = conn.execute("INSERT INTO saved_prompts (title, prompt) VALUES (?, ?)",
+                           (title, prompt))
+        pid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pid
+
+
+def list_prompts():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, title, prompt, created_at FROM saved_prompts "
+                        "ORDER BY created_at DESC, id DESC").fetchall()
+    conn.close()
+    return [{"id": r[0], "title": r[1], "prompt": r[2], "created_at": r[3]} for r in rows]
+
+
+def delete_prompt(prompt_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM saved_prompts WHERE id = ?", (prompt_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_studio_clip(prompt, settings_json=None, filename=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO studio_clips (prompt, settings_json, filename) VALUES (?, ?, ?)",
+        (prompt, settings_json, filename))
+    conn.commit()
+    cid = cur.lastrowid
+    conn.close()
+    return cid
+
+
+def list_studio_clips():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, prompt, settings_json, filename, created_at "
+                        "FROM studio_clips ORDER BY created_at DESC, id DESC").fetchall()
+    conn.close()
+    return [{"id": r[0], "prompt": r[1], "settings_json": r[2],
+             "filename": r[3], "created_at": r[4]} for r in rows]
+
+
+def delete_studio_clip(clip_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT filename FROM studio_clips WHERE id = ?", (clip_id,)).fetchone()
+    if row and row[0]:
+        path = os.path.join(VIDEOS_DIR, row[0])
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    conn.execute("DELETE FROM studio_clips WHERE id = ?", (clip_id,))
+    conn.commit()
+    conn.close()
 
 
 _VIDEO_COLS = ("id, title, product_name, recipe_json, video_model, filename, "

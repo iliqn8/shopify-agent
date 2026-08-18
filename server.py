@@ -1047,6 +1047,119 @@ def delete_video_project(pid):
     return jsonify({"ok": True})
 
 
+# ── Clip Studio ────────────────────────────────────────────────────────────
+# Reuses _video_jobs and /api/video-poll: the event shape is identical and the
+# front end already has one poller for it.
+
+@app.route("/api/clip-options")
+def clip_options():
+    import clip_studio
+    import fal_client
+    ok, msg = fal_client.check_account()
+    return jsonify({**clip_studio.options(), "account_ok": ok, "account_message": msg})
+
+
+@app.route("/api/clip-estimate", methods=["POST"])
+def clip_estimate():
+    import clip_studio
+    d = request.json or {}
+    return jsonify({"usd": clip_studio.estimate_cost(
+        d.get("seconds") or clip_studio.MIN_SECONDS,
+        d.get("resolution") or "720p",
+        d.get("aspect") or "16:9")})
+
+
+@app.route("/api/clip-reference", methods=["POST"])
+def clip_reference():
+    """Take an upload or a pasted URL and return a fal URL cropped to the ratio.
+
+    Cropping happens here rather than at generation time so the user sees the
+    frame the model will actually start from, in the shape they picked.
+    """
+    import clip_studio
+    aspect = request.form.get("aspect") or (request.json or {}).get("aspect") or "16:9"
+    try:
+        f = request.files.get("file")
+        if f:
+            raw = f.read()
+        else:
+            url = (request.form.get("url") or (request.json or {}).get("url") or "").strip()
+            if not url:
+                return jsonify({"error": "Upload an image or paste an image URL."}), 400
+            raw = clip_studio.fetch_reference(url)
+        return jsonify({"url": clip_studio.prepare_reference(raw, aspect)})
+    except clip_studio.ClipError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/clip-generate-start", methods=["POST"])
+def clip_generate_start():
+    import uuid as _uuid_c
+    import json as _json_c
+    import clip_studio
+
+    d = request.json or {}
+    prompt = (d.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Write a prompt first."}), 400
+
+    settings = {
+        "seconds": d.get("seconds") or clip_studio.MIN_SECONDS,
+        "resolution": d.get("resolution") or "720p",
+        "aspect": d.get("aspect") or "16:9",
+        "audio": bool(d.get("audio", True)),
+        "container": d.get("container") or "mp4",
+        "image_url": d.get("image_url") or None,
+    }
+
+    job_id = str(_uuid_c.uuid4())
+
+    def factory():
+        for event in clip_studio.generate_stream(prompt, **settings):
+            if event.get("type") == "done" and event.get("filename"):
+                try:
+                    kb.save_studio_clip(prompt, _json_c.dumps(
+                        {k: v for k, v in settings.items() if k != "image_url"}),
+                        event["filename"])
+                except Exception:
+                    pass          # a history row is not worth losing the clip over
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/clip-prompts", methods=["GET", "POST"])
+def clip_prompts():
+    if request.method == "GET":
+        return jsonify(kb.list_prompts())
+    d = request.json or {}
+    prompt = (d.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Nothing to save."}), 400
+    title = (d.get("title") or "").strip() or (prompt[:40] + ("…" if len(prompt) > 40 else ""))
+    return jsonify({"id": kb.save_prompt(title, prompt), "title": title})
+
+
+@app.route("/api/clip-prompts/<int:pid>", methods=["DELETE"])
+def delete_clip_prompt(pid):
+    kb.delete_prompt(pid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/clip-history", methods=["GET"])
+def clip_history():
+    return jsonify(kb.list_studio_clips())
+
+
+@app.route("/api/clip-history/<int:cid>", methods=["DELETE"])
+def delete_clip_history(cid):
+    kb.delete_studio_clip(cid)
+    return jsonify({"ok": True})
+
+
 @app.route("/generated-videos/<path:filename>")
 def serve_generated_video(filename):
     import video_assembler
