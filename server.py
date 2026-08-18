@@ -1101,6 +1101,28 @@ def clip_reference():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/api/clip-write-prompt", methods=["POST"])
+def clip_write_prompt():
+    """Turn a one-line idea into a video prompt. Polls on the shared video job."""
+    import uuid as _uuid_w
+    import clip_studio
+
+    d = request.json or {}
+    idea = (d.get("idea") or "").strip()
+    if not idea:
+        return jsonify({"error": "Describe your idea first."}), 400
+
+    job_id = str(_uuid_w.uuid4())
+    _run_video_job(job_id, lambda: clip_studio.write_prompt_stream(
+        idea,
+        model=d.get("model") or clip_studio.DEFAULT_MODEL,
+        seconds=d.get("seconds") or clip_studio.MIN_SECONDS,
+        aspect=d.get("aspect") or "16:9",
+        has_image=bool(d.get("has_image")),
+    ))
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/clip-generate-start", methods=["POST"])
 def clip_generate_start():
     import uuid as _uuid_c

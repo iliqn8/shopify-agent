@@ -4,28 +4,35 @@ This is the short path next to the Video Cloner. The cloner takes an existing ad
 apart and rebuilds it shot by shot; this makes one clip from one prompt, with the
 settings exposed directly rather than inferred from a reference.
 
-Everything runs on Seedance 2.5, the only model in the registry that takes an
-arbitrary whole-second length (4-30) and can return synchronised audio, which is
-what this tab is for.
+One thing the models' schemas force, worth knowing before reading the code: on
+Seedance's image-to-video endpoint `aspect_ratio` is always "auto" — the shape of
+the output comes from the shape of the starting frame, and nothing else. So when
+a reference image is supplied, the chosen aspect ratio is applied by cropping
+that image before upload. Kling honours the parameter, and text-to-video has no
+such constraint either way.
 
-One thing the model's schema forces, worth knowing before reading the code: on
-the image-to-video endpoint `aspect_ratio` is always "auto" — the shape of the
-output comes from the shape of the starting frame, and nothing else. So when a
-reference image is supplied, the chosen aspect ratio is applied by cropping that
-image before upload. Text-to-video has no such constraint and takes the ratio
-directly.
+`write_prompt_stream` turns a one-line idea into a prompt for the chosen video
+model. It runs on Claude, not fal — the only place in this module that does.
 """
 
 import io
 import os
 import re
 import time
+import json
 import subprocess
 
 import requests
+import anthropic
 
 import fal_client
 import video_assembler
+
+# Thinking is on by default on this model, and max_tokens caps thinking plus
+# response together, so the budget below is deliberately generous for what is a
+# few hundred words of output.
+PROMPT_WRITER_MODEL = "claude-opus-5"
+claude = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
 MIN_SECONDS = 4
 MAX_SECONDS = 30
@@ -412,6 +419,175 @@ def save_output(video_url, prompt, container="mp4", output_dir=None):
     except OSError:
         pass
     return os.path.basename(dst)
+
+
+# ── Prompt writing ─────────────────────────────────────────────────────────
+
+# Most of these rules are not general prompt-writing advice — they are the
+# failures this project actually paid for in the Video Cloner, written down so
+# the same clips don't have to be generated twice.
+PROMPT_WRITER_SYSTEM = """You write prompts for image-to-video and text-to-video models. Someone gives you a
+rough idea for a product clip; you return the finished prompt they will send to the model.
+
+Write the prompt as plain prose, in English, in the present tense — one paragraph, or two if the
+shot genuinely has a second beat. No headings, no bullet lists, no labels like "Camera:", no
+key-value pairs. These models read a prompt as a description, not as a form.
+
+WHAT MAKES A PROMPT WORK
+
+Be concrete about what is visible. "A golden retriever shakes water off its coat, droplets catching
+the low sun" survives; "a joyful pet moment" does not. Name the subject, the surface it is on, the
+light, and the setting in terms someone could photograph.
+
+Describe ONE clear movement. These models degrade badly when asked for several things at once — a
+subject action and a camera move is the ceiling for a short clip. Pick the single motion the shot is
+about and let everything else hold still.
+
+Give the camera its own clause, and only one instruction: a slow push in, a gentle handheld drift, a
+locked-off tripod. If the shot does not need a camera move, say the camera holds still.
+
+END WITH PHYSICAL GROUNDING. This is the rule that matters most and the one people skip. The model
+is given a still frame and a sentence; it does not know what is solid. Finish the prompt with a
+short sentence covering whichever apply: what carries the subject's weight and that it is rigid,
+which objects stay exactly where they are, and where the waterline sits if there is water. Never
+write "walks", "steps" or "runs" for movement through water — that phrasing puts the subject on top
+of the surface. Say it swims, paddles, or wades with the water at a named height on its body.
+
+Do not ask for on-screen text, captions, logos, subtitles or lettering. Video models smear letters
+into unreadable mush, and the request alone can trip a provider's content filter.
+
+LENGTH SHAPES THE CONTENT
+
+A 4-6 second clip holds exactly one beat — one action, start to finish. Around 8-12 seconds you can
+carry one action through to a small resolution. Past 15 seconds you can afford a second beat, but
+describe it as a continuation of the same shot, not as a cut; these models generate one continuous
+take and asking for an edit produces a mess. Never write a prompt with more beats than the runtime
+supports — an overstuffed prompt makes the model rush the whole thing.
+
+THE FRAMING YOU ARE WRITING FOR
+
+Vertical 9:16 puts the subject close and centred with room above and below; the product should read
+at arm's length. Square 1:1 is tight — keep the subject central and lose the wide setting. Landscape
+16:9 has room for the subject and its surroundings, so the setting can do real work.
+
+Never mention the aspect ratio, the resolution, the duration, or the model's name inside the prompt
+itself. Those are settings, sent separately. Let them shape what you describe, not what you say."""
+
+PROMPT_WRITER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "prompt": {
+            "type": "string",
+            "description": "The finished prompt, ready to send to the video model. Prose only.",
+        },
+        "note": {
+            "type": "string",
+            "description": ("At most one short sentence for the user about a real choice you made "
+                            "or a limit they should know — e.g. that their idea has more beats than "
+                            "the runtime holds. Empty string if there is nothing worth saying."),
+        },
+    },
+    "required": ["prompt", "note"],
+    "additionalProperties": False,
+}
+
+
+def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9", has_image=False):
+    spec = model_spec(model)
+    lines = [
+        "THE IDEA, in the user's own words:",
+        idea.strip(),
+        "",
+        "THE SETTINGS THEY HAVE CHOSEN:",
+        f"- Video model: {spec['label']}",
+        f"- Length: {clamp_seconds(seconds, model)} seconds",
+        f"- Framing: {aspect} ({ASPECTS.get(aspect, {}).get('label', '')})",
+    ]
+    if has_image:
+        lines += [
+            "",
+            "THEY HAVE ATTACHED A REFERENCE PHOTO OF THEIR PRODUCT, and it becomes the clip's "
+            "first frame. So the subject, the product, the composition and the setting are already "
+            "fixed by that photograph — do not invent them and do not describe the product's own "
+            "appearance, colour or markings. Write about what MOVES and what CHANGES from that "
+            "frame onward: the action, the camera, the light shifting, what enters or leaves. Where "
+            "you must refer to the product, do it generically ('the bottle', 'the jacket') so your "
+            "words cannot contradict the photo.",
+        ]
+    else:
+        lines += [
+            "",
+            "THERE IS NO REFERENCE PHOTO — the model builds the whole shot from your words alone. "
+            "Describe the subject, the setting and the light as well as the motion, because nothing "
+            "else establishes them.",
+        ]
+    if spec["audio"]["supported"]:
+        lines += [
+            "",
+            "This model can generate synchronised audio. You may name the diegetic sound the scene "
+            "would really make (water, footsteps, room tone) in a short clause. No music, and no "
+            "dialogue unless the idea calls for someone speaking.",
+        ]
+    return "\n".join(lines)
+
+
+def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
+                        has_image=False):
+    """Turn a one-line idea into a finished video prompt. Yields status events."""
+    idea = (idea or "").strip()
+    if not idea:
+        yield {"type": "done", "error": "Describe your idea first, even in one line."}
+        return
+
+    try:
+        spec = model_spec(model)
+        yield {"type": "status", "text": (
+            f"✍️ Writing a {clamp_seconds(seconds, model)}s {aspect} prompt for "
+            f"{spec['label']}{' from your reference photo' if has_image else ''}…")}
+
+        # Streaming so a long think cannot hit the request timeout; structured
+        # output so the result drops straight into the prompt box without a
+        # "Here's your prompt:" preamble to strip. Prefill would have been the
+        # old way to force that and is rejected on this model.
+        with claude.messages.stream(
+            model=PROMPT_WRITER_MODEL,
+            max_tokens=8000,
+            system=PROMPT_WRITER_SYSTEM,
+            output_config={
+                "effort": "medium",
+                "format": {"type": "json_schema", "schema": PROMPT_WRITER_SCHEMA},
+            },
+            messages=[{"role": "user", "content": _writer_brief(
+                idea, model, seconds, aspect, has_image)}],
+        ) as stream:
+            message = stream.get_final_message()
+
+        if message.stop_reason == "refusal":
+            yield {"type": "done", "error": (
+                "Claude declined to write this one. Rephrase the idea and try again.")}
+            return
+
+        text = next((b.text for b in message.content if b.type == "text"), "")
+        data = json.loads(text)
+        prompt = (data.get("prompt") or "").strip()
+        if not prompt:
+            yield {"type": "done", "error": "Claude returned an empty prompt. Try again."}
+            return
+
+        note = (data.get("note") or "").strip()
+        if note:
+            yield {"type": "status", "text": f"💡 {note}"}
+        yield {"type": "status", "text": "✅ Prompt ready"}
+        yield {"type": "done", "prompt": prompt, "note": note}
+
+    except anthropic.APIStatusError as e:
+        yield {"type": "done", "error": f"Claude API error {e.status_code}: {str(e)[:200]}"}
+    except anthropic.APIConnectionError:
+        yield {"type": "done", "error": "Could not reach Claude. Check the network and try again."}
+    except json.JSONDecodeError:
+        yield {"type": "done", "error": "Claude returned something that was not a prompt. Try again."}
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
 
 
 # ── Generation ─────────────────────────────────────────────────────────────
