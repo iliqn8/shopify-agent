@@ -137,10 +137,25 @@ def _media_type(raw):
 def _layout_similarity(url_a, url_b):
     """How much two images share a layout, 0..1. None if either can't be read.
 
-    Compares downscaled greyscale structure, deliberately ignoring colour: a
-    genuine product swap changes hue everywhere the product is, but must leave
-    the subject, horizon and framing where they were. A recomposed scene moves
-    all of that.
+    Compares coarse greyscale structure — where the big masses of light and
+    dark sit — deliberately ignoring colour, so that recolouring a product does
+    not read as recomposing the shot.
+
+    It used to correlate a 96x96 Laplacian, and that was wrong in a way that
+    cost real money on project 21. A Laplacian at that scale is dominated by
+    fine texture — fur, ripples, the weave of a mat — and every one of these
+    edit models repaints that texture. Two frames of the same shot then
+    correlate noise against noise and score near zero, while the metric only
+    scored well when the model had returned an almost untouched file. Measured
+    on that project's shot 4: the one rung that produced exactly the right
+    frame — same pose, same background, vest correctly replaced — scored 0.000,
+    lower than a rung that returned a two-up collage of invented scenes (0.067).
+    All four rungs were rejected structurally, before the vision check ever saw
+    them, and the shot shipped with the reference's own red vest.
+
+    Coarse structure survives repainting: on the same set the correct swaps
+    score 0.71-1.00 and the collage, the redrawn shots and frames from other
+    shots of the same ad score 0.00-0.51.
     """
     try:
         import numpy as np
@@ -155,9 +170,10 @@ def _layout_similarity(url_a, url_b):
             arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
             if arr is None:
                 return None
-            arr = cv2.resize(arr, (96, 96), interpolation=cv2.INTER_AREA).astype(np.float32)
-            # Edges track layout; raw brightness would punish lighting shifts.
-            arr = cv2.Laplacian(arr, cv2.CV_32F, ksize=3)
+            arr = cv2.resize(arr, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
+            # A light blur on top of the downscale: it costs nothing and takes
+            # the edge off a model that returns the frame slightly re-cropped.
+            arr = cv2.GaussianBlur(arr, (0, 0), 1.0)
             arr -= arr.mean()
             norm = float(np.linalg.norm(arr))
             if norm < 1e-6:
@@ -173,10 +189,18 @@ def _layout_similarity(url_a, url_b):
 # Each is independent and opt-in: with no photo uploaded for a slot, that part
 # of the frame is left exactly as the reference had it.
 #
-# `layout_min` is the Laplacian-correlation floor for accepting an edit. It has
-# to differ per slot: replacing a product barely moves the frame's edges, but
+# `layout_min` is the coarse-structure floor for accepting an edit. It has to
+# differ per slot: replacing a product barely moves the frame's masses, but
 # replacing the environment redraws most of them by design, so the structural
 # check is useless there and the vision check carries it alone.
+#
+# These are floors for a CHEAP FIRST FILTER, not verdicts. Its job is to throw
+# out the obvious disasters — a collage, a wholly different scene — without
+# paying for a vision call; anything arguable belongs to `_verify_swap`, which
+# is far better at it. Set too high, it rejects good frames before the good
+# judge ever sees them, which is exactly what shipped shot 4 of project 21 with
+# the wrong vest. Calibrated on that project's frames: correct swaps score
+# 0.71-1.00, collages and different shots 0.00-0.51.
 SWAP_SLOTS = {
     "product": {
         "noun": "product",
@@ -195,8 +219,8 @@ SWAP_SLOTS = {
     "subject": {
         "noun": "main subject",
         "label": "subject",
-        # A subject fills much of the frame, so its edges legitimately change.
-        "layout_min": 0.20,
+        # A subject fills much of the frame, so its masses legitimately shift.
+        "layout_min": 0.30,
         "keep": "the background and setting, every other object, the lighting and the camera "
                 "viewpoint, and the subject's POSE, POSITION and SIZE in frame",
         "completeness": "The subject in B must be recognisably the one from C — same species, "
@@ -900,6 +924,107 @@ _GROUNDING_HINTS = (
 )
 
 
+MISSING_SHOT_PROMPT = """The reference video was cut into {total} shots. A previous pass described all of
+them except shot(s) {missing} — those entries are simply absent, so those shots would be animated
+from an EMPTY prompt, which makes the video model improvise something that is not in the reference.
+
+Below are the frames of ONLY the missing shot(s), each labelled with its shot number.
+
+## REFERENCE TRANSCRIPT
+{transcript}
+
+Return ONE JSON object inside a ```json fenced block, no prose outside it, with one entry per
+missing shot and nothing else:
+
+{{
+  "scenes": [
+    {{
+      "index": <the shot number exactly as labelled above>,
+      "shot_description": "what is in this shot, one sentence",
+      "motion_prompt": "WHAT MOVES between the opening and closing frame of THIS shot — read it off the frames, never invent motion. Then, in the SAME string, add one short physical-contact sentence: what carries the weight and that it is rigid, which objects are stationary, where the waterline sits. Never say walks/steps/runs for movement through water.",
+      "shows_product": <true/false — is the product visible in this shot>,
+      "product_count": <how many SEPARATE copies of the product are visible; count the wearers>,
+      "voiceover": "what is said over this shot, taken from the transcript, or \\"\\"",
+      "on_screen_text": "text visible on screen in this shot, or \\"\\""
+    }}
+  ]
+}}
+
+Describe only what the frames show. Do not redesign, do not add shots, write in English."""
+
+
+def _describe_missing_shots(shots, described, transcript):
+    """Fill in shots the analysis pass skipped.
+
+    The analysis prompt says "exactly {shot_count}, no more, no fewer" and
+    usually obeys — but on project 21 it returned three entries for four shots.
+    The pairing loop below defaulted the fourth to empty strings, so its
+    `motion_prompt` reached the (paid) video model as "" and the model invented
+    a shot of its own; the swap for that scene was likewise asked for with no
+    scene context at all. One skipped entry silently wrecked both.
+
+    Rather than re-word the instruction and hope, ask again for just the ones
+    that are missing, with only their frames attached. Returns the entries it
+    managed to get, keyed by index — never raises.
+    """
+    missing = [s for s in shots if s["index"] not in described]
+    if not missing:
+        return {}
+
+    content = []
+    for s in missing:
+        content.append({"type": "text",
+                        "text": f"SHOT {s['index']} — {s['duration']}s "
+                                f"({s['start']}s to {s['end']}s). Opening frame:"})
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/jpeg", "data": s["first_b64"]}})
+        for name in ("mid_b64", "last_b64"):
+            if s.get(name):
+                content.append({"type": "text",
+                                "text": f"SHOT {s['index']} — {name.split('_')[0]} frame:"})
+                content.append({"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg", "data": s[name]}})
+    content.append({"type": "text", "text": MISSING_SHOT_PROMPT.format(
+        total=len(shots),
+        missing=", ".join(str(s["index"]) for s in missing),
+        transcript=transcript or "(silent)",
+    )})
+
+    try:
+        resp = client.messages.create(model=MODEL, max_tokens=4000,
+                                      messages=[{"role": "user", "content": content}])
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        recovered = _extract_json(text).get("scenes") or []
+    except Exception:
+        return {}
+
+    wanted = {s["index"] for s in missing}
+    return {d["index"]: d for d in recovered
+            if isinstance(d, dict) and d.get("index") in wanted}
+
+
+# What to animate a shot from when nothing could be read off its frames. It
+# holds the framing and lets only what is already moving continue: anything
+# richer would be invention, which is precisely what the empty prompt caused.
+HOLD_STILL_MOTION = (
+    "Continue this exact moment as filmed. The framing, the subject and everything "
+    "else in the shot carry on as they are, with only the small natural movement "
+    "already present — a slight drift of the camera and the subject's own gentle "
+    "motion. Introduce no new action, and change nothing about what the subject "
+    "is wearing, holding or standing on")
+
+
+def _motion_for(scene, props=None):
+    """The prompt a shot gets animated from. Never empty.
+
+    A blank prompt is not a mild degradation — the video model is handed one
+    frame and no instruction, so it invents its own shot. Falling back to a
+    hold-still instruction keeps the reference's own frame in charge.
+    """
+    text = (scene.get("motion_prompt") or scene.get("shot_description") or "").strip()
+    return _ground_motion_prompt(text or HOLD_STILL_MOTION, props)
+
+
 def _ground_motion_prompt(text, props=None):
     """Append a physics sentence when the prompt has none.
 
@@ -1419,6 +1544,21 @@ def _analyze_recreate(video_bytes, product, notes, product_images, target_durati
         # from the video, never from the model — it has no way to know them and
         # every past attempt to let it guess produced the wrong runtime.
         described = {s.get("index"): s for s in (recipe.get("scenes") or [])}
+
+        # "Exactly {shot_count}, no more, no fewer" is not always obeyed. A shot
+        # with no entry would be animated from an empty prompt and swapped with
+        # no scene context, so ask again for just the ones that came back short.
+        if any(shot["index"] not in described for shot in shots):
+            gap = [shot["index"] for shot in shots if shot["index"] not in described]
+            yield {"type": "status", "text": (
+                f"🔁 Shot(s) {', '.join(str(i) for i in gap)} came back undescribed — reading them again…")}
+            described.update(_describe_missing_shots(shots, described, transcript))
+            still = [shot["index"] for shot in shots if shot["index"] not in described]
+            if still:
+                yield {"type": "status", "text": (
+                    f"⚠️ Shot(s) {', '.join(str(i) for i in still)} could not be read — "
+                    "they will be animated from their own frame with a hold-still prompt")}
+
         scenes = []
         for shot in shots:
             d = described.get(shot["index"], {})
@@ -2040,9 +2180,7 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
 
                 url = fal_client.generate_broll(
                     video_model, image_url,
-                    _ground_motion_prompt(
-                        s.get("motion_prompt") or s.get("shot_description") or "",
-                        recipe.get("location_props")),
+                    _motion_for(s, recipe.get("location_props")),
                     s["duration"], aspect_ratio=aspect, on_status=status)
                 yield from drain(label)
 
@@ -2076,7 +2214,8 @@ def generate_stream(recipe, video_model=DEFAULT_VIDEO_MODEL,
                 url = fal_client.generate_broll(
                     video_model,
                     image_url,
-                    s.get("motion_prompt") or s.get("shot_description") or prompt,
+                    s.get("motion_prompt") or s.get("shot_description") or prompt
+                        or HOLD_STILL_MOTION,
                     s["duration"],
                     aspect_ratio=aspect,
                     on_status=status,
@@ -2369,9 +2508,11 @@ def _erase_overlay(base_url, mask_url, boxes, aspect, label, scene_index, status
             return candidate
 
         # A model that repaints the caption away but restages the shot has cost
-        # us more than the caption did.
+        # us more than the caption did. Same floor as a product swap: erasing a
+        # caption disturbs the frame even less than replacing a product, so a
+        # threshold that provably passes good swaps cannot be too strict here.
         score = _layout_similarity(base_url, candidate)
-        if score is not None and score < 0.40:
+        if score is not None and score < 0.45:
             yield {"type": "status", "text": (
                 f"   {label} · {rung['label']} redrew the shot while erasing the text "
                 f"(layout {score:.2f}) — escalating")}
