@@ -68,6 +68,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
         prompt TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'prompt',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS studio_clips (
@@ -84,6 +85,9 @@ def init_db():
         ("knowledge", "file_path", "TEXT"),
         # Added after video_projects shipped, so existing databases need it too.
         ("video_projects", "clips_json", "TEXT"),
+        # Ideas share the saved_prompts table. Existing rows default to
+        # 'prompt', which is exactly what they are.
+        ("saved_prompts", "kind", "TEXT NOT NULL DEFAULT 'prompt'"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
@@ -320,27 +324,33 @@ def _video_row(r):
 
 # ── Clip Studio ────────────────────────────────────────────────────────────
 
-def save_prompt(title, prompt):
-    """Store a prompt for reuse. Re-saving the same title overwrites it."""
+def save_prompt(title, prompt, kind="prompt"):
+    """Store a prompt or an idea for reuse.
+
+    One table, one `kind` column, because the two are the same shape and the
+    same operations. Re-saving the same title within a kind overwrites it —
+    scoped per kind so naming an idea after a prompt does not clobber it.
+    """
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT id FROM saved_prompts WHERE title = ?", (title,)).fetchone()
+    row = conn.execute("SELECT id FROM saved_prompts WHERE title = ? AND kind = ?",
+                       (title, kind)).fetchone()
     if row:
         conn.execute("UPDATE saved_prompts SET prompt = ?, created_at = CURRENT_TIMESTAMP "
                      "WHERE id = ?", (prompt, row[0]))
         pid = row[0]
     else:
-        cur = conn.execute("INSERT INTO saved_prompts (title, prompt) VALUES (?, ?)",
-                           (title, prompt))
+        cur = conn.execute("INSERT INTO saved_prompts (title, prompt, kind) VALUES (?, ?, ?)",
+                           (title, prompt, kind))
         pid = cur.lastrowid
     conn.commit()
     conn.close()
     return pid
 
 
-def list_prompts():
+def list_prompts(kind="prompt"):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("SELECT id, title, prompt, created_at FROM saved_prompts "
-                        "ORDER BY created_at DESC, id DESC").fetchall()
+                        "WHERE kind = ? ORDER BY created_at DESC, id DESC", (kind,)).fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "prompt": r[2], "created_at": r[3]} for r in rows]
 

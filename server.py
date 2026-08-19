@@ -1233,14 +1233,19 @@ def clip_generate_start():
 
 @app.route("/api/clip-prompts", methods=["GET", "POST"])
 def clip_prompts():
+    """Saved prompts and saved ideas — same shape, told apart by `kind`."""
+    def kind_of(value):
+        return "idea" if (value or "").strip() == "idea" else "prompt"
+
     if request.method == "GET":
-        return jsonify(kb.list_prompts())
+        return jsonify(kb.list_prompts(kind_of(request.args.get("kind"))))
     d = request.json or {}
     prompt = (d.get("prompt") or "").strip()
     if not prompt:
         return jsonify({"error": "Nothing to save."}), 400
     title = (d.get("title") or "").strip() or (prompt[:40] + ("…" if len(prompt) > 40 else ""))
-    return jsonify({"id": kb.save_prompt(title, prompt), "title": title})
+    return jsonify({"id": kb.save_prompt(title, prompt, kind_of(d.get("kind"))),
+                    "title": title})
 
 
 @app.route("/api/clip-prompts/<int:pid>", methods=["DELETE"])

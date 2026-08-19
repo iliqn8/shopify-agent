@@ -602,9 +602,16 @@
 
       <!-- Idea → prompt writer -->
       <div style="background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px">
-        <label style="color:#a5b4fc;font-size:12px;display:block;margin-bottom:6px">
-          ✨ YOUR IDEA <span style="color:#666">— one line is enough; Claude writes the prompt below</span>
-        </label>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+          <label style="color:#a5b4fc;font-size:12px">
+            ✨ YOUR IDEA <span style="color:#666">— one line is enough; Claude writes the prompt below</span>
+          </label>
+          <select id="clip-saved-ideas" onchange="clipUseSavedIdea()" style="margin-left:auto;background:#0d0d14;border:1px solid #2a2a3a;color:#ccc;padding:5px 8px;border-radius:6px;font-size:12px;max-width:280px">
+            <option value="">📁 Saved ideas…</option>
+          </select>
+          <button class="btn-sm" onclick="clipSaveIdea()" title="Save this text so you can pick it next time">💾 Save</button>
+          <button class="btn-sm" id="clip-del-saved-idea" onclick="clipDeleteSavedIdea()" style="display:none" title="Delete the selected saved idea">🗑</button>
+        </div>
         <textarea id="clip-idea" rows="2" placeholder="e.g. my dog jumping into a pool wearing the life jacket, sunny afternoon"
           style="width:100%;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
 
@@ -2972,7 +2979,8 @@ async function clipInit() {
     document.getElementById('clip-account').textContent = 'Could not load options: ' + e.message;
     document.getElementById('clip-account').style.color = '#f87171';
   }
-  clipLoadPrompts();
+  clipLoadSaved('prompt');
+  clipLoadSaved('idea');
   clipLoadHistory();
 }
 
@@ -3321,50 +3329,77 @@ async function clipWritePrompt() {
 
 // ── Saved prompts ──
 
-async function clipLoadPrompts() {
+// Prompts and ideas save the same way and differ only in which boxes they
+// touch, so one set of functions drives both rather than two near-copies.
+const CLIP_SAVE_KINDS = {
+  prompt: { box: 'clip-prompt', select: 'clip-saved', del: 'clip-del-saved',
+            label: 'prompts', noun: 'prompt' },
+  idea:   { box: 'clip-idea', select: 'clip-saved-ideas', del: 'clip-del-saved-idea',
+            label: 'ideas', noun: 'idea' },
+};
+
+async function clipLoadSaved(kind) {
+  const k = CLIP_SAVE_KINDS[kind];
   try {
-    const r = await fetch('/api/clip-prompts');
+    const r = await fetch('/api/clip-prompts?kind=' + kind);
     const rows = await r.json();
-    const sel = document.getElementById('clip-saved');
-    sel.innerHTML = '<option value="">📁 Saved prompts…</option>' +
+    const sel = document.getElementById(k.select);
+    sel.innerHTML = `<option value="">📁 Saved ${k.label}…</option>` +
       rows.map(p => `<option value="${p.id}">${(p.title || '').replace(/</g, '&lt;')}</option>`).join('');
-    sel.dataset.prompts = JSON.stringify(rows);
-  } catch (e) { console.error('clip prompts', e); }
+    sel.dataset.rows = JSON.stringify(rows);
+  } catch (e) { console.error('clip saved ' + kind, e); }
 }
 
-function clipUseSaved() {
-  const sel = document.getElementById('clip-saved');
-  const rows = JSON.parse(sel.dataset.prompts || '[]');
+function clipUseSavedOf(kind) {
+  const k = CLIP_SAVE_KINDS[kind];
+  const sel = document.getElementById(k.select);
+  const rows = JSON.parse(sel.dataset.rows || '[]');
   const row = rows.find(p => String(p.id) === sel.value);
-  document.getElementById('clip-del-saved').style.display = row ? 'inline-block' : 'none';
-  if (row) document.getElementById('clip-prompt').value = row.prompt;
+  document.getElementById(k.del).style.display = row ? 'inline-block' : 'none';
+  if (!row) return;
+  const box = document.getElementById(k.box);
+  box.value = row.prompt;
+  // The change box keys off the prompt having content, and setting .value
+  // does not fire an input event.
+  if (kind === 'prompt') clipShowRefine(!!row.prompt.trim());
 }
 
-async function clipSavePrompt() {
-  const prompt = document.getElementById('clip-prompt').value.trim();
-  if (!prompt) { alert('Write a prompt first.'); return; }
-  const title = window.prompt('Name this prompt so you can find it later:',
-    prompt.slice(0, 40));
+async function clipSaveOf(kind) {
+  const k = CLIP_SAVE_KINDS[kind];
+  const text = document.getElementById(k.box).value.trim();
+  if (!text) { alert(`Write your ${k.noun} first.`); return; }
+  const title = window.prompt(`Name this ${k.noun} so you can find it later:`,
+    text.slice(0, 40));
   if (title === null) return;
   const r = await fetch('/api/clip-prompts', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, title })
+    body: JSON.stringify({ prompt: text, title, kind })
   });
   const d = await vidJson(r);
   if (d.error) { alert(d.error); return; }
-  await clipLoadPrompts();
-  document.getElementById('clip-saved').value = d.id;
-  document.getElementById('clip-del-saved').style.display = 'inline-block';
+  await clipLoadSaved(kind);
+  document.getElementById(k.select).value = d.id;
+  document.getElementById(k.del).style.display = 'inline-block';
 }
 
-async function clipDeleteSaved() {
-  const sel = document.getElementById('clip-saved');
+async function clipDeleteSavedOf(kind) {
+  const k = CLIP_SAVE_KINDS[kind];
+  const sel = document.getElementById(k.select);
   if (!sel.value) return;
-  if (!confirm('Delete this saved prompt?')) return;
+  if (!confirm(`Delete this saved ${k.noun}?`)) return;
   await fetch('/api/clip-prompts/' + sel.value, { method: 'DELETE' });
-  await clipLoadPrompts();
-  document.getElementById('clip-del-saved').style.display = 'none';
+  await clipLoadSaved(kind);
+  document.getElementById(k.del).style.display = 'none';
 }
+
+// Names the markup calls.
+const clipLoadPrompts    = () => clipLoadSaved('prompt');
+const clipUseSaved       = () => clipUseSavedOf('prompt');
+const clipSavePrompt     = () => clipSaveOf('prompt');
+const clipDeleteSaved    = () => clipDeleteSavedOf('prompt');
+const clipUseSavedIdea   = () => clipUseSavedOf('idea');
+const clipSaveIdea       = () => clipSaveOf('idea');
+const clipDeleteSavedIdea = () => clipDeleteSavedOf('idea');
 
 // ── Generate ──
 
