@@ -1141,6 +1141,50 @@ def clip_write_prompt():
         aspect=d.get("aspect") or "16:9",
         has_image=bool(d.get("has_image")),
         photos=photos,
+        angle=d.get("angle") or "",
+    ))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/clip-angles", methods=["POST"])
+def clip_angles():
+    """Read a product page and propose marketing angles to choose from."""
+    import uuid as _uuid_a
+    import clip_studio
+
+    d = request.json or {}
+    job_id = str(_uuid_a.uuid4())
+    _run_video_job(job_id, lambda: clip_studio.generate_angles_stream(
+        url=d.get("url") or "",
+        photos=d.get("photos") or [],
+        note=d.get("note") or "",
+    ))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/clip-refine-prompt", methods=["POST"])
+def clip_refine_prompt():
+    """Apply a requested change to a prompt that has already been written."""
+    import uuid as _uuid_r
+    import clip_studio
+
+    d = request.json or {}
+    current = (d.get("prompt") or "").strip()
+    instructions = (d.get("instructions") or "").strip()
+    if not current:
+        return jsonify({"error": "There is no prompt to change yet."}), 400
+    if not instructions:
+        return jsonify({"error": "Say what you would like changed."}), 400
+
+    job_id = str(_uuid_r.uuid4())
+    _run_video_job(job_id, lambda: clip_studio.refine_prompt_stream(
+        current, instructions,
+        model=d.get("model") or clip_studio.DEFAULT_MODEL,
+        seconds=d.get("seconds") or clip_studio.MIN_SECONDS,
+        aspect=d.get("aspect") or "16:9",
+        has_image=bool(d.get("has_image")),
+        photos=d.get("photos") or [],
+        angle=d.get("angle") or "",
     ))
     return jsonify({"job_id": job_id})
 

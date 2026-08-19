@@ -544,6 +544,87 @@ The user's words outrank the photos wherever the two disagree. The photos tell y
 like; the words tell you what should happen. If they attach a photo of a jacket on a table and ask
 for a dog wearing it in a pool, write the pool."""
 
+ANGLE_WRITER_SYSTEM = """You find marketing angles for short product video ads.
+
+An angle is the reason someone watches to the end and then wants the thing — not a feature, and not
+a description of the product. "Waterproof, 600D nylon" is a feature. "The first swim after the one
+that scared you" is an angle. If your line could be printed on the box, it is not an angle.
+
+Ground every angle in what the page and the photos actually show. Do not invent materials, claims,
+certifications, prices or awards; if the source does not say it, do not say it.
+
+Make them genuinely DIFFERENT from one another — not one idea rephrased. Spread them across the
+ways people are actually moved to buy: a fear or worry being lifted; a small daily annoyance that
+disappears; the moment of transformation before and after; belonging and identity, the kind of owner
+this makes you; showing off, how it looks to other people; a specific occasion or season; an
+objection answered head on; the product used in a way the buyer had not considered. Not every axis
+suits every product — pick the ones that do, and skip the rest rather than forcing a weak angle.
+
+EVERY ANGLE MUST BE FILMABLE AS ONE SHORT CLIP of a few seconds. This is the constraint that makes
+an angle useful here rather than just clever. Before you write one, picture the shot: if it needs a
+voiceover to make sense, a chart, three cuts, or a testimonial to camera, it does not qualify. Ask
+what single visible moment carries the idea, and if there isn't one, drop the angle.
+
+Write for the person choosing between them: a short title they can scan, then the angle itself in
+one or two plain sentences, then who it is aimed at. No jargon, no "leverage", no "tap into".
+
+Give between 6 and 9 angles. Fewer good ones beats padding the list."""
+
+ANGLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "product": {
+            "type": "string",
+            "description": ("One short sentence naming what the product actually is, from the page "
+                            "and photos. Empty string if you genuinely could not tell."),
+        },
+        "angles": {
+            "type": "array",
+            "description": "Between 6 and 9 distinct angles.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string",
+                              "description": "3-6 words, scannable in a list."},
+                    "angle": {"type": "string",
+                              "description": ("The angle itself, one or two plain sentences. This "
+                                              "is what gets used to write the video prompt, so make "
+                                              "it usable on its own.")},
+                    "audience": {"type": "string",
+                                 "description": "Who this one is aimed at, a few words."},
+                },
+                "required": ["title", "angle", "audience"],
+                "additionalProperties": False,
+            },
+        },
+        "note": {
+            "type": "string",
+            "description": ("At most one short sentence if something limited you — e.g. the page "
+                            "gave little to work with. Empty string otherwise."),
+        },
+    },
+    "required": ["product", "angles", "note"],
+    "additionalProperties": False,
+}
+
+REFINE_SYSTEM = PROMPT_WRITER_SYSTEM + """
+
+YOU ARE REVISING A PROMPT THAT ALREADY EXISTS
+
+You are given a prompt you wrote earlier and a change the user wants. Apply that change and return
+the whole prompt again.
+
+Change what was asked and leave the rest alone. This is a revision, not a fresh draft: sentences the
+request does not touch should come back word for word, so the user can see what moved. Rewriting
+details they were happy with is the failure to avoid here.
+
+The rules above still bind the result — one clear movement, the closing physical-grounding sentence,
+no on-screen text, no settings named in the prose. If the requested change would break one of them,
+make the change in the way that keeps the rule, and say so in your note.
+
+If the request is impossible or would empty the prompt, return the prompt unchanged and explain why
+in the note."""
+
 PROMPT_WRITER_SCHEMA = {
     "type": "object",
     "properties": {
@@ -564,8 +645,9 @@ PROMPT_WRITER_SCHEMA = {
 
 
 def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
-                  has_image=False, n_photos=0):
+                  has_image=False, n_photos=0, angle=""):
     spec = model_spec(model)
+    angle = (angle or "").strip()
     lines = []
     if n_photos:
         lines += [
@@ -576,7 +658,20 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         ]
     lines += [
         "THE IDEA, in the user's own words:",
-        idea.strip(),
+        idea.strip() or "(they wrote nothing — work from the photos and the angle)",
+    ]
+    if angle:
+        lines += [
+            "",
+            "THE MARKETING ANGLE THIS CLIP MUST SERVE:",
+            angle,
+            "",
+            "The angle decides WHICH moment you film. Choose the single visible moment that carries "
+            "it and build the shot around that — not a generic pretty shot of the product with the "
+            "angle bolted on. Do not state the angle in words anywhere in the prompt; a video model "
+            "cannot film an idea, only what the idea looks like.",
+        ]
+    lines += [
         "",
         "THE SETTINGS THEY HAVE CHOSEN:",
         f"- Video model: {spec['label']}",
@@ -636,35 +731,251 @@ def _is_transient(exc):
 WRITER_ATTEMPTS = 3
 
 
-def _writer_content(idea, model, seconds, aspect, has_image, photos):
+def _ask_claude(system, content, schema, label):
+    """One structured call to Claude, retried while it is only busy.
+
+    Generator: yields status events and finally {"data": ...} or {"error": ...},
+    so each caller can wrap it in its own event stream without repeating the
+    retry, refusal and JSON handling three times over.
+    """
+    message = None
+    for attempt in range(1, WRITER_ATTEMPTS + 1):
+        try:
+            with claude.messages.stream(
+                model=PROMPT_WRITER_MODEL,
+                max_tokens=8000,
+                system=system,
+                output_config={
+                    "effort": "medium",
+                    "format": {"type": "json_schema", "schema": schema},
+                },
+                messages=[{"role": "user", "content": content}],
+            ) as stream:
+                message = stream.get_final_message()
+            break
+        except anthropic.APIStatusError as e:
+            # The SDK retries transport-level 429/5xx itself, but an overload
+            # that arrives inside an open stream is not retried — it surfaces
+            # here, and it is exactly the case worth repeating.
+            if not _is_transient(e):
+                yield {"error": f"Claude API error {e.status_code}: {str(e)[:200]}"}
+                return
+            if attempt == WRITER_ATTEMPTS:
+                yield {"error": ("Claude is overloaded at the moment — this is temporary and not "
+                                 "a problem with your input. Try again in a minute.")}
+                return
+            wait = 3 * attempt
+            yield {"type": "status", "text": (
+                f"⏳ Claude is busy right now — trying again in {wait}s "
+                f"(attempt {attempt + 1} of {WRITER_ATTEMPTS})")}
+            time.sleep(wait)
+        except anthropic.APIConnectionError:
+            yield {"error": "Could not reach Claude. Check the network and try again."}
+            return
+
+    if message.stop_reason == "refusal":
+        yield {"error": "Claude declined this one. Rephrase it and try again."}
+        return
+    text = next((b.text for b in message.content if b.type == "text"), "")
+    try:
+        yield {"data": json.loads(text)}
+    except json.JSONDecodeError:
+        yield {"error": f"Claude returned something that was not {label}. Try again."}
+
+
+def _drain(gen):
+    """Run one of the helpers above, tagging what comes out.
+
+    Yields ("status", event) for anything the caller should show, then exactly
+    one ("data", payload) or ("error", message).
+    """
+    for item in gen:
+        if "error" in item:
+            yield ("error", item["error"]); return
+        if "data" in item:
+            yield ("data", item["data"]); return
+        yield ("status", item)
+    yield ("error", "Claude produced no result. Try again.")
+
+
+def _photo_blocks(photos, label="PHOTO"):
+    blocks = []
+    for i, img in enumerate(photos, start=1):
+        blocks.append({"type": "text", "text": f"{label} {i}:"})
+        blocks.append({"type": "image", "source": {
+            "type": "base64",
+            "media_type": img.get("media_type") or "image/jpeg",
+            "data": img["b64"],
+        }})
+    return blocks
+
+
+def _clean_photos(photos):
+    return [p for p in (photos or []) if p and p.get("b64")][:MAX_IDEA_IMAGES]
+
+
+# ── Marketing angles ───────────────────────────────────────────────────────
+
+def generate_angles_stream(url="", photos=None, note=""):
+    """Read a product page (and any photos) and propose angles to choose from."""
+    url = (url or "").strip()
+    photos = _clean_photos(photos)
+    note = (note or "").strip()
+
+    if not url and not photos and not note:
+        yield {"type": "done",
+               "error": "Paste a product page URL so Claude can see what it is selling."}
+        return
+
+    try:
+        title, page = None, ""
+        if url:
+            yield {"type": "status", "text": f"🌐 Reading {url[:70]}…"}
+            import section_builder
+            title, page = section_builder.fetch_page_text(url)
+            # fetch_page_text never raises — it reports failure inside the text.
+            if page.startswith("[Could not fetch URL"):
+                yield {"type": "status", "text": (
+                    "⚠️ That page could not be read (many sites block automated visits) — "
+                    "working from the photos and your notes instead")}
+                page = ""
+            else:
+                yield {"type": "status", "text": (
+                    f"🌐 Read {len(page.split())} words"
+                    + (f' — "{title[:60]}"' if title else ""))}
+
+        content = _photo_blocks(photos, "PRODUCT PHOTO")
+        brief = []
+        if photos:
+            brief += [f"The {len(photos)} photo(s) above show the product. Read them.", ""]
+        if url:
+            brief.append(f"PRODUCT PAGE: {url}")
+            if title:
+                brief.append(f"PAGE TITLE: {title}")
+            brief += (["", "PAGE TEXT:", page] if page
+                      else ["(The page could not be read — work from whatever else is here.)"])
+        if note:
+            brief += ["", "WHAT THE USER ADDED:", note]
+        brief += ["", "Propose the angles."]
+        content.append({"type": "text", "text": "\n".join(brief)})
+
+        yield {"type": "status", "text": "💡 Thinking of angles…"}
+        for kind, payload in _drain(_ask_claude(
+                ANGLE_WRITER_SYSTEM, content, ANGLE_SCHEMA, "a list of angles")):
+            if kind == "status":
+                yield payload
+            elif kind == "error":
+                yield {"type": "done", "error": payload}
+                return
+            else:
+                angles = [a for a in (payload.get("angles") or [])
+                          if (a.get("angle") or "").strip()]
+                if not angles:
+                    yield {"type": "done",
+                           "error": "Claude found no angles here. Try a different page."}
+                    return
+                product = (payload.get("product") or "").strip()
+                if product:
+                    yield {"type": "status", "text": f"📦 {product}"}
+                if (payload.get("note") or "").strip():
+                    yield {"type": "status", "text": "💡 " + payload["note"].strip()}
+                yield {"type": "status", "text": (
+                    f"✅ {len(angles)} angle{'s' if len(angles) != 1 else ''} to choose from")}
+                yield {"type": "done", "angles": angles, "product": product}
+                return
+
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+# ── Revising a written prompt ──────────────────────────────────────────────
+
+def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
+                         aspect="16:9", has_image=False, photos=None, angle=""):
+    """Apply a requested change to an existing prompt, keeping the rest intact."""
+    current = (current or "").strip()
+    instructions = (instructions or "").strip()
+    if not current:
+        yield {"type": "done", "error": "There is no prompt to change yet."}
+        return
+    if not instructions:
+        yield {"type": "done", "error": "Say what you would like changed."}
+        return
+
+    photos = _clean_photos(photos)
+    try:
+        yield {"type": "status", "text": "🔧 Applying your change…"}
+
+        spec = model_spec(model)
+        content = _photo_blocks(photos, "PHOTO FROM THE USER")
+        brief = []
+        if photos:
+            brief += ["The photo(s) above are the user's, for reference.", ""]
+        brief += [
+            "THE PROMPT AS IT STANDS:",
+            current,
+            "",
+            "THE CHANGE THE USER WANTS:",
+            instructions,
+            "",
+            "THE SETTINGS (unchanged):",
+            f"- Video model: {spec['label']}",
+            f"- Length: {clamp_seconds(seconds, model)} seconds",
+            f"- Framing: {aspect} ({ASPECTS.get(aspect, {}).get('label', '')})",
+        ]
+        if (angle or "").strip():
+            brief += ["", "THE MARKETING ANGLE IT SHOULD STILL SERVE:", angle.strip()]
+        if has_image:
+            brief += ["", "A product reference still supplies the first frame, so keep referring "
+                          "to the product generically rather than describing its appearance."]
+        content.append({"type": "text", "text": "\n".join(brief)})
+
+        for kind, payload in _drain(_ask_claude(
+                REFINE_SYSTEM, content, PROMPT_WRITER_SCHEMA, "a prompt")):
+            if kind == "status":
+                yield payload
+            elif kind == "error":
+                yield {"type": "done", "error": payload}
+                return
+            else:
+                prompt = (payload.get("prompt") or "").strip()
+                if not prompt:
+                    yield {"type": "done", "error": "Claude returned an empty prompt. Try again."}
+                    return
+                note = (payload.get("note") or "").strip()
+                if note:
+                    yield {"type": "status", "text": f"💡 {note}"}
+                yield {"type": "status", "text": "✅ Updated"}
+                yield {"type": "done", "prompt": prompt, "note": note}
+                return
+
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+def _writer_content(idea, model, seconds, aspect, has_image, photos, angle=""):
     """The user turn: the photos first, then the brief.
 
     Images go before the text they relate to — the model reads the block order,
     and a brief that says "the photos above" has to actually follow them.
     """
-    content = []
-    for i, img in enumerate(photos, start=1):
-        content.append({"type": "text", "text": f"PHOTO {i} FROM THE USER:"})
-        content.append({"type": "image", "source": {
-            "type": "base64",
-            "media_type": img.get("media_type") or "image/jpeg",
-            "data": img["b64"],
-        }})
+    content = _photo_blocks(photos, "PHOTO FROM THE USER")
     content.append({"type": "text", "text": _writer_brief(
-        idea, model, seconds, aspect, has_image, n_photos=len(photos))})
+        idea, model, seconds, aspect, has_image, n_photos=len(photos), angle=angle)})
     return content
 
 
 def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
-                        has_image=False, photos=None):
+                        has_image=False, photos=None, angle=""):
     """Turn a one-line idea into a finished video prompt. Yields status events.
 
     `photos` are shown to Claude so it can write from what the user's product
     actually looks like. They are not the clip's first frame — that is the
     separate product reference, and `has_image` says whether one is set.
+    `angle` is the marketing angle the clip should serve, if one was chosen.
     """
     idea = (idea or "").strip()
-    photos = [p for p in (photos or []) if p and p.get("b64")][:MAX_IDEA_IMAGES]
+    photos = _clean_photos(photos)
     if not idea and not photos:
         yield {"type": "done", "error": "Describe your idea first, even in one line."}
         return
@@ -675,73 +986,30 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
             f"✍️ Writing a {clamp_seconds(seconds, model)}s {aspect} prompt for "
             f"{spec['label']}"
             + (f", reading your {len(photos)} photo(s)" if photos else "")
+            + (", on your angle" if (angle or "").strip() else "")
             + (" (a first frame is set)" if has_image else "") + "…")}
 
-        message = None
-        for attempt in range(1, WRITER_ATTEMPTS + 1):
-            try:
-                # Streaming so a long think cannot hit the request timeout;
-                # structured output so the result drops straight into the prompt
-                # box without a "Here's your prompt:" preamble to strip. Prefill
-                # would have been the old way to force that and is rejected on
-                # this model.
-                with claude.messages.stream(
-                    model=PROMPT_WRITER_MODEL,
-                    max_tokens=8000,
-                    system=PROMPT_WRITER_SYSTEM,
-                    output_config={
-                        "effort": "medium",
-                        "format": {"type": "json_schema", "schema": PROMPT_WRITER_SCHEMA},
-                    },
-                    messages=[{"role": "user", "content": _writer_content(
-                        idea, model, seconds, aspect, has_image, photos)}],
-                ) as stream:
-                    message = stream.get_final_message()
-                break
-            except anthropic.APIStatusError as e:
-                # The SDK retries transport-level 429/5xx itself, but an
-                # overload that arrives inside an open stream is not retried —
-                # it surfaces here, and it is exactly the case worth repeating.
-                if not _is_transient(e) or attempt == WRITER_ATTEMPTS:
-                    raise
-                wait = 3 * attempt
-                yield {"type": "status", "text": (
-                    f"⏳ Claude is busy right now — trying again in {wait}s "
-                    f"(attempt {attempt + 1} of {WRITER_ATTEMPTS})")}
-                time.sleep(wait)
+        for kind, payload in _drain(_ask_claude(
+                PROMPT_WRITER_SYSTEM,
+                _writer_content(idea, model, seconds, aspect, has_image, photos, angle),
+                PROMPT_WRITER_SCHEMA, "a prompt")):
+            if kind == "status":
+                yield payload
+            elif kind == "error":
+                yield {"type": "done", "error": payload}
+                return
+            else:
+                prompt = (payload.get("prompt") or "").strip()
+                if not prompt:
+                    yield {"type": "done", "error": "Claude returned an empty prompt. Try again."}
+                    return
+                note = (payload.get("note") or "").strip()
+                if note:
+                    yield {"type": "status", "text": f"💡 {note}"}
+                yield {"type": "status", "text": "✅ Prompt ready"}
+                yield {"type": "done", "prompt": prompt, "note": note}
+                return
 
-        if message.stop_reason == "refusal":
-            yield {"type": "done", "error": (
-                "Claude declined to write this one. Rephrase the idea and try again.")}
-            return
-
-        text = next((b.text for b in message.content if b.type == "text"), "")
-        data = json.loads(text)
-        prompt = (data.get("prompt") or "").strip()
-        if not prompt:
-            yield {"type": "done", "error": "Claude returned an empty prompt. Try again."}
-            return
-
-        note = (data.get("note") or "").strip()
-        if note:
-            yield {"type": "status", "text": f"💡 {note}"}
-        yield {"type": "status", "text": "✅ Prompt ready"}
-        yield {"type": "done", "prompt": prompt, "note": note}
-
-    except anthropic.APIStatusError as e:
-        if _is_transient(e):
-            # Say what it means, not what the wire said. Quoting `status_code`
-            # here is what produced "Claude API error 200" for a plain overload.
-            yield {"type": "done", "error": (
-                "Claude is overloaded at the moment — this is temporary and not "
-                "a problem with your idea. Press the button again in a minute.")}
-        else:
-            yield {"type": "done",
-                   "error": f"Claude API error {e.status_code}: {str(e)[:200]}"}
-    except anthropic.APIConnectionError:
-        yield {"type": "done", "error": "Could not reach Claude. Check the network and try again."}
-    except json.JSONDecodeError:
-        yield {"type": "done", "error": "Claude returned something that was not a prompt. Try again."}
     except Exception as e:
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
 
