@@ -3186,7 +3186,13 @@ function clipPickAngle(i) {
   const angles = JSON.parse(list.dataset.angles || '[]');
   const a = angles[i];
   if (!a) return;
-  document.getElementById('clip-angle').value = a.angle;
+  // Carry the title and the audience across too, not just the middle line —
+  // the writer needs to know who the ad is for. "Aimed at:" labels the last
+  // part because the angle text contains dashes of its own, so a bare dash
+  // would not tell the model where one part ends and the next begins.
+  const parts = [(a.title || '').trim(), (a.angle || '').trim()].filter(Boolean);
+  if ((a.audience || '').trim()) parts.push('Aimed at: ' + a.audience.trim());
+  document.getElementById('clip-angle').value = parts.join(' — ');
   // Mark the chosen one rather than clearing the list — the others stay
   // available in case this one turns out not to write well.
   list.querySelectorAll('[data-angle-idx]').forEach(el => {

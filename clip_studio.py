@@ -682,6 +682,21 @@ PROMPT_WRITER_SCHEMA = {
 }
 
 
+# Shared by the writer and the reviser so the two cannot drift apart.
+_ANGLE_GUIDANCE = (
+    "The angle may arrive as up to three parts separated by dashes: a short title, then the angle "
+    "itself, then — after \"Aimed at:\" — the audience it is meant for. Read all of it.\n\n"
+    "The angle decides WHICH moment you film. Choose the single visible moment that carries it and "
+    "build the shot around that, not a generic pretty shot of the product with the angle bolted on. "
+    "Do not state the angle in words anywhere in the prompt; a video model cannot film an idea, "
+    "only what the idea looks like.\n\n"
+    "The audience is WHO THE AD IS FOR. It shapes who appears on camera, the home or place the shot "
+    "is set in, the clothes, the time of day, the whole texture of the thing. It is NOT a list of "
+    "people to put in the frame: \"people who quit supplements because of pills\" means cast and "
+    "stage the shot for that person, not show a group of them."
+)
+
+
 def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
                   has_image=False, n_photos=0, angle=""):
     spec = model_spec(model)
@@ -704,16 +719,7 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         "it asks for.",
     ]
     if angle:
-        lines += [
-            "",
-            "THE MARKETING ANGLE THIS CLIP MUST SERVE:",
-            angle,
-            "",
-            "The angle decides WHICH moment you film. Choose the single visible moment that carries "
-            "it and build the shot around that — not a generic pretty shot of the product with the "
-            "angle bolted on. Do not state the angle in words anywhere in the prompt; a video model "
-            "cannot film an idea, only what the idea looks like.",
-        ]
+        lines += ["", "THE MARKETING ANGLE THIS CLIP MUST SERVE:", angle, "", _ANGLE_GUIDANCE]
     lines += [
         "",
         "THE SETTINGS CURRENTLY SET IN THE APP — this is what the clip will actually be generated at:",
@@ -977,7 +983,8 @@ def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
             f"- Framing: {aspect} ({ASPECTS.get(aspect, {}).get('label', '')})",
         ]
         if (angle or "").strip():
-            brief += ["", "THE MARKETING ANGLE IT SHOULD STILL SERVE:", angle.strip()]
+            brief += ["", "THE MARKETING ANGLE IT SHOULD STILL SERVE:", angle.strip(),
+                      "", _ANGLE_GUIDANCE]
         if has_image:
             brief += ["", "A product reference still supplies the first frame, so keep referring "
                           "to the product generically rather than describing its appearance."]
