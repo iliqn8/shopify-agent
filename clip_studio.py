@@ -483,6 +483,25 @@ def save_output(video_url, prompt, container="mp4", output_dir=None):
 PROMPT_WRITER_SYSTEM = """You write prompts for image-to-video and text-to-video models. Someone gives you a
 rough idea for a product clip; you return the finished prompt they will send to the model.
 
+THE USER'S OWN INSTRUCTIONS COME FIRST — READ THIS BEFORE ANYTHING ELSE
+
+What follows is house style: what to do when the user has described an idea and left the shape of
+the prompt to you. It is not a format to impose on someone who has already said what they want.
+
+Users often paste a brief or a template rather than a one-line idea — a structure to follow, a
+number of scenes, timestamps, a voiceover per scene, a hook and a call to action, a particular
+deliverable at the end. When they do, FOLLOW IT EXACTLY. Produce the number of scenes they ask for,
+label them the way they ask, include every element they list, and deliver everything they ask for.
+Do not flatten a multi-scene brief into a single paragraph, do not drop the voiceover because the
+guidance below is about visuals, and do not silently substitute your own structure for theirs.
+Anything below that contradicts what they asked for is overridden by what they asked for.
+
+The rules further down still govern HOW you describe each shot — concrete detail, motion that is
+readable, physical grounding. They do not govern how many shots there are or how the output is laid
+out. Those are the user's to decide.
+
+WHEN THE SHAPE IS LEFT TO YOU
+
 Write the prompt as plain prose, in English, in the present tense — one paragraph, or two if the
 shot genuinely has a second beat. No headings, no bullet lists, no labels like "Camera:", no
 key-value pairs. These models read a prompt as a description, not as a form.
@@ -507,16 +526,24 @@ which objects stay exactly where they are, and where the waterline sits if there
 write "walks", "steps" or "runs" for movement through water — that phrasing puts the subject on top
 of the surface. Say it swims, paddles, or wades with the water at a named height on its body.
 
-Do not ask for on-screen text, captions, logos, subtitles or lettering. Video models smear letters
-into unreadable mush, and the request alone can trip a provider's content filter.
+Do not ask for ADDED text — captions, subtitles, hook lines burned over the picture, invented
+logos. Video models smear lettering into mush, and asking to add or remove a watermark can trip a
+provider's content filter on the wording alone. Text that is genuinely part of the scene is a
+different matter: a product's own printed label is part of the product, and saying it stays sharp
+and readable is fair and often necessary.
 
 LENGTH SHAPES THE CONTENT
 
 A 4-6 second clip holds exactly one beat — one action, start to finish. Around 8-12 seconds you can
-carry one action through to a small resolution. Past 15 seconds you can afford a second beat, but
-describe it as a continuation of the same shot, not as a cut; these models generate one continuous
-take and asking for an edit produces a mess. Never write a prompt with more beats than the runtime
-supports — an overstuffed prompt makes the model rush the whole thing.
+carry one action through to a small resolution. Never write more beats than the runtime supports; an
+overstuffed prompt makes the model rush everything in it.
+
+Past roughly 15 seconds a single unbroken take usually has nothing left to do, and a sequence of
+short scenes is the normal shape — this is how most product ads at that length are built. Give each
+scene its own moment and keep each one simple; the per-shot rules above apply to every scene
+separately. Bear in mind the model still renders the whole thing in one generation, so cuts come out
+as its interpretation of your description rather than as a real edit: make each scene vivid and
+distinct enough that the change of shot is unmistakable.
 
 THE FRAMING YOU ARE WRITING FOR
 
@@ -630,7 +657,18 @@ PROMPT_WRITER_SCHEMA = {
     "properties": {
         "prompt": {
             "type": "string",
-            "description": "The finished prompt, ready to send to the video model. Prose only.",
+            "description": ("The finished prompt, ready to send to the video model — everything "
+                            "the video model should read, and nothing else. If the user asked for "
+                            "scenes, timestamps or per-scene voiceover lines, they belong here, "
+                            "laid out the way they asked."),
+        },
+        "voiceover_script": {
+            "type": "string",
+            "description": ("ONLY when the user asked for a separate spoken script as its own "
+                            "deliverable. The spoken lines alone, in order, with no labels, "
+                            "timestamps or stage directions — ready to paste into a voice tool. "
+                            "Empty string whenever they did not ask for one; never duplicate the "
+                            "prompt here."),
         },
         "note": {
             "type": "string",
@@ -639,7 +677,7 @@ PROMPT_WRITER_SCHEMA = {
                             "the runtime holds. Empty string if there is nothing worth saying."),
         },
     },
-    "required": ["prompt", "note"],
+    "required": ["prompt", "voiceover_script", "note"],
     "additionalProperties": False,
 }
 
@@ -657,8 +695,13 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
             "",
         ]
     lines += [
-        "THE IDEA, in the user's own words:",
+        "WHAT THE USER WROTE — their own words, in full:",
         idea.strip() or "(they wrote nothing — work from the photos and the angle)",
+        "",
+        "If that is a brief or a template rather than a one-line idea — if it asks for a number of "
+        "scenes, timestamps, voiceover lines, a hook, a call to action, or a particular deliverable "
+        "— then it is an instruction, not a description. Follow it exactly and give them everything "
+        "it asks for.",
     ]
     if angle:
         lines += [
@@ -673,10 +716,14 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         ]
     lines += [
         "",
-        "THE SETTINGS THEY HAVE CHOSEN:",
+        "THE SETTINGS CURRENTLY SET IN THE APP — this is what the clip will actually be generated at:",
         f"- Video model: {spec['label']}",
         f"- Length: {clamp_seconds(seconds, model)} seconds",
         f"- Framing: {aspect} ({ASPECTS.get(aspect, {}).get('label', '')})",
+        "",
+        "If what the user wrote asks for a different length or shape from these, write what THEY "
+        "asked for and say so in one line in your note, so they can change the setting to match. "
+        "Do not quietly cut their brief down to fit a slider they may simply not have moved yet.",
     ]
     if has_image:
         lines += [
@@ -743,10 +790,16 @@ def _ask_claude(system, content, schema, label):
         try:
             with claude.messages.stream(
                 model=PROMPT_WRITER_MODEL,
-                max_tokens=8000,
+                # A multi-scene brief runs to a thousand words of script, and
+                # thinking shares this budget — 8000 was sized for a single
+                # paragraph and would truncate one of those mid-scene.
+                max_tokens=32000,
                 system=system,
                 output_config={
-                    "effort": "medium",
+                    # `high` is the API default and what a plain Claude chat
+                    # gets. `medium` was saving tokens at the cost of exactly
+                    # the writing quality this feature exists to provide.
+                    "effort": "high",
                     "format": {"type": "json_schema", "schema": schema},
                 },
                 messages=[{"role": "user", "content": content}],
@@ -943,10 +996,11 @@ def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
                     yield {"type": "done", "error": "Claude returned an empty prompt. Try again."}
                     return
                 note = (payload.get("note") or "").strip()
+                vo = (payload.get("voiceover_script") or "").strip()
                 if note:
                     yield {"type": "status", "text": f"💡 {note}"}
                 yield {"type": "status", "text": "✅ Updated"}
-                yield {"type": "done", "prompt": prompt, "note": note}
+                yield {"type": "done", "prompt": prompt, "note": note, "voiceover_script": vo}
                 return
 
     except Exception as e:
@@ -1004,10 +1058,12 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
                     yield {"type": "done", "error": "Claude returned an empty prompt. Try again."}
                     return
                 note = (payload.get("note") or "").strip()
+                vo = (payload.get("voiceover_script") or "").strip()
                 if note:
                     yield {"type": "status", "text": f"💡 {note}"}
-                yield {"type": "status", "text": "✅ Prompt ready"}
-                yield {"type": "done", "prompt": prompt, "note": note}
+                yield {"type": "status", "text": (
+                    "✅ Prompt ready" + (" · voiceover script included" if vo else ""))}
+                yield {"type": "done", "prompt": prompt, "note": note, "voiceover_script": vo}
                 return
 
     except Exception as e:

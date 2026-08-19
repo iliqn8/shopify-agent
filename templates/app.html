@@ -652,6 +652,17 @@
         <textarea id="clip-prompt" rows="4" placeholder="Describe the clip: what is in shot, what moves, the camera, the light, the mood."
           style="width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
 
+        <!-- Voiceover script, when the brief asked for one as its own deliverable -->
+        <div id="clip-vo-row" style="display:none;margin-top:8px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;flex-wrap:wrap">
+            <label style="color:#a5b4fc;font-size:12px">🎙️ VOICEOVER SCRIPT
+              <span style="color:#666">— spoken lines only, ready to paste into a voice tool</span></label>
+            <button class="btn-sm" onclick="clipCopyVo(this)">📋 Copy</button>
+          </div>
+          <textarea id="clip-vo" rows="5"
+            style="width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+        </div>
+
         <!-- Refine the written prompt -->
         <div id="clip-refine-row" style="display:none;margin-top:8px;background:#141420;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px">
           <label style="color:#a5b4fc;font-size:12px;display:block;margin-bottom:6px">
@@ -3085,6 +3096,28 @@ function clipShowRefine(on) {
   document.getElementById('clip-refine-row').style.display = on ? 'block' : 'none';
 }
 
+// The voiceover box only exists when the brief asked for a spoken script as a
+// separate deliverable — most single-shot clips have none, so it stays hidden.
+function clipShowVo(text) {
+  const row = document.getElementById('clip-vo-row');
+  if ((text || '').trim()) {
+    document.getElementById('clip-vo').value = text.trim();
+    row.style.display = 'block';
+  } else {
+    row.style.display = 'none';
+    document.getElementById('clip-vo').value = '';
+  }
+}
+
+function clipCopyVo(btn) {
+  const t = document.getElementById('clip-vo').value;
+  navigator.clipboard.writeText(t).then(() => {
+    const was = btn.textContent;
+    btn.textContent = '✅ Copied';
+    setTimeout(() => { btn.textContent = was; }, 1500);
+  });
+}
+
 async function clipSuggestAngles() {
   const url = document.getElementById('clip-angle-url').value.trim();
   if (!url && !clipIdeaPhotos.length) {
@@ -3206,6 +3239,9 @@ async function clipRefinePrompt() {
         if (ev.error) { done('❌ ' + ev.error, '#f87171'); return; }
         clipPromptBefore = current;
         box.value = ev.prompt;
+        // Only replace the script if the revision produced one — a refine that
+        // touches only the visuals should not wipe a script already written.
+        if ((ev.voiceover_script || '').trim()) clipShowVo(ev.voiceover_script);
         document.getElementById('clip-refine').value = '';
         document.getElementById('clip-undo-btn').style.display = 'inline-block';
         done(ev.note ? '💡 ' + ev.note : '✅ Updated — ask for another change if you like', '#4ade80');
@@ -3274,6 +3310,7 @@ async function clipWritePrompt() {
         document.getElementById('clip-undo-btn').style.display = 'none';
         document.getElementById('clip-refine-status').textContent = '';
         clipShowRefine(true);
+        clipShowVo(ev.voiceover_script);
         done(ev.note ? '💡 ' + ev.note : '✅ Written — edit it, or ask for a change below', '#4ade80');
         document.getElementById('clip-prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
