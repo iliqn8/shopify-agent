@@ -12,6 +12,7 @@ load_dotenv()
 import knowledge_base as kb
 import claude_agent as agent
 import dev_agent
+import theme_writer
 
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
@@ -345,7 +346,8 @@ def product_build_start():
         try:
             import product_builder
             for event in product_builder.build_stream(
-                product_name, competitor_url, product_cost, shipping_cost, images
+                product_name, competitor_url, product_cost, shipping_cost, images,
+                prompt_override=data.get("prompt", "")
             ):
                 _build_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":
@@ -386,6 +388,83 @@ def product_publish():
 @app.route("/api/product-pages", methods=["GET"])
 def list_product_pages():
     return jsonify(kb.list_product_pages())
+
+
+# ── Writing generated copy and colours into the theme ──────────────────────
+
+def _theme_request():
+    """The bits every theme-writing call needs, read the same way each time."""
+    d = request.json or {}
+    return {
+        "text": (d.get("text") or "").strip(),
+        "template_key": (d.get("template") or "").strip() or theme_writer.TEMPLATE_KEY,
+        "do_colors": bool(d.get("colors", True)),
+        "do_copy": bool(d.get("copy", True)),
+        "do_globals": bool(d.get("globals", False)),
+    }
+
+
+@app.route("/api/theme-templates", methods=["GET"])
+def theme_templates():
+    try:
+        return jsonify(theme_writer.list_product_templates())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/theme-format-help", methods=["GET"])
+def theme_format_help():
+    return jsonify({"blocks": theme_writer.FORMAT_HELP,
+                    "rules": theme_writer.FORMAT_RULES})
+
+
+@app.route("/api/theme-preview", methods=["POST"])
+def theme_preview():
+    args = _theme_request()
+    if not args["text"]:
+        return jsonify({"error": "Paste the generated output first."}), 400
+    try:
+        result = theme_writer.build(**args)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    # the new file bodies are rebuilt on apply; sending them twice is wasted weight
+    result.pop("files", None)
+    return jsonify(result)
+
+
+@app.route("/api/theme-apply", methods=["POST"])
+def theme_apply():
+    args = _theme_request()
+    if not args["text"]:
+        return jsonify({"error": "Paste the generated output first."}), 400
+    try:
+        result = theme_writer.build(**args)
+        outcome = theme_writer.apply(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    if not outcome.get("ok"):
+        return jsonify({"error": outcome.get("error"),
+                        "problems": outcome.get("problems", [])}), 400
+    return jsonify({**outcome, "changed": len(result["changes"])})
+
+
+@app.route("/api/builder-prompts", methods=["GET", "POST"])
+def builder_prompts():
+    """Saved Product Builder prompts. Same table as Clip Studio, own kind."""
+    if request.method == "GET":
+        return jsonify(kb.list_prompts("builder"))
+    d = request.json or {}
+    prompt = (d.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Nothing to save."}), 400
+    title = (d.get("title") or "").strip() or (prompt[:40] + ("…" if len(prompt) > 40 else ""))
+    return jsonify({"id": kb.save_prompt(title, prompt, "builder"), "title": title})
+
+
+@app.route("/api/builder-prompts/<int:pid>", methods=["DELETE"])
+def delete_builder_prompt(pid):
+    kb.delete_prompt(pid)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/product-pages/<int:pid>", methods=["DELETE"])

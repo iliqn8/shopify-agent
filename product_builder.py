@@ -119,13 +119,31 @@ SELF-CHECK BEFORE YOU SEND: Verify — ONE title only, paragraphs 1-2 sentences,
 """
 
 
-def build_stream(product_name, competitor_url, product_cost, shipping_cost, images=None):
-    """Generator yielding {type: status/done} events."""
-    prompt = (PROMPT_TEMPLATE
+def build_stream(product_name, competitor_url, product_cost, shipping_cost, images=None,
+                 prompt_override=None):
+    """Generator yielding {type: status/done} events.
+
+    `prompt_override` is whatever the operator typed in the prompt box. When it
+    is empty we fall back to the built-in template, so the tab keeps working
+    for anyone who just wants to fill the form and press Generate.
+
+    The same [PRODUCT_NAME] style placeholders are substituted either way, so a
+    custom prompt can use them too — or ignore them and describe the product in
+    its own words.
+    """
+    base = (prompt_override or "").strip() or PROMPT_TEMPLATE
+    prompt = (base
               .replace("[PRODUCT_NAME]", product_name)
               .replace("[COMPETITOR_URL]", competitor_url or "no competitor URL provided")
               .replace("[PRODUCT_COST]", str(product_cost))
               .replace("[SHIPPING_COST]", str(shipping_cost)))
+    if prompt_override and "[PRODUCT_NAME]" not in prompt_override:
+        # a custom prompt that never names the product still needs to know it
+        prompt = ("%s\n\nINPUTS\nProduct name: %s\nCompetitor URL: %s\n"
+                  "Product cost: $%s\nShipping cost: $%s"
+                  % (prompt, product_name,
+                     competitor_url or "no competitor URL provided",
+                     product_cost, shipping_cost))
 
     yield {"type": "status", "text": "🛍️ Building your product page..."}
 

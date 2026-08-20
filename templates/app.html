@@ -158,6 +158,23 @@
 
     <div style="display:grid;gap:16px">
       <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+          <label style="color:#aaa;font-size:12px">YOUR PROMPT <span style="color:#555">(leave empty to use the built-in one)</span></label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="pb-saved" onchange="pbLoadPrompt(this.value)" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 8px;border-radius:6px;font-size:12px;max-width:190px">
+              <option value="">Saved prompts…</option>
+            </select>
+            <button onclick="pbSavePrompt()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px">💾 Save</button>
+            <button id="pb-del-prompt" onclick="pbDeletePrompt()" disabled style="background:#1e1e1e;border:1px solid #333;color:#555;padding:5px 10px;border-radius:6px;cursor:not-allowed;font-size:12px">🗑</button>
+          </div>
+        </div>
+        <textarea id="pb-prompt" rows="8" placeholder="Paste the prompt that should generate the page. It must output the field names shown in the format guide below, or nothing can be written to the theme." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:13px;line-height:1.6;box-sizing:border-box;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace"></textarea>
+        <div style="margin-top:8px">
+          <button onclick="pbToggleHelp()" style="background:none;border:none;color:#6366f1;padding:0;cursor:pointer;font-size:12.5px">📖 What the prompt has to output</button>
+          <div id="pb-help" style="display:none;margin-top:10px;background:#0e0e0e;border:1px solid #222;border-radius:10px;padding:16px"></div>
+        </div>
+      </div>
+      <div>
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT NAME *</label>
         <input id="pb-product" type="text" placeholder="e.g. Magnetic eyelashes" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
       </div>
@@ -202,6 +219,45 @@
         🛍️ Create in Shopify
       </button>
       <div id="pb-publish-status" style="display:none;margin-top:10px;font-size:13px;text-align:center"></div>
+
+      <!-- Write the generated copy and colours into the theme -->
+      <div style="margin-top:28px;border-top:1px solid #222;padding-top:20px">
+        <h3 style="color:#fff;font-size:15px;margin:0 0 4px">🎨 Write into the theme</h3>
+        <p style="color:#888;font-size:12.5px;margin:0 0 16px">Reads the output above and fills the section fields. Preview first — Apply stays locked until you have seen the changes.</p>
+
+        <div style="display:grid;gap:14px">
+          <div>
+            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT TEMPLATE</label>
+            <select id="pb-tpl" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:13.5px;box-sizing:border-box">
+              <option value="">Loading…</option>
+            </select>
+            <div id="pb-tpl-note" style="color:#666;font-size:12px;margin-top:6px"></div>
+          </div>
+
+          <div style="display:flex;gap:18px;flex-wrap:wrap">
+            <label style="color:#ccc;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer">
+              <input type="checkbox" id="pb-w-colors" checked onchange="pbResetPreview()"> Colours
+            </label>
+            <label style="color:#ccc;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer">
+              <input type="checkbox" id="pb-w-copy" checked onchange="pbResetPreview()"> Section copy
+            </label>
+            <label style="color:#ccc;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer">
+              <input type="checkbox" id="pb-w-globals" onchange="pbResetPreview()"> Theme colours
+            </label>
+          </div>
+          <div id="pb-globals-warn" style="display:none;background:#2a1e14;border:1px solid #6b4a2a;border-left-width:3px;border-radius:8px;padding:11px 14px;color:#e0b183;font-size:12.5px">
+            Theme colours reach the header, the cart, collection pages and every other product page — not just this one.
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <button id="pb-preview-btn" onclick="pbPreview()" style="background:#1e1e1e;border:1px solid #444;color:#fff;padding:12px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer">🔍 Preview changes</button>
+            <button id="pb-apply-btn" onclick="pbApply()" disabled style="background:#1e1e1e;border:1px solid #333;color:#555;padding:12px;border-radius:10px;font-size:14px;font-weight:600;cursor:not-allowed">✍️ Apply to theme</button>
+          </div>
+        </div>
+
+        <div id="pb-theme-status" style="display:none;margin-top:12px;font-size:13px"></div>
+        <div id="pb-theme-diff" style="display:none;margin-top:14px"></div>
+      </div>
     </div>
 
     <!-- History -->
@@ -879,7 +935,7 @@ function switchTab(tab, el) {
   document.getElementById('panel-' + tab).classList.add('active');
   if (tab === 'training') loadKnowledge();
   if (tab === 'imagegen' && !imageGenLoaded) loadImageGen();
-  if (tab === 'builder') pbLoadHistory();
+  if (tab === 'builder') pbInit();
   if (tab === 'sections') secLoadHistory();
   if (tab === 'video') vidInit();
   if (tab === 'clips') clipInit();
@@ -1256,6 +1312,7 @@ async function pbGenerate() {
         competitor_url: competitorUrl,
         product_cost: productCost,
         shipping_cost: shippingCost,
+        prompt: document.getElementById('pb-prompt').value,
         images: pbImages.map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type}))
       })
     });
@@ -1340,6 +1397,310 @@ async function pbPublish() {
     btn.textContent = '🛍️ Create in Shopify';
     statusEl.style.color = '#f87171';
     statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+// ── Tab setup ─────────────────────────────────────────────────────────────
+
+let pbInited = false;
+
+function pbInit() {
+  pbLoadHistory();
+  if (pbInited) return;
+  pbInited = true;
+  pbLoadSavedPrompts();
+  pbLoadTemplates();
+  pbResetPreview();
+}
+
+// ── Saved prompts ─────────────────────────────────────────────────────────
+
+let pbPrompts = [];
+
+async function pbLoadSavedPrompts() {
+  try {
+    pbPrompts = await (await fetch('/api/builder-prompts')).json();
+  } catch(e) { pbPrompts = []; }
+  const sel = document.getElementById('pb-saved');
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">Saved prompts…</option>' +
+    pbPrompts.map(p => `<option value="${p.id}">${pbEsc(p.title)}</option>`).join('');
+  if (pbPrompts.some(p => String(p.id) === keep)) sel.value = keep;
+  pbSyncDeleteBtn();
+}
+
+function pbSyncDeleteBtn() {
+  const on = !!document.getElementById('pb-saved').value;
+  const b = document.getElementById('pb-del-prompt');
+  b.disabled = !on;
+  b.style.color = on ? '#aaa' : '#555';
+  b.style.cursor = on ? 'pointer' : 'not-allowed';
+}
+
+function pbLoadPrompt(id) {
+  const p = pbPrompts.find(x => String(x.id) === String(id));
+  if (p) document.getElementById('pb-prompt').value = p.prompt;
+  pbSyncDeleteBtn();
+}
+
+async function pbSavePrompt() {
+  const prompt = document.getElementById('pb-prompt').value.trim();
+  if (!prompt) { alert('Nothing to save — the prompt box is empty.'); return; }
+  const title = window.prompt('Name this prompt:', '');
+  if (title === null) return;
+  const res = await fetch('/api/builder-prompts', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({title, prompt})
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); return; }
+  await pbLoadSavedPrompts();
+  document.getElementById('pb-saved').value = data.id;
+  pbSyncDeleteBtn();
+}
+
+async function pbDeletePrompt() {
+  const id = document.getElementById('pb-saved').value;
+  if (!id) return;
+  const p = pbPrompts.find(x => String(x.id) === String(id));
+  if (!confirm(`Delete "${p ? p.title : 'this prompt'}"?`)) return;
+  await fetch('/api/builder-prompts/' + id, {method:'DELETE'});
+  await pbLoadSavedPrompts();
+}
+
+// ── Format guide ──────────────────────────────────────────────────────────
+
+let pbHelpLoaded = false;
+
+async function pbToggleHelp() {
+  const box = document.getElementById('pb-help');
+  const showing = box.style.display !== 'none';
+  if (showing) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  if (pbHelpLoaded) return;
+  box.innerHTML = '<div style="color:#666;font-size:13px">Loading…</div>';
+  try {
+    const h = await (await fetch('/api/theme-format-help')).json();
+    box.innerHTML =
+      '<p style="color:#aaa;font-size:13px;margin:0 0 14px;line-height:1.6">Apply can only write what it recognises. Each block below is optional — include the ones you want written.</p>' +
+      h.blocks.map(b => `
+        <div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #1c1c1c">
+          <div style="color:#fff;font-size:13.5px;font-weight:600;margin-bottom:3px">${pbEsc(b.title)}</div>
+          <div style="color:#888;font-size:12.5px;margin-bottom:6px">${pbEsc(b.why)}</div>
+          <div style="color:#aaa;font-size:12.5px;line-height:1.55;margin-bottom:8px">${pbEsc(b.needs)}</div>
+          <pre style="margin:0;background:#151515;border:1px solid #242424;border-radius:8px;padding:12px 14px;color:#cfd6e4;font-size:11.5px;line-height:1.55;overflow-x:auto;white-space:pre">${pbEsc(b.example)}</pre>
+        </div>`).join('') +
+      '<div style="color:#fff;font-size:13px;font-weight:600;margin-bottom:7px">Rules</div><ul style="margin:0;padding-left:18px;color:#aaa;font-size:12.5px;line-height:1.65">' +
+      h.rules.map(r => `<li style="margin-bottom:5px">${pbEsc(r)}</li>`).join('') + '</ul>';
+    pbHelpLoaded = true;
+  } catch(e) {
+    box.innerHTML = '<div style="color:#f87171;font-size:13px">Could not load the guide: ' + pbEsc(e.message) + '</div>';
+  }
+}
+
+function pbEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// ── Writing into the theme ────────────────────────────────────────────────
+
+let pbPreviewData = null;
+
+async function pbLoadTemplates() {
+  const sel = document.getElementById('pb-tpl');
+  try {
+    const list = await (await fetch('/api/theme-templates')).json();
+    if (list.error) throw new Error(list.error);
+    sel.innerHTML = list.map(t =>
+      `<option value="${pbEsc(t.key)}" data-grid="${t.has_grid}" data-table="${t.has_table}">${pbEsc(t.label)} — ${t.sections} sections</option>`
+    ).join('');
+    const gummies = list.find(t => t.key.includes('gummies'));
+    if (gummies) sel.value = gummies.key;
+    pbTplNote();
+    sel.onchange = () => { pbTplNote(); pbResetPreview(); };
+  } catch(e) {
+    sel.innerHTML = '<option value="">Could not load templates</option>';
+  }
+}
+
+function pbTplNote() {
+  const sel = document.getElementById('pb-tpl');
+  const o = sel.options[sel.selectedIndex];
+  const note = document.getElementById('pb-tpl-note');
+  if (!o || !o.dataset.grid) { note.textContent = ''; return; }
+  const g = +o.dataset.grid, t = +o.dataset.table;
+  const bits = [];
+  bits.push(g ? `${g} features grid${g > 1 ? 's' : ''}` : 'no features grid');
+  bits.push(t ? `${t} comparison table` : 'no comparison table');
+  note.textContent = 'This template has ' + bits.join(', ') + '.';
+  note.style.color = (g || t) ? '#666' : '#c08552';
+}
+
+function pbResetPreview() {
+  pbPreviewData = null;
+  const b = document.getElementById('pb-apply-btn');
+  b.disabled = true;
+  b.style.background = '#1e1e1e';
+  b.style.color = '#555';
+  b.style.borderColor = '#333';
+  b.style.cursor = 'not-allowed';
+  document.getElementById('pb-theme-diff').style.display = 'none';
+  document.getElementById('pb-theme-status').style.display = 'none';
+  document.getElementById('pb-globals-warn').style.display =
+    document.getElementById('pb-w-globals').checked ? 'block' : 'none';
+}
+
+function pbThemeArgs() {
+  return {
+    text: document.getElementById('pb-output').textContent || '',
+    template: document.getElementById('pb-tpl').value,
+    colors: document.getElementById('pb-w-colors').checked,
+    copy: document.getElementById('pb-w-copy').checked,
+    globals: document.getElementById('pb-w-globals').checked
+  };
+}
+
+async function pbPreview() {
+  const args = pbThemeArgs();
+  if (!args.text.trim()) { alert('Generate a page first — there is no output to read.'); return; }
+
+  const btn = document.getElementById('pb-preview-btn');
+  const status = document.getElementById('pb-theme-status');
+  const diff = document.getElementById('pb-theme-diff');
+  btn.disabled = true; btn.textContent = '⏳ Reading…';
+  status.style.display = 'block'; status.style.color = '#888';
+  status.textContent = 'Reading the output and comparing with the live theme…';
+  diff.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/theme-preview', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(args)
+    });
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+    pbPreviewData = d;
+    pbRenderDiff(d);
+    const ok = d.safe_to_apply;
+    const b = document.getElementById('pb-apply-btn');
+    b.disabled = !ok;
+    b.style.background = ok ? '#6366f1' : '#1e1e1e';
+    b.style.color = ok ? '#fff' : '#555';
+    b.style.borderColor = ok ? '#6366f1' : '#333';
+    b.style.cursor = ok ? 'pointer' : 'not-allowed';
+    status.style.color = ok ? '#4ade80' : '#c08552';
+    status.textContent = ok
+      ? `${d.changes.length} change${d.changes.length === 1 ? '' : 's'} ready.`
+      : (d.changes.length ? 'Fix the problems below before applying.' : 'Nothing to write.');
+  } catch(e) {
+    status.style.color = '#f87171';
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '🔍 Preview changes';
+  }
+}
+
+function pbRenderDiff(d) {
+  const box = document.getElementById('pb-theme-diff');
+  const found = d.found || {};
+  let html = '';
+
+  const chips = [
+    ['Colour fields', found.colors], ['Benefits', found.grid],
+    ['Table rows', found.table], ['Theme colours', found.globals]
+  ].filter(c => c[1]).map(c =>
+    `<span style="background:#151515;border:1px solid #2a2a2a;border-radius:6px;padding:4px 10px;color:#aaa;font-size:11.5px">${c[0]}: ${c[1]}</span>`
+  ).join('');
+  if (chips) html += `<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px">${chips}</div>`;
+
+  if (d.problems && d.problems.length) {
+    html += `<div style="background:#2a1515;border:1px solid #7f3232;border-left-width:3px;border-radius:8px;padding:12px 15px;margin-bottom:12px">
+      <div style="color:#fca5a5;font-size:12.5px;font-weight:600;margin-bottom:6px">Must be fixed first</div>
+      <ul style="margin:0;padding-left:18px;color:#e5a5a5;font-size:12.5px;line-height:1.6">
+      ${d.problems.map(p => `<li>${pbEsc(p)}</li>`).join('')}</ul></div>`;
+  }
+  if (d.notes && d.notes.length) {
+    html += `<div style="background:#151515;border:1px solid #2a2a2a;border-radius:8px;padding:11px 15px;margin-bottom:12px;color:#999;font-size:12.5px;line-height:1.6">
+      ${d.notes.map(n => `<div>${pbEsc(n)}</div>`).join('')}</div>`;
+  }
+
+  const byFile = {};
+  (d.changes || []).forEach(c => { (byFile[c.file] = byFile[c.file] || []).push(c); });
+  Object.keys(byFile).forEach(file => {
+    const rows = byFile[file];
+    const store = file.indexOf('settings_data') >= 0;
+    html += `<div style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:7px;flex-wrap:wrap">
+        <span style="color:#ddd;font-size:12.5px;font-family:ui-monospace,monospace">${pbEsc(file)}</span>
+        <span style="background:${store ? '#3a2412' : '#12233a'};border:1px solid ${store ? '#7a4d24' : '#24507a'};color:${store ? '#e0b183' : '#8fb8e8'};border-radius:5px;padding:2px 8px;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase">${store ? 'Whole store' : 'This page'}</span>
+        <span style="color:#666;font-size:11.5px">${rows.length} change${rows.length === 1 ? '' : 's'}</span>
+      </div>
+      <div style="border:1px solid #222;border-radius:8px;overflow:hidden">`;
+    let lastWhere = null;
+    rows.forEach(c => {
+      if (c.where !== lastWhere) {
+        html += `<div style="background:#141414;padding:6px 13px;color:#777;font-size:11px;font-family:ui-monospace,monospace;border-top:1px solid #222">${pbEsc(c.where)}</div>`;
+        lastWhere = c.where;
+      }
+      const isHex = /^#[0-9a-fA-F]{6}$/.test(c.new);
+      const sw = v => /^#[0-9a-fA-F]{6}$/.test(v)
+        ? `<span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${v};box-shadow:inset 0 0 0 1px rgba(255,255,255,.25);vertical-align:-1px;margin-right:5px"></span>` : '';
+      html += `<div style="display:grid;grid-template-columns:150px 1fr;gap:10px;padding:7px 13px;background:#0e0e0e;border-top:1px solid #1a1a1a;font-size:12px">
+        <span style="color:#8b8b8b;font-family:ui-monospace,monospace;overflow-wrap:anywhere">${pbEsc(c.field)}</span>
+        <span style="overflow-wrap:anywhere"><span style="color:#6a6a6a;text-decoration:line-through">${sw(c.old)}${pbEsc(c.old) || '—'}</span> <span style="color:#555">→</span> <span style="color:#d8dee9">${sw(c.new)}${pbEsc(c.new) || '—'}</span></span>
+      </div>`;
+    });
+    html += '</div></div>';
+  });
+
+  box.innerHTML = html || '<div style="color:#666;font-size:13px">Nothing to change.</div>';
+  box.style.display = 'block';
+}
+
+function pbDownloadBackups(backups) {
+  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+  Object.keys(backups || {}).forEach((key, i) => {
+    const name = 'backup-' + key.split('/').pop().replace('.json', '') + '-' + stamp + '.json';
+    const blob = new Blob([backups[key]], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a);
+    setTimeout(() => { a.click(); a.remove(); URL.revokeObjectURL(url); }, i * 350);
+  });
+}
+
+async function pbApply() {
+  if (!pbPreviewData || !pbPreviewData.safe_to_apply) return;
+  const n = pbPreviewData.changes.length;
+  const store = Object.keys(pbPreviewData.backups || {}).some(k => k.indexOf('settings_data') >= 0);
+  const warn = store ? '\n\nThis includes theme colours, which affect the whole store.' : '';
+  if (!confirm(`Write ${n} change${n === 1 ? '' : 's'} to the live theme?${warn}\n\nA backup will download first.`)) return;
+
+  pbDownloadBackups(pbPreviewData.backups);
+
+  const btn = document.getElementById('pb-apply-btn');
+  const status = document.getElementById('pb-theme-status');
+  btn.disabled = true; btn.textContent = '⏳ Writing…';
+  status.style.display = 'block'; status.style.color = '#888';
+  status.textContent = 'Writing to the theme…';
+
+  try {
+    const res = await fetch('/api/theme-apply', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(pbThemeArgs())
+    });
+    const d = await res.json();
+    if (d.error) throw new Error(d.error + (d.problems ? ': ' + d.problems.join(' ') : ''));
+    status.style.color = '#4ade80';
+    status.textContent = `Done — ${d.changed} change${d.changed === 1 ? '' : 's'} written to ${d.written.join(' and ')}.`;
+    btn.textContent = '✓ Applied';
+    pbPreviewData = null;
+  } catch(e) {
+    status.style.color = '#f87171';
+    status.textContent = 'Error: ' + e.message;
+    btn.disabled = false; btn.textContent = '✍️ Apply to theme';
   }
 }
 
