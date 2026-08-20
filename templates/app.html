@@ -1388,8 +1388,16 @@ async function pbPublish() {
       btn.style.background = '#166534';
       statusEl.style.color = '#4ade80';
       const tmpl = data.template_suffix ? ` | Template: product.${data.template_suffix}` : '';
-      statusEl.innerHTML = `✅ <strong>${data.title}</strong> — $${data.price}${tmpl}<br>
-        <a href="${data.admin_url}" target="_blank" style="color:#6366f1">Open in Shopify Admin →</a>`;
+      // A guessed price is the one thing here worth interrupting for — say where
+      // it came from rather than letting it pass as read off the page.
+      const guessed = /guess|default/.test(data.price_source || '');
+      const priceNote = data.price_source
+        ? `<div style="margin-top:6px;font-size:12px;color:${guessed ? '#e0b183' : '#777'}">
+             ${guessed ? '⚠ Check the price — ' : 'Price read from '}${pbEsc(data.price_source)}
+           </div>` : '';
+      statusEl.innerHTML = `✅ <strong>${pbEsc(data.title)}</strong> — $${pbEsc(data.price)}${pbEsc(tmpl)}<br>
+        <a href="${data.admin_url}" target="_blank" style="color:#6366f1">Open in Shopify Admin →</a>
+        ${priceNote}`;
       pbLoadHistory();
     } else {
       throw new Error(data.error || 'Unknown error');

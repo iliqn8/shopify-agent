@@ -3,6 +3,14 @@ import json
 import shopify_client as sc
 
 
+# The page copy fills blocks that exist in both product templates, but only the
+# gummies one carries the features grid and the comparison table. Copying from
+# the bare product.json produced a page with nowhere to put two of the sections
+# the prompt writes.
+BASE_TEMPLATE = 'templates/product.gummies.json'
+FALLBACK_TEMPLATE = 'templates/product.json'
+
+
 def _bold(text):
     return re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
 
@@ -17,6 +25,7 @@ def parse_output(product_name, text):
     result = {
         'title': product_name,
         'price': '34.95',
+        'price_source': '',
         'colors': {},
         'emoji_bullets': [],
         'how_it_works': [],
@@ -38,10 +47,29 @@ def parse_output(product_name, text):
         if c and not re.match(r'^(pick|choose|angle|output|this|do not)', c, re.IGNORECASE):
             result['title'] = c
 
-    # Price
-    m = re.search(r'\$(\d{2,3}\.\d{2})', text)
-    if m:
-        result['price'] = m.group(1)
+    # Price. The first dollar figure on the page is the cost of goods, not the
+    # price — reading it as the price creates the product at a loss. Look for
+    # the line that names the selling price, and only guess if it is absent.
+    price_patterns = [
+        (r'recommended\s+selling\s+price[^\d$]{0,20}\$?\s*(\d{1,4}\.\d{2})', 'recommended selling price'),
+        (r'selling\s+price[^\d$]{0,20}\$?\s*(\d{1,4}\.\d{2})', 'selling price'),
+    ]
+    for pattern, source in price_patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            result['price'] = m.group(1)
+            result['price_source'] = source
+            break
+    else:
+        # Nothing named it, so this is a guess and gets flagged as one. Every
+        # price on the ladder ends in .95; take the lowest, because the figure
+        # above it is usually the compare-at price, not what the customer pays.
+        ladder = re.findall(r'\$(\d{1,4}\.95)\b', text)
+        if ladder:
+            result['price'] = min(ladder, key=float)
+            result['price_source'] = 'guessed — no "selling price" line in the output'
+        else:
+            result['price_source'] = 'default — no price found in the output'
 
     # Colors
     for label, key in [('Background color', 'bg'), ('Text color', 'text'),
@@ -246,39 +274,6 @@ def fill_template(template_json_str, parsed):
     return json.dumps(tmpl)
 
 
-# ── Theme color updater ────────────────────────────────────────────────────
-
-def apply_theme_colors(tid, colors):
-    if not colors:
-        return
-    raw = sc.get_theme_file(tid, 'config/settings_data.json')
-    data = json.loads(raw.get('value') or raw.get('attachment') or '{}')
-    cur = data.get('current', {})
-
-    if colors.get('bg'):
-        cur['colors_background_1'] = colors['bg']
-    if colors.get('text'):
-        cur['colors_text'] = colors['text']
-    if colors.get('accent1'):
-        cur['colors_accent_1'] = colors['accent1']
-    if colors.get('accent2'):
-        cur['colors_accent_2'] = colors['accent2']
-
-    # Also update scheme-1 (the primary scheme used by most sections)
-    s1 = cur.get('color_schemes', {}).get('scheme-1', {}).get('settings', {})
-    if s1:
-        if colors.get('bg'):
-            s1['background'] = colors['bg']
-        if colors.get('text'):
-            s1['text'] = colors['text']
-            s1['secondary_button_label'] = colors['text']
-        if colors.get('accent1'):
-            s1['button'] = colors['accent1']
-
-    data['current'] = cur
-    sc.update_theme_file(tid, 'config/settings_data.json', json.dumps(data))
-
-
 # ── Main publish function ──────────────────────────────────────────────────
 
 def publish(product_name, generated_text):
@@ -304,15 +299,18 @@ def publish(product_name, generated_text):
         theme = sc.get_active_theme()
         if theme:
             tid = theme['id']
-            default = sc.get_theme_file(tid, 'templates/product.json')
+            try:
+                default = sc.get_theme_file(tid, BASE_TEMPLATE)
+            except Exception:
+                default = sc.get_theme_file(tid, FALLBACK_TEMPLATE)
             base_json = default.get('value') or default.get('attachment') or '{}'
             filled_json = fill_template(base_json, parsed)
             new_key = f'templates/product.{slug}.json'
             sc.update_theme_file(tid, new_key, filled_json)
             template_suffix = slug
-            # Apply brand colors to theme settings
-            if parsed.get('colors'):
-                apply_theme_colors(tid, parsed['colors'])
+            # Global theme colours are deliberately not touched here. They
+            # affect every page in the store, so they belong to the Write into
+            # the theme step, which shows a diff and downloads a backup first.
     except Exception as e:
         print(f'[publisher] Template error: {e}')
 
@@ -330,4 +328,6 @@ def publish(product_name, generated_text):
         'template_suffix': template_suffix,
         'title': parsed['title'],
         'price': parsed['price'],
+        'price_source': parsed.get('price_source', ''),
+        'base_template': BASE_TEMPLATE,
     }
