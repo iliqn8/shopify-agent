@@ -3,6 +3,14 @@ import os
 
 client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
+MODEL = "claude-opus-5"
+# A full page is seven sections: 62 colour fields, six benefits, six table rows
+# and the whole description. At 8000 the answer was getting cut mid-block, and a
+# half-written block is worse than none — the parser reads what is there and
+# writes it. Streaming is what makes a ceiling this high safe to ask for.
+MAX_TOKENS = 32000
+THINKING = {"type": "adaptive"}
+
 PROMPT_TEMPLATE = """ROLE
 You are an 8-figure ecommerce store owner who specializes in branded dropshipping. Your goal is to help me launch a high-converting product page today. You write like a real operator, not like AI. Use AIDA copywriting principles. Lead with benefits and outcomes, not features. Speak directly to the customer.
 
@@ -138,12 +146,14 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
               .replace("[PRODUCT_COST]", str(product_cost))
               .replace("[SHIPPING_COST]", str(shipping_cost)))
     if prompt_override and "[PRODUCT_NAME]" not in prompt_override:
-        # a custom prompt that never names the product still needs to know it
-        prompt = ("%s\n\nINPUTS\nProduct name: %s\nCompetitor URL: %s\n"
-                  "Product cost: $%s\nShipping cost: $%s"
-                  % (prompt, product_name,
+        # A custom prompt that never names the product still needs to know it.
+        # It goes in front: a prompt usually ends on its output format, and
+        # anything after that reads as part of what to produce.
+        prompt = ("INPUTS\nProduct name: %s\nCompetitor URL: %s\n"
+                  "Product cost: $%s\nShipping cost: $%s\n\n%s"
+                  % (product_name,
                      competitor_url or "no competitor URL provided",
-                     product_cost, shipping_cost))
+                     product_cost, shipping_cost, prompt))
 
     yield {"type": "status", "text": "🛍️ Building your product page..."}
 
@@ -158,13 +168,25 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
         content = img_blocks + content
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=8000,
+        with client.messages.stream(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            thinking=THINKING,
             messages=[{"role": "user", "content": content}],
-            timeout=180.0,
-        )
-        text = response.content[0].text
+            timeout=900.0,
+        ) as stream:
+            response = stream.get_final_message()
+
+        # Thinking blocks come back too; only the written page is wanted here.
+        text = "".join(b.text for b in response.content if b.type == "text")
+
+        if response.stop_reason == "max_tokens":
+            yield {"type": "done", "reply": text + (
+                "\n\n[The answer hit the token ceiling and stopped here. "
+                "Anything below this line is missing — regenerate, or shorten "
+                "the prompt, before writing it into the theme.]")}
+            return
+
         yield {"type": "done", "reply": text}
     except Exception as e:
         yield {"type": "done", "reply": f"Error: {e}"}

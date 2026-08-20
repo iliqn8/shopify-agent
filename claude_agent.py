@@ -10,6 +10,13 @@ import skills_loader
 
 client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
+# One place to change the model, rather than four call sites that drift apart.
+MODEL = "claude-opus-5"
+MAX_TOKENS = 16000
+# Opus 5 thinks by default; saying so explicitly keeps the intent visible and
+# survives anyone copying a call site somewhere else.
+THINKING = {"type": "adaptive"}
+
 IMAGE_GEN_URL = os.getenv("IMAGE_GENERATOR_URL", "http://localhost:5001")
 
 
@@ -494,8 +501,9 @@ def chat(messages, extra_context=""):
     system = _build_system(extra_context)
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        thinking=THINKING,
         system=system,
         tools=TOOLS,
         messages=messages,
@@ -520,8 +528,9 @@ def chat(messages, extra_context=""):
         ]
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            thinking=THINKING,
             system=system,
             tools=TOOLS,
             messages=messages,
@@ -596,12 +605,13 @@ def chat_stream(messages, extra_context=""):
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            thinking=THINKING,
             system=system,
             tools=TOOLS,
             messages=current_messages,
-            timeout=120.0,
+            timeout=300.0,
         )
 
         iteration = 0
@@ -639,12 +649,13 @@ def chat_stream(messages, extra_context=""):
             yield {"type": "status", "text": "🤔 Processing results..."}
 
             response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                thinking=THINKING,
                 system=system,
                 tools=TOOLS,
                 messages=current_messages,
-                timeout=120.0,
+                timeout=300.0,
             )
 
         text = ""
