@@ -159,7 +159,7 @@
     <div style="display:grid;gap:16px">
       <div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;flex-wrap:wrap">
-          <label style="color:#aaa;font-size:12px">YOUR PROMPT <span style="color:#555">(leave empty to use the built-in one)</span></label>
+          <label style="color:#ccc;font-size:13.5px;font-weight:600"><span style="display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#6366f1;color:#fff;font-size:11px;font-weight:700;margin-right:7px;vertical-align:1px">1</span>Your prompt <span style="color:#666;font-weight:400;font-size:12px">— leave empty to use the built-in one</span></label>
           <div style="display:flex;gap:6px;align-items:center">
             <select id="pb-saved" onchange="pbLoadPrompt(this.value)" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:5px 8px;border-radius:6px;font-size:12px;max-width:190px">
               <option value="">Saved prompts…</option>
@@ -208,12 +208,13 @@
 
     <div id="pb-status" style="display:none;margin-top:16px;color:#aaa;font-size:13px;text-align:center"></div>
 
-    <div id="pb-result" style="display:none;margin-top:24px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <span style="color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:1px">Result</span>
-        <button onclick="pbCopy()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">📋 Copy all</button>
+    <div id="pb-result" style="margin-top:28px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px;flex-wrap:wrap">
+        <h3 style="color:#fff;font-size:15px;margin:0"><span style="display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#6366f1;color:#fff;font-size:11px;font-weight:700;margin-right:7px;vertical-align:1px">2</span>Generated output</h3>
+        <button onclick="pbCopy()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">Copy all</button>
       </div>
-      <div id="pb-output" style="background:#111;border:1px solid #222;border-radius:10px;padding:20px;color:#e0e0e0;font-size:14px;line-height:1.7;white-space:pre-wrap"></div>
+      <p style="color:#888;font-size:12.5px;margin:0 0 12px">What the model wrote back — the finished copy, colours and field names. Editable, so you can fix a line before it goes in.</p>
+      <textarea id="pb-output" rows="14" oninput="pbResetPreview()" placeholder="Nothing generated yet. Write a prompt above, fill in the product, then press Generate." style="width:100%;background:#111;border:1px solid #222;border-radius:10px;padding:16px;color:#e0e0e0;font-size:12.5px;line-height:1.65;box-sizing:border-box;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace"></textarea>
 
       <button id="pb-publish-btn" onclick="pbPublish()" style="margin-top:16px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
         🛍️ Create in Shopify
@@ -222,8 +223,8 @@
 
       <!-- Write the generated copy and colours into the theme -->
       <div style="margin-top:28px;border-top:1px solid #222;padding-top:20px">
-        <h3 style="color:#fff;font-size:15px;margin:0 0 4px">🎨 Write into the theme</h3>
-        <p style="color:#888;font-size:12.5px;margin:0 0 16px">Reads the output above and fills the section fields. Preview first — Apply stays locked until you have seen the changes.</p>
+        <h3 style="color:#fff;font-size:15px;margin:0 0 4px"><span style="display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:#6366f1;color:#fff;font-size:11px;font-weight:700;margin-right:7px;vertical-align:1px">3</span>Write into the theme</h3>
+        <p style="color:#888;font-size:12.5px;margin:0 0 16px">Reads the output above and fills the section fields. Pick the template, Preview, then Apply. Apply stays locked until you have seen the changes.</p>
 
         <div style="display:grid;gap:14px">
           <div>
@@ -1301,7 +1302,7 @@ async function pbGenerate() {
   btn.textContent = '⏳ Generating...';
   statusEl.style.display = 'block';
   statusEl.textContent = '🛍️ Building your product page...';
-  resultEl.style.display = 'none';
+  // the output panel stays visible; Generate just refills it
 
   try {
     const res = await fetch('/api/product-build-start', {
@@ -1331,8 +1332,9 @@ async function pbGenerate() {
             btn.disabled = false;
             btn.textContent = '🚀 Generate Product Page';
             statusEl.style.display = 'none';
-            outputEl.textContent = ev.reply || '';
-            resultEl.style.display = 'block';
+            outputEl.value = ev.reply || '';
+            pbResetPreview();
+            // panel already visible
           }
         }
         if (data.done && !data.events.some(e => e.type === 'done')) {
@@ -1351,7 +1353,7 @@ async function pbGenerate() {
 }
 
 function pbCopy() {
-  const text = document.getElementById('pb-output').textContent;
+  const text = document.getElementById('pb-output').value;
   navigator.clipboard.writeText(text).then(() => {
     const btn = event.target;
     btn.textContent = '✅ Copied!';
@@ -1363,7 +1365,7 @@ let _pbCurrentProductName = '';
 
 async function pbPublish() {
   const productName = _pbCurrentProductName || document.getElementById('pb-product').value.trim();
-  const generatedText = document.getElementById('pb-output').textContent;
+  const generatedText = document.getElementById('pb-output').value;
   if (!generatedText) return;
 
   const btn = document.getElementById('pb-publish-btn');
@@ -1553,7 +1555,7 @@ function pbResetPreview() {
 
 function pbThemeArgs() {
   return {
-    text: document.getElementById('pb-output').textContent || '',
+    text: document.getElementById('pb-output').value || '',
     template: document.getElementById('pb-tpl').value,
     colors: document.getElementById('pb-w-colors').checked,
     copy: document.getElementById('pb-w-copy').checked,
@@ -1933,7 +1935,8 @@ async function secGenerate() {
             btn.disabled = false;
             btn.textContent = '🧩 Generate Section';
             statusEl.style.display = 'none';
-            outputEl.textContent = ev.reply || '';
+            outputEl.value = ev.reply || '';
+            pbResetPreview();
             document.getElementById('sec-final-name').value = ev.suggested_name || sectionName || 'Custom Section';
             resultEl.style.display = 'block';
           }
@@ -2053,7 +2056,8 @@ async function secApplyEdit() {
             document.getElementById('sec-edit-video-status').textContent = '';
             btn.textContent = '🔧 Apply Changes';
             statusEl.style.display = 'none';
-            outputEl.textContent = ev.reply || '';
+            outputEl.value = ev.reply || '';
+            pbResetPreview();
             if (ev.suggested_name) document.getElementById('sec-final-name').value = ev.suggested_name;
             document.getElementById('sec-edit-instructions').value = '';
           }
