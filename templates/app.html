@@ -228,7 +228,11 @@
 
         <div style="display:grid;gap:14px">
           <div>
-            <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT TEMPLATE</label>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <label style="color:#aaa;font-size:12px">PRODUCT TEMPLATE</label>
+              <button onclick="pbRefreshTemplates(this)" title="Re-read the templates from the theme"
+                style="background:none;border:1px solid #333;color:#888;font-size:11px;padding:3px 9px;border-radius:6px;cursor:pointer">&#8635; Refresh</button>
+            </div>
             <select id="pb-tpl" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:13.5px;box-sizing:border-box">
               <option value="">Loading…</option>
             </select>
@@ -1399,6 +1403,12 @@ async function pbPublish() {
         <a href="${data.admin_url}" target="_blank" style="color:#6366f1">Open in Shopify Admin →</a>
         ${priceNote}`;
       pbLoadHistory();
+      // The template was created a second ago, so the dropdown is already
+      // stale. Read it again and land on the one this product just made.
+      if (data.template_suffix) {
+        pbLoadTemplates('templates/product.' + data.template_suffix + '.json')
+          .then(pbResetPreview);
+      }
     } else {
       throw new Error(data.error || 'Unknown error');
     }
@@ -1517,21 +1527,38 @@ function pbEsc(s) {
 
 let pbPreviewData = null;
 
-async function pbLoadTemplates() {
+async function pbLoadTemplates(preferKey) {
   const sel = document.getElementById('pb-tpl');
+  const previous = sel.value;
   try {
     const list = await (await fetch('/api/theme-templates')).json();
     if (list.error) throw new Error(list.error);
     sel.innerHTML = list.map(t =>
       `<option value="${pbEsc(t.key)}" data-grid="${t.has_grid}" data-table="${t.has_table}">${pbEsc(t.label)} — ${t.sections} sections</option>`
     ).join('');
-    const gummies = list.find(t => t.key.includes('gummies'));
-    if (gummies) sel.value = gummies.key;
+    // A template asked for by name wins; otherwise keep whatever was already
+    // chosen, so a refresh never quietly moves the selection somewhere else.
+    const has = k => k && list.some(t => t.key === k);
+    if (has(preferKey)) sel.value = preferKey;
+    else if (has(previous)) sel.value = previous;
+    else {
+      const gummies = list.find(t => t.key.includes('gummies'));
+      if (gummies) sel.value = gummies.key;
+    }
     pbTplNote();
     sel.onchange = () => { pbTplNote(); pbResetPreview(); };
   } catch(e) {
     sel.innerHTML = '<option value="">Could not load templates</option>';
   }
+}
+
+async function pbRefreshTemplates(btn) {
+  const was = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '&#8635; Reading&hellip;';
+  await pbLoadTemplates();
+  btn.innerHTML = was;
+  btn.disabled = false;
 }
 
 function pbTplNote() {
