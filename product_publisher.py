@@ -21,6 +21,26 @@ def _paras(lines):
 
 # ── Parser ─────────────────────────────────────────────────────────────────
 
+# Every heading the generated output can put between two blocks. Each block
+# below stops at whichever of these comes first, instead of trusting that the
+# next thing on the page is the one block it expects — the comparison table
+# sits between Main Body 3 and the guarantee, and used to be swallowed whole.
+_STOP = (r"(?:\n\s*(?:SECTION\s+\d|TOP OF PAGE|COLLAPSIBLE TAB|MAIN BODY SECTION\s*\d"
+         r"|COMPARISON TABLE|FEATURES GRID|ROWS\b|30\s*-?\s*DAY GUARANTEE|FAQ\b"
+         r"|SELF\s*-?\s*CHECK|CRITICAL RULES|PALETTE\b|CHECKS\b|COLOUR SCHEMES"
+         r"|COLOR SCHEMES|GLOBAL COLOURS?|SECTION SCHEMES|SOURCE SWITCHES"
+         r"|FIELDS, BY SECTION|Word count:|Failures used:|Insider phrases:"
+         r"|Competitor tick test:)|$)")
+
+
+def _block(text, start):
+    """The lines under `start`, up to the next heading of any kind."""
+    m = re.search(start + r"[^\n]*\n+(.*?)" + _STOP, text, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return []
+    return [l.strip() for l in m.group(1).split(chr(10)) if l.strip()]
+
+
 def parse_output(product_name, text):
     result = {
         'title': product_name,
@@ -77,37 +97,32 @@ def parse_output(product_name, text):
         m = re.search(label + r'[^#]*#([0-9A-Fa-f]{6})', text, re.IGNORECASE)
         if m:
             result['colors'][key] = '#' + m.group(1)
+    # The darkest role, from Section 4's palette. The buy button and the sticky
+    # bar are meant to be this, not the accent.
+    m = re.search(r'^\s*CONTRAST\s*=\s*#([0-9A-Fa-f]{6})', text, re.IGNORECASE | re.M)
+    if m:
+        result['colors']['contrast'] = '#' + m.group(1)
 
     # Top of Page emoji bullets
-    m = re.search(r'Top of Page[^\n]*\n+(.*?)(?:Collapsible Tab|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
-        result['emoji_bullets'] = lines[:3]
+    result['emoji_bullets'] = _block(text, r'Top of Page')[:3]
 
     # How It Works
-    m = re.search(r'Collapsible Tab[^\n]*How It Works[^\n]*\n+(.*?)(?:Collapsible Tab|Main Body|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
-        result['how_it_works'] = lines[:3]
+    result['how_it_works'] = _block(text, r'Collapsible Tab[^\n]*How It Works')[:3]
 
     # Reviews
-    m = re.search(r'Collapsible Tab[^\n]*Review[^\n]*\n+(.*?)(?:Main Body|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        blocks = re.findall(r'"([^"]+)"\s*\n+[—\-]\s*([^\n]+)', m.group(1))
-        result['reviews'] = [{'text': q.strip(), 'author': a.strip()} for q, a in blocks[:3]]
+    review_lines = _block(text, r'Collapsible Tab[^\n]*Review')
+    blocks = re.findall(r'"([^"]+)"\s*\n+[\u2014\-]\s*([^\n]+)', chr(10).join(review_lines))
+    result['reviews'] = [{'text': q.strip(), 'author': a.strip()} for q, a in blocks[:3]]
 
     # Main Body Section 1
-    m = re.search(r'Main Body Section 1[^\n]*\n+(.*?)(?:Main Body Section 2|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
-        if lines:
-            result['mb1_headline'] = lines[0]
-            result['mb1_paragraphs'] = lines[1:]
+    lines = _block(text, r'Main Body Section 1')
+    if lines:
+        result['mb1_headline'] = lines[0]
+        result['mb1_paragraphs'] = lines[1:]
 
     # Main Body Section 2
-    m = re.search(r'Main Body Section 2[^\n]*\n+(.*?)(?:Main Body Section 3|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
+    lines = _block(text, r'Main Body Section 2')
+    if True:
         if lines:
             result['mb2_headline'] = lines[0]
             i = 1
@@ -125,18 +140,13 @@ def parse_output(product_name, text):
                     i += 1
 
     # Main Body Section 3
-    m = re.search(r'Main Body Section 3[^\n]*\n+(.*?)(?:30-Day|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
-        if lines:
-            result['mb3_headline'] = lines[0]
-            result['mb3_paragraphs'] = lines[1:]
+    lines = _block(text, r'Main Body Section 3')
+    if lines:
+        result['mb3_headline'] = lines[0]
+        result['mb3_paragraphs'] = lines[1:]
 
     # 30-Day Guarantee
-    m = re.search(r'30-Day Guarantee[^\n]*\n+(.*?)(?:FAQ|$)', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
-        result['guarantee_text'] = ' '.join(lines)
+    result['guarantee_text'] = ' '.join(_block(text, r'30\s*-?\s*Day Guarantee'))
 
     # FAQ
     m = re.search(r'\bFAQ\b[^\n]*\n+(.*?)$', text, re.IGNORECASE | re.DOTALL)
@@ -187,13 +197,13 @@ def fill_template(template_json_str, parsed):
             main_blocks['reviews_wbqVgr']['settings'][f'author_{i}'] = rev['author']
 
     # Button colors
-    if colors.get('accent1'):
-        if 'buy_buttons' in main_blocks:
-            main_blocks['buy_buttons']['settings']['enable_custom_color'] = True
-            main_blocks['buy_buttons']['settings']['custom_color'] = colors['accent1']
-        if 'sticky_atc_xbBkLM' in main_blocks:
-            main_blocks['sticky_atc_xbBkLM']['settings']['enable_custom_btn_color'] = True
-            main_blocks['sticky_atc_xbBkLM']['settings']['custom_btn_color'] = colors['accent1']
+    # The buy button reads its colour from Scheme 4 now, so it is left alone.
+    # The sticky bar has no such switch and has to be told the same colour by
+    # hand, or the two disagree with each other on every scroll.
+    dark = colors.get('contrast') or colors.get('accent1')
+    if dark and 'sticky_atc_xbBkLM' in main_blocks:
+        main_blocks['sticky_atc_xbBkLM']['settings']['enable_custom_btn_color'] = True
+        main_blocks['sticky_atc_xbBkLM']['settings']['custom_btn_color'] = dark
 
     # ── image_with_text_6NJQ98 — Main Body Section 1 ──
     s1 = tmpl['sections'].get('image_with_text_6NJQ98', {})
@@ -242,8 +252,7 @@ def fill_template(template_json_str, parsed):
         rb = rich.get('blocks', {})
         if 'text_Vrfa8P' in rb:
             rb['text_Vrfa8P']['settings']['text'] = f'<p>{_bold(parsed["guarantee_text"])}</p>'
-    if colors.get('accent1') and rich:
-        rich['settings']['custom_colors_solid_button_background'] = colors['accent1']
+    # rich-text's solid button follows Scheme 4 through its own source switch.
 
     # ── ds_testimonials_i86BLn — Customer Reviews ──
     testi = tmpl['sections'].get('ds_testimonials_i86BLn', {})
