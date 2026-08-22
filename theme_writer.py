@@ -32,8 +32,9 @@ GRID_TYPE = "custom-protein-features-grid"
 TABLE_TYPE = "custom-comparison-table"
 
 GLOBAL_KEYS = ("colors_background_1", "colors_text", "colors_accent_1", "colors_accent_2")
-SCHEME1_KEYS = ("background", "text", "button", "button_label",
-                "secondary_button_label", "shadow")
+SCHEME_KEYS = ("background", "text", "button", "button_label",
+               "secondary_button_label", "shadow")
+SCHEME_IDS = ("scheme-1", "scheme-2", "scheme-3", "scheme-4")
 
 # Placeholders a half-finished response leaves behind.
 EMPTY = {"", "...", "…", "#......", "-", "n/a", "tbd"}
@@ -180,25 +181,59 @@ def parse_table(text):
     return {"head": head, "rows": rows}
 
 
+STOP_PATS = [r"^SECTION \d", r"^SELF-CHECK", r"^CRITICAL RULES",
+             r"\bFIELDS, BY SECTION\b", r"^SECTION SCHEMES\b", r"^SOURCE SWITCHES\b"]
+
+
+def _parse_schemes(lines):
+    """COLOUR SCHEMES: a scheme id on its own line, then its colours indented.
+
+    Also accepts the older one-per-line "scheme-1.background = #..." shape, and
+    a whole scheme written on a single line, so an older prompt still lands.
+    """
+    block = _slice(lines, [r"^COLOUR SCHEMES\b", r"^COLOR SCHEMES\b"],
+                   STOP_PATS + [r"^GLOBAL (THEME )?COLOURS?\b"])
+    schemes, current = {}, None
+    hunt = re.compile(r"([a-z][a-z _]*?)\s*=\s*(#[0-9A-Fa-f]{6})")
+
+    def put(sid, key, val):
+        key = key.strip().replace(" ", "_")
+        if key in SCHEME_KEYS:
+            schemes.setdefault(sid, {})[key] = val
+
+    for line in block + lines:
+        m = re.match(r"^\s*(scheme-\d)\.([a-z_ ]+?)\s*=\s*(#[0-9A-Fa-f]{6})", line)
+        if m and m.group(1) in SCHEME_IDS:
+            put(m.group(1), m.group(2), m.group(3))
+            continue
+        if line not in block:
+            continue
+        m = re.match(r"^\s*(scheme-\d)\b(.*)$", line)
+        if m and m.group(1) in SCHEME_IDS:
+            current = m.group(1)
+            for key, val in hunt.findall(m.group(2)):
+                put(current, key, val)
+            continue
+        if current:
+            for key, val in hunt.findall(line):
+                put(current, key, val)
+    return schemes
+
+
 def parse_globals(text):
-    """The GLOBAL THEME COLOURS block: four legacy colours plus scheme-1."""
+    """The global colours block, plus whatever colour schemes were written."""
     lines = [l.rstrip() for l in text.splitlines()]
-    block = _slice(lines, [r"\bGLOBAL THEME COLOURS?\b"],
-                   [r"^SECTION \d", r"^SELF-CHECK", r"^CRITICAL RULES", r"\bFIELDS, BY SECTION\b"])
-    if not block:
-        return None
-    legacy, scheme = {}, {}
+    block = _slice(lines, [r"^GLOBAL (THEME )?COLOURS?\b"],
+                   STOP_PATS + [r"^COLOUR SCHEMES\b", r"^COLOR SCHEMES\b"])
+    legacy = {}
     for line in block:
         m = re.match(r"^\s*(colors_[a-z_0-9]+)\s*=\s*(#[0-9A-Fa-f]{6})", line)
         if m and m.group(1) in GLOBAL_KEYS:
             legacy[m.group(1)] = m.group(2)
-            continue
-        m = re.match(r"^\s*scheme-1\.([a-z_]+)\s*=\s*(#[0-9A-Fa-f]{6})", line)
-        if m and m.group(1) in SCHEME1_KEYS:
-            scheme[m.group(1)] = m.group(2)
-    if not legacy and not scheme:
+    schemes = _parse_schemes(lines)
+    if not legacy and not schemes:
         return None
-    return {"legacy": legacy, "scheme1": scheme}
+    return {"legacy": legacy, "schemes": schemes}
 
 
 # ── building the change list ───────────────────────────────────────────────
@@ -396,12 +431,18 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_glob
         cur = settings["current"]
         for key, val in globs["legacy"].items():
             diff.set(cur, key, val, "theme colours", "settings_data.json")
-        s1 = (cur.get("color_schemes", {}).get("scheme-1", {}) or {}).get("settings")
-        if s1 is None:
-            problems.append("scheme-1 is not in this theme, so it cannot be updated.")
-        else:
-            for key, val in globs["scheme1"].items():
-                diff.set(s1, key, val, "scheme-1", "settings_data.json")
+        # Since the sections moved to colour schemes, these are what actually
+        # repaint the page. Writing only scheme-1 leaves the page unchanged.
+        for sid in SCHEME_IDS:
+            wanted = globs["schemes"].get(sid)
+            if not wanted:
+                continue
+            store = (cur.get("color_schemes", {}).get(sid, {}) or {}).get("settings")
+            if store is None:
+                problems.append(sid + " is not in this theme, so it cannot be updated.")
+                continue
+            for key, val in wanted.items():
+                diff.set(store, key, val, sid, "settings_data.json")
         files[SETTINGS_KEY] = json.dumps(settings, indent=2, ensure_ascii=False)
         backups[SETTINGS_KEY] = raw_set
 
@@ -412,7 +453,8 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_glob
         "colors": len(colors),
         "grid": len(grid["features"]) if grid else 0,
         "table": len(table["rows"]) if table else 0,
-        "globals": (len(globs["legacy"]) + len(globs["scheme1"])) if globs else 0,
+        "globals": (len(globs["legacy"])
+                    + sum(len(v) for v in globs["schemes"].values())) if globs else 0,
     }
     if do_colors and not colors:
         notes.append("No colour block found. Expected a line reading "

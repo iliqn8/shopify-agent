@@ -247,11 +247,17 @@
               <input type="checkbox" id="pb-w-copy" checked onchange="pbResetPreview()"> Section copy
             </label>
             <label style="color:#ccc;font-size:13px;display:flex;align-items:center;gap:7px;cursor:pointer">
-              <input type="checkbox" id="pb-w-globals" onchange="pbResetPreview()"> Theme colours
+              <input type="checkbox" id="pb-w-globals" checked onchange="pbResetPreview()"> Theme colours + schemes
             </label>
           </div>
           <div id="pb-globals-warn" style="display:none;background:#2a1e14;border:1px solid #6b4a2a;border-left-width:3px;border-radius:8px;padding:11px 14px;color:#e0b183;font-size:12.5px">
-            Theme colours reach the header, the cart, collection pages and every other product page — not just this one.
+            Writes the four colour schemes and the four global colours. The schemes are what
+            repaint the section backgrounds — and they are store-wide, so this reaches the header,
+            the cart, collection pages and every other product page, not just this one.
+          </div>
+          <div id="pb-globals-off" style="display:none;background:#1a1a1a;border:1px solid #333;border-left:3px solid #555;border-radius:8px;padding:11px 14px;color:#999;font-size:12.5px">
+            Every section background on this page comes from a theme colour scheme. With this off,
+            the page keeps the store's current backgrounds and only the small hex fields change.
           </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -1584,8 +1590,11 @@ function pbResetPreview() {
   b.style.cursor = 'not-allowed';
   document.getElementById('pb-theme-diff').style.display = 'none';
   document.getElementById('pb-theme-status').style.display = 'none';
-  document.getElementById('pb-globals-warn').style.display =
-    document.getElementById('pb-w-globals').checked ? 'block' : 'none';
+  const wantsGlobals = document.getElementById('pb-w-globals').checked;
+  document.getElementById('pb-globals-warn').style.display = wantsGlobals ? 'block' : 'none';
+  // Say the quiet part too: without the schemes the page cannot change shade.
+  document.getElementById('pb-globals-off').style.display =
+    (!wantsGlobals && document.getElementById('pb-w-colors').checked) ? 'block' : 'none';
 }
 
 function pbThemeArgs() {
