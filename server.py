@@ -407,6 +407,7 @@ def _theme_request():
         "do_colors": bool(d.get("colors", True)),
         "do_copy": bool(d.get("copy", True)),
         "do_globals": bool(d.get("globals", False)),
+        "palette_choice": (d.get("palette") or "").strip(),
     }
 
 

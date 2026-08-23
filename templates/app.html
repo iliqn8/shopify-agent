@@ -250,6 +250,8 @@
               <input type="checkbox" id="pb-w-globals" checked onchange="pbResetPreview()"> Theme colours + schemes
             </label>
           </div>
+          <div id="pb-palettes" style="display:none"></div>
+
           <div id="pb-globals-warn" style="display:none;background:#2a1e14;border:1px solid #6b4a2a;border-left-width:3px;border-radius:8px;padding:11px 14px;color:#e0b183;font-size:12.5px">
             Writes the four colour schemes and the four global colours. The schemes are what
             repaint the section backgrounds — and they are store-wide, so this reaches the header,
@@ -1618,15 +1620,62 @@ function pbResetPreview() {
     (!wantsGlobals && document.getElementById('pb-w-colors').checked) ? 'block' : 'none';
 }
 
+let pbPalette = '';
+
 function pbThemeArgs() {
   return {
     text: document.getElementById('pb-output').value || '',
     template: document.getElementById('pb-tpl').value,
     colors: document.getElementById('pb-w-colors').checked,
     copy: document.getElementById('pb-w-copy').checked,
-    globals: document.getElementById('pb-w-globals').checked
+    globals: document.getElementById('pb-w-globals').checked,
+    palette: pbPalette
   };
 }
+
+// The response can carry more than one palette. Show them as the colours they
+// are, because a row of hex codes tells you nothing about how a page will look.
+const PB_SWATCH = ['BG', 'SURFACE', 'ACCENT', 'ACCENT_SOFT', 'CONTRAST', 'TICK', 'STAR'];
+
+function pbRenderPalettes(palettes) {
+  const box = document.getElementById('pb-palettes');
+  const keys = Object.keys(palettes || {}).filter(k => k).sort();
+  if (keys.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.style.display = 'block';
+  box.innerHTML =
+    '<div style="color:#aaa;font-size:12px;margin-bottom:8px">PALETTE</div>'
+    + '<div style="display:grid;gap:8px">'
+    + keys.map(k => {
+        const p = palettes[k];
+        const on = pbPalette === k;
+        return `<button onclick="pbPickPalette('${pbEsc(k)}')" style="
+            display:flex;align-items:center;gap:12px;text-align:left;cursor:pointer;
+            background:${on ? '#20242e' : '#1a1a1a'};
+            border:1px solid ${on ? '#6366f1' : '#333'};
+            border-radius:9px;padding:10px 12px">
+          <span style="color:${on ? '#fff' : '#888'};font-size:13px;font-weight:600;width:14px">${pbEsc(k)}</span>
+          <span style="display:flex;gap:4px">`
+          + PB_SWATCH.map(r => `<span title="${r}: ${pbEsc(p[r] || '')}" style="
+              width:26px;height:26px;border-radius:5px;border:1px solid #00000055;
+              background:${pbEsc(p[r] || '#000')}"></span>`).join('')
+          + `</span>
+          <span style="color:#666;font-size:11.5px;margin-left:auto">${pbEsc(p.ACCENT || '')} · ${pbEsc(p.CONTRAST || '')}</span>
+        </button>`;
+      }).join('')
+    + '</div>'
+    + '<div style="color:#666;font-size:12px;margin-top:7px">'
+    + (pbPalette ? 'Preview again to see palette ' + pbEsc(pbPalette) + ' applied.'
+                 : 'Pick one, then Preview.')
+    + '</div>';
+}
+
+function pbPickPalette(k) {
+  pbPalette = k;
+  pbResetPreview();
+  pbRenderPalettes(pbLastPalettes);
+}
+
+let pbLastPalettes = {};
 
 async function pbPreview() {
   const args = pbThemeArgs();
@@ -1648,6 +1697,8 @@ async function pbPreview() {
     const d = await res.json();
     if (d.error) throw new Error(d.error);
     pbPreviewData = d;
+    pbLastPalettes = d.palettes || {};
+    pbRenderPalettes(pbLastPalettes);
     pbRenderDiff(d);
     const ok = d.safe_to_apply;
     const b = document.getElementById('pb-apply-btn');

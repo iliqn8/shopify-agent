@@ -19,6 +19,7 @@ import string
 import datetime
 
 import shopify_client as sc
+import palette as pal
 
 HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 FIELD = re.compile(r"^\s*(?:\d+\s+)?([a-z_]+)\s*=\s*(.+?)\s*$")
@@ -302,11 +303,28 @@ def _check_structure(tpl):
     return bad
 
 
-def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_globals=False):
+def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True,
+          do_globals=False, palette_choice=None):
     """Work out every change. Returns the diff, the problems, and the new files.
 
     Nothing is uploaded. `apply` takes this same result and writes it.
     """
+    # A response either names the twelve roles and lets the table in palette.py
+    # decide the rest, or spells every field out the old way. Prefer the roles.
+    found_palettes = pal.parse_palettes(text)
+    # A palette short of a role is an older response that also carries the
+    # fields spelled out, so it is left to the path that has always read it.
+    palettes = {k: v for k, v in found_palettes.items() if not pal.missing_roles(v)}
+    short_of = {k: pal.missing_roles(v) for k, v in found_palettes.items()
+                if pal.missing_roles(v)}
+    chosen_key, chosen = None, None
+    if palettes:
+        key = (palette_choice or "").upper()
+        if key in palettes:
+            chosen_key, chosen = key, palettes[key]
+        elif len(palettes) == 1:
+            chosen_key, chosen = list(palettes.items())[0]
+
     colors = parse_colors(text) if do_colors else {}
     grid = parse_grid(text) if do_copy else None
     table = parse_table(text) if do_copy else None
@@ -321,7 +339,38 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_glob
     diff = _Diff()
     problems, notes = [], []
 
-    # ── colours ────────────────────────────────────────────────────────
+    if palettes and not chosen:
+        problems.append("%d palettes were generated. Pick one before applying."
+                        % len(palettes))
+    if short_of and not palettes and not parse_colors(text):
+        for key, roles in sorted(short_of.items()):
+            problems.append("Palette %s has no %s, and there are no spelled-out "
+                            "fields to fall back on."
+                            % (key or "?", ", ".join(roles)))
+
+    # ── colours from a palette ─────────────────────────────────────────
+    if chosen and do_colors and not problems:
+        where_pal = "palette " + (chosen_key or "")
+        for (pos, field, block), (value, stype) in sorted(pal.expand(chosen).items()):
+            if pos > len(order):
+                continue
+            sec = sections.get(order[pos - 1], {})
+            if sec.get("type") != stype:
+                notes.append("%02d is %s here, not %s, so %s was left alone."
+                             % (pos, sec.get("type", "?"), stype, field))
+                continue
+            if block:
+                stores = [b.setdefault("settings", {})
+                          for b in (sec.get("blocks") or {}).values()
+                          if b.get("type") == block]
+            else:
+                stores = [sec.setdefault("settings", {})]
+            for store in stores:
+                diff.set(store, field, value, "%02d %s" % (pos, sec.get("type", "?")),
+                         tpl_label)
+        colors = {}
+
+    # ── colours, spelled out the old way ───────────────────────────────
     seen = set()
     if colors:
         for i, sid in enumerate(order, 1):
@@ -425,6 +474,8 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_glob
     backups = {template_key: raw_tpl}
 
     # ── global colours ─────────────────────────────────────────────────
+    if chosen and do_globals and not problems:
+        globs = {"legacy": pal.globals_for(chosen), "schemes": pal.schemes_for(chosen)}
     if globs:
         raw_set = sc.get_theme_file(theme["id"], SETTINGS_KEY)["value"]
         settings = json.loads(raw_set)
@@ -450,6 +501,7 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_glob
         problems.extend(bad)
 
     found = {
+        "palettes": len(palettes),
         "colors": len(colors),
         "grid": len(grid["features"]) if grid else 0,
         "table": len(table["rows"]) if table else 0,
@@ -457,17 +509,23 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True, do_glob
                     + sum(len(v) for v in globs["schemes"].values())) if globs else 0,
     }
     if do_colors and not colors:
-        notes.append("No colour block found. Expected a line reading "
-                     "“FIELDS, BY SECTION” followed by the fields.")
+        if not palettes:
+            notes.append("No colour block found. Expected a PALETTE block naming "
+                         "the twelve roles, or “FIELDS, BY SECTION” "
+                         "followed by the fields.")
     if do_copy and not grid and not table:
         notes.append("No copy block found. Expected “SECTION 5” or "
                      "“SECTION 6” with field names.")
-    if do_globals and not globs:
-        notes.append("No “GLOBAL THEME COLOURS” block found.")
+    if do_globals and not globs and not palettes:
+        notes.append("No “GLOBAL COLOURS” block found, and no palette to "
+                     "work them out from.")
 
     return {
         "theme": {"name": theme["name"], "id": theme["id"]},
         "template": template_key,
+        # Every palette in the response, so one can be picked and previewed.
+        "palettes": palettes,
+        "palette_choice": chosen_key,
         "found": found,
         "changes": diff.rows,
         "problems": problems,
