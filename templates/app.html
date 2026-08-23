@@ -1405,9 +1405,18 @@ async function pbPublish() {
         ? `<div style="margin-top:6px;font-size:12px;color:${guessed ? '#e0b183' : '#777'}">
              ${guessed ? '⚠ Check the price — ' : 'Price read from '}${pbEsc(data.price_source)}
            </div>` : '';
+      // A trim means the output ran a block into the next one and it was cut
+      // back. The page is correct; the generation was not quite.
+      const trimNote = (data.trimmed && data.trimmed.length)
+        ? `<div style="margin-top:8px;font-size:12px;color:#e0b183;text-align:left">
+             ⚠ Cut ${data.trimmed.length} block${data.trimmed.length > 1 ? 's' : ''} back where the output ran on:
+             <ul style="margin:5px 0 0;padding-left:18px">
+               ${data.trimmed.map(x => `<li>${pbEsc(x)}</li>`).join('')}
+             </ul>
+           </div>` : '';
       statusEl.innerHTML = `✅ <strong>${pbEsc(data.title)}</strong> — $${pbEsc(data.price)}${pbEsc(tmpl)}<br>
         <a href="${data.admin_url}" target="_blank" style="color:#6366f1">Open in Shopify Admin →</a>
-        ${priceNote}`;
+        ${priceNote}${trimNote}`;
       pbLoadHistory();
       // The template was created a second ago, so the dropdown is already
       // stale. Read it again and land on the one this product just made.

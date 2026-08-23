@@ -45,15 +45,42 @@ def _clean_line(line):
     return line.strip()
 
 
-def _block(text, start):
-    """The lines under `start`, up to the next heading of any kind."""
+# Inside a block, a markdown heading is the next block starting. Whatever the
+# heading says, the lines under it are not this block's.
+_HEADING = re.compile(r"^\s*#{1,6}\s+\S")
+
+# Lines trimmed on the way through, so the result can say what it dropped
+# rather than quietly shortening the page.
+_trimmed = []
+
+
+def _block(text, start, label=None):
+    """The lines under `start`, up to the next heading of any kind.
+
+    The stop list catches the headings it knows. This also cuts at anything
+    that reads like scaffolding, so a heading written in a shape nobody has
+    seen yet costs a trimmed line instead of a broken page.
+    """
     m = re.search(start + r"[^\n]*\n+(.*?)" + _STOP, text, re.IGNORECASE | re.DOTALL)
     if not m:
         return []
-    return [c for c in (_clean_line(l) for l in m.group(1).split(chr(10))) if c]
+    out = []
+    for line in m.group(1).split(chr(10)):
+        if not line.strip():
+            continue
+        # The first line is this block's own headline, and it often arrives
+        # as "### ...". Only a heading after that is the next block starting.
+        if out and (_HEADING.match(line) or _is_scaffold(line)):
+            _trimmed.append((label or start, line.strip()[:70], len(out)))
+            break
+        cleaned = _clean_line(line)
+        if cleaned:
+            out.append(cleaned)
+    return out
 
 
 def parse_output(product_name, text):
+    del _trimmed[:]
     result = {
         'title': product_name,
         'price': '34.95',
@@ -125,24 +152,24 @@ def parse_output(product_name, text):
             result['colors'][key] = '#' + m.group(1)
 
     # Top of Page emoji bullets
-    result['emoji_bullets'] = _block(text, r'Top of Page')[:3]
+    result['emoji_bullets'] = _block(text, r'Top of Page', 'the top-of-page bullets')[:3]
 
     # How It Works
-    result['how_it_works'] = _block(text, r'Collapsible Tab[^\n]*How It Works')[:3]
+    result['how_it_works'] = _block(text, r'Collapsible Tab[^\n]*How It Works', 'How It Works')[:3]
 
     # Reviews
-    review_lines = _block(text, r'Collapsible Tab[^\n]*Review')
+    review_lines = _block(text, r'Collapsible Tab[^\n]*Review', 'the reviews')
     blocks = re.findall(r'"([^"]+)"\s*\n+[\u2014\-]\s*([^\n]+)', chr(10).join(review_lines))
     result['reviews'] = [{'text': q.strip(), 'author': a.strip()} for q, a in blocks[:3]]
 
     # Main Body Section 1
-    lines = _block(text, r'Main Body Section 1')
+    lines = _block(text, r'Main Body Section 1', 'Main Body 1')
     if lines:
         result['mb1_headline'] = lines[0]
         result['mb1_paragraphs'] = lines[1:]
 
     # Main Body Section 2
-    lines = _block(text, r'Main Body Section 2')
+    lines = _block(text, r'Main Body Section 2', 'Main Body 2')
     if True:
         if lines:
             result['mb2_headline'] = lines[0]
@@ -161,13 +188,13 @@ def parse_output(product_name, text):
                     i += 1
 
     # Main Body Section 3
-    lines = _block(text, r'Main Body Section 3')
+    lines = _block(text, r'Main Body Section 3', 'Main Body 3')
     if lines:
         result['mb3_headline'] = lines[0]
         result['mb3_paragraphs'] = lines[1:]
 
     # 30-Day Guarantee
-    result['guarantee_text'] = ' '.join(_block(text, r'30\s*-?\s*Day Guarantee'))
+    result['guarantee_text'] = ' '.join(_block(text, r'30\s*-?\s*Day Guarantee', 'the guarantee'))
 
     # FAQ
     m = re.search(r'\bFAQ\b[^\n]*\n+(.*?)$', text, re.IGNORECASE | re.DOTALL)
@@ -187,6 +214,8 @@ def parse_output(product_name, text):
             else:
                 i += 1
 
+    result['trimmed'] = ['%s stopped at "%s"' % (label, snippet)
+                         for label, snippet, _kept in _trimmed]
     return result
 
 
@@ -345,6 +374,10 @@ _LIMITS = {
 }
 
 
+def _is_scaffold(line):
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern, _ in _SCAFFOLD)
+
+
 def check_parsed(parsed):
     """Everything wrong with a parse, in the order a person would read it."""
     problems = []
@@ -454,4 +487,7 @@ def publish(product_name, generated_text):
         'price': parsed['price'],
         'price_source': parsed.get('price_source', ''),
         'base_template': BASE_TEMPLATE,
+        # Blocks that ran on and were cut back. The page is right, but the
+        # output was not, and that is worth seeing rather than swallowing.
+        'trimmed': parsed.get('trimmed', []),
     }
