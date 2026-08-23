@@ -25,12 +25,24 @@ def _paras(lines):
 # below stops at whichever of these comes first, instead of trusting that the
 # next thing on the page is the one block it expects — the comparison table
 # sits between Main Body 3 and the guarantee, and used to be swallowed whole.
-_STOP = (r"(?:\n\s*(?:SECTION\s+\d|TOP OF PAGE|COLLAPSIBLE TAB|MAIN BODY SECTION\s*\d"
+# A response may write its headings plainly or as markdown, and the two have
+# alternated between runs. "## Main Body Section 2" is the same heading as
+# "MAIN BODY SECTION 2"; missing that is how one section swallows the next.
+_LEAD = r"(?:[#*\-\s]{0,8})"
+_STOP = (r"(?:\n" + _LEAD + r"(?:SECTION\s+\d|TOP OF PAGE|COLLAPSIBLE TAB|MAIN BODY SECTION\s*\d"
          r"|COMPARISON TABLE|FEATURES GRID|ROWS\b|30\s*-?\s*DAY GUARANTEE|FAQ\b"
          r"|SELF\s*-?\s*CHECK|CRITICAL RULES|PALETTE\b|CHECKS\b|COLOUR SCHEMES"
          r"|COLOR SCHEMES|GLOBAL COLOURS?|SECTION SCHEMES|SOURCE SWITCHES"
          r"|FIELDS, BY SECTION|Word count:|Failures used:|Insider phrases:"
          r"|Competitor tick test:)|$)")
+
+# Markdown heading markers, and the stray bold a headline sometimes arrives in.
+_MARKS = re.compile(r"^\s*(?:#{1,6}\s*|[*\-]\s+)")
+
+
+def _clean_line(line):
+    line = _MARKS.sub("", line.strip())
+    return line.strip()
 
 
 def _block(text, start):
@@ -38,7 +50,7 @@ def _block(text, start):
     m = re.search(start + r"[^\n]*\n+(.*?)" + _STOP, text, re.IGNORECASE | re.DOTALL)
     if not m:
         return []
-    return [l.strip() for l in m.group(1).split(chr(10)) if l.strip()]
+    return [c for c in (_clean_line(l) for l in m.group(1).split(chr(10))) if c]
 
 
 def parse_output(product_name, text):
