@@ -92,16 +92,25 @@ def parse_output(product_name, text):
             result['price_source'] = 'default — no price found in the output'
 
     # Colors
-    for label, key in [('Background color', 'bg'), ('Text color', 'text'),
-                        ('Accent 1', 'accent1'), ('Accent 2', 'accent2')]:
-        m = re.search(label + r'[^#]*#([0-9A-Fa-f]{6})', text, re.IGNORECASE)
+    # The PALETTE block names the roles the theme is keyed to, so read that
+    # first. Section 3 prints the same colours under a designer's names, and
+    # those change whenever the brief does; the role names do not.
+    for role, key in [('BG', 'bg'), ('INK', 'text'), ('ACCENT', 'accent1'),
+                      ('ACCENT_SOFT', 'accent2'), ('CONTRAST', 'contrast')]:
+        m = re.search(r'^\s*' + role + r'\s*=\s*#([0-9A-Fa-f]{6})', text, re.M)
         if m:
             result['colors'][key] = '#' + m.group(1)
-    # The darkest role, from Section 4's palette. The buy button and the sticky
-    # bar are meant to be this, not the accent.
-    m = re.search(r'^\s*CONTRAST\s*=\s*#([0-9A-Fa-f]{6})', text, re.IGNORECASE | re.M)
-    if m:
-        result['colors']['contrast'] = '#' + m.group(1)
+    # Designer names and older output, as a fallback.
+    for label, key in [('Background color', 'bg'), ('Background', 'bg'),
+                       ('Text color', 'text'), ('Heading text', 'text'),
+                       ('Accent 1', 'accent1'), ('Primary', 'accent1'),
+                       ('Accent 2', 'accent2'), ('Secondary', 'accent2'),
+                       ('Accent / CTA', 'contrast'), ('Accent/CTA', 'contrast')]:
+        if result['colors'].get(key):
+            continue
+        m = re.search(label + r'[^#\n]{0,24}#([0-9A-Fa-f]{6})', text, re.IGNORECASE)
+        if m:
+            result['colors'][key] = '#' + m.group(1)
 
     # Top of Page emoji bullets
     result['emoji_bullets'] = _block(text, r'Top of Page')[:3]
