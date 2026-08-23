@@ -11,6 +11,26 @@ MODEL = "claude-opus-5"
 MAX_TOKENS = 32000
 THINKING = {"type": "adaptive"}
 
+# Claude Opus 5, per million tokens. Cache reads are a tenth of the input
+# rate; the write that fills the cache costs more than a plain read once,
+# and pays for itself on the second generation within the hour.
+USD_IN = 5.00
+USD_OUT = 25.00
+USD_CACHE_READ = 0.50
+USD_CACHE_WRITE = 10.00
+
+
+def _spend(usage):
+    """What one generation cost, and the numbers behind it."""
+    fresh = getattr(usage, "input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cost = (fresh * USD_IN + read * USD_CACHE_READ + write * USD_CACHE_WRITE
+            + out * USD_OUT) / 1_000_000
+    return {"input": fresh, "cache_read": read, "cache_write": write,
+            "output": out, "usd": round(cost, 4)}
+
 PROMPT_TEMPLATE = """ROLE
 You are an 8-figure ecommerce store owner who specializes in branded dropshipping. Your goal is to help me launch a high-converting product page today. You write like a real operator, not like AI. Use AIDA copywriting principles. Lead with benefits and outcomes, not features. Speak directly to the customer.
 
@@ -145,27 +165,38 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
               .replace("[COMPETITOR_URL]", competitor_url or "no competitor URL provided")
               .replace("[PRODUCT_COST]", str(product_cost))
               .replace("[SHIPPING_COST]", str(shipping_cost)))
+    volatile = ""
     if prompt_override and "[PRODUCT_NAME]" not in prompt_override:
         # A custom prompt that never names the product still needs to know it.
-        # It goes in front: a prompt usually ends on its output format, and
-        # anything after that reads as part of what to produce.
-        prompt = ("INPUTS\nProduct name: %s\nCompetitor URL: %s\n"
-                  "Product cost: $%s\nShipping cost: $%s\n\n%s"
-                  % (product_name,
-                     competitor_url or "no competitor URL provided",
-                     product_cost, shipping_cost, prompt))
+        # It goes last, framed as the instruction it is — a prompt usually ends
+        # on its output format, and a bare block after that reads as part of
+        # what to produce.
+        volatile = ("\u2014\u2014\u2014\n"
+                    "The product to write all of the above for:\n\n"
+                    "Product name: %s\nCompetitor URL: %s\n"
+                    "Product cost: $%s\nShipping cost: $%s\n\n"
+                    "Write the sections now, in order."
+                    % (product_name,
+                       competitor_url or "no competitor URL provided",
+                       product_cost, shipping_cost))
+    stable_block = {"type": "text", "text": prompt}
 
     yield {"type": "status", "text": "🛍️ Building your product page..."}
 
-    content = [{"type": "text", "text": prompt}]
-    if images:
-        img_blocks = []
-        for img in images[:3]:
-            img_blocks.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": img["media_type"], "data": img["b64"]}
-            })
-        content = img_blocks + content
+    # Caching is a prefix match, so the part that never changes has to come
+    # first. The prompt is the same 13,500 tokens on every product; the name,
+    # the costs and the photos are what differ, so they go after the breakpoint.
+    # When the prompt carries [PRODUCT_NAME] the substitution puts the product
+    # inside it and there is no stable prefix to cache — that is left alone.
+    content = [dict(stable_block, cache_control={"type": "ephemeral", "ttl": "1h"})]
+    for img in (images or [])[:3]:
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": img["media_type"],
+                       "data": img["b64"]},
+        })
+    if volatile:
+        content.append({"type": "text", "text": volatile})
 
     try:
         with client.messages.stream(
@@ -187,6 +218,10 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
                 "the prompt, before writing it into the theme.]")}
             return
 
-        yield {"type": "done", "reply": text}
+        spend = _spend(response.usage)
+        print("[builder] %s | in %d, cached %d, written %d, out %d | $%.4f"
+              % (product_name, spend["input"], spend["cache_read"],
+                 spend["cache_write"], spend["output"], spend["usd"]))
+        yield {"type": "done", "reply": text, "usage": spend}
     except Exception as e:
         yield {"type": "done", "reply": f"Error: {e}"}

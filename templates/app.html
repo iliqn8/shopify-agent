@@ -214,6 +214,7 @@
         <button onclick="pbCopy()" style="background:#1e1e1e;border:1px solid #333;color:#aaa;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px">Copy all</button>
       </div>
       <p style="color:#888;font-size:12.5px;margin:0 0 12px">What the model wrote back — the finished copy, colours and field names. Editable, so you can fix a line before it goes in.</p>
+      <div id="pb-spend" style="display:none;color:#666;font-size:11.5px;text-align:right;margin-bottom:5px"></div>
       <textarea id="pb-output" rows="14" oninput="pbResetPreview()" placeholder="Nothing generated yet. Write a prompt above, fill in the product, then press Generate." style="width:100%;background:#111;border:1px solid #222;border-radius:10px;padding:16px;color:#e0e0e0;font-size:12.5px;line-height:1.65;box-sizing:border-box;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace"></textarea>
 
       <button id="pb-publish-btn" onclick="pbPublish()" style="margin-top:16px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
@@ -1345,6 +1346,7 @@ async function pbGenerate() {
             btn.textContent = '🚀 Generate Product Page';
             statusEl.style.display = 'none';
             outputEl.value = ev.reply || '';
+            pbShowSpend(ev.usage);
             pbResetPreview();
             // panel already visible
           }
@@ -1371,6 +1373,19 @@ function pbCopy() {
     btn.textContent = '✅ Copied!';
     setTimeout(() => btn.textContent = '📋 Copy all', 2000);
   });
+}
+
+// What the generation actually cost, from the usage the API returned. A cache
+// read means the prompt was already paid for within the hour.
+function pbShowSpend(u) {
+  const el = document.getElementById('pb-spend');
+  if (!u) { el.style.display = 'none'; return; }
+  const n = x => (x || 0).toLocaleString();
+  const cache = u.cache_read ? `${n(u.cache_read)} from cache`
+              : u.cache_write ? `${n(u.cache_write)} into cache`
+              : 'not cached';
+  el.textContent = `$${u.usd.toFixed(3)}  ·  ${n(u.input)} in, ${n(u.output)} out  ·  ${cache}`;
+  el.style.display = 'block';
 }
 
 let _pbCurrentProductName = '';
