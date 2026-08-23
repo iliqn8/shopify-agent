@@ -306,8 +306,102 @@ def fill_template(template_json_str, parsed):
 
 # ── Main publish function ──────────────────────────────────────────────────
 
+# ── The guard ──────────────────────────────────────────────────────────────
+# Three separate times a change in how the response was formatted let one block
+# run into the next, and the scaffolding of the prompt itself reached a live
+# page: a comparison table printed beside a product photo, a FAQ inside the
+# guarantee, "###" in a headline. Each time the parser was taught the new shape.
+#
+# This checks the result instead of the input, so the next format nobody
+# predicted is caught here rather than by looking at the published page. If it
+# fires, nothing is created — a page that has to be repaired by hand costs more
+# than a generation that has to be run again.
+
+# Things that are never product copy. A hit means a block ran past its end.
+_SCAFFOLD = [
+    (r"(?:^|\s)#{2,6}\s+\S",                       "a markdown heading"),
+    (r"\b(?:featured_title|other_title|heading|subheading)\s*=",
+                                                "a field assignment"),
+    (r"^\s*\d+\s+feature\s*=",                 "a comparison table row"),
+    (r"\bROWS\b",                              "the ROWS marker"),
+    (r"\bWord count\s*:",                      "the word-count line"),
+    (r"\bFailures used\s*:",                   "the failures line"),
+    (r"\bInsider phrases\s*:",                 "the insider-phrases line"),
+    (r"\bCompetitor tick test\s*:",            "the tick-test line"),
+    (r"\bMain Body Section\s*\d",              "another section's heading"),
+    (r"\bCOMPARISON TABLE\b",                  "the comparison table heading"),
+    (r"\bTop of Page\b",                       "the top-of-page heading"),
+    (r"\bCollapsible Tab\b",                   "a collapsible-tab heading"),
+    (r"\b30\s*-?\s*Day Guarantee\b",           "the guarantee heading"),
+    (r"\bSECTION\s+\d\b",                     "a SECTION heading"),
+    (r"#[0-9A-Fa-f]{6}\b",                      "a hex colour"),
+]
+
+# Roughly twice the longest of these that has ever read well, so an overrun is
+# caught even when it carries no scaffolding at all.
+_LIMITS = {
+    "Main Body 1": 1100, "Main Body 3": 1100, "the guarantee": 400,
+    "a FAQ answer": 700, "a benefit description": 260, "a review": 500,
+}
+
+
+def check_parsed(parsed):
+    """Everything wrong with a parse, in the order a person would read it."""
+    problems = []
+
+    def look(label, value, limit_key=None):
+        text = value if isinstance(value, str) else chr(10).join(value or [])
+        if not text:
+            return
+        for pattern, what in _SCAFFOLD:
+            if re.search(pattern, text, re.IGNORECASE | re.M):
+                problems.append(
+                    "%s contains %s, so it ran past where it should have stopped."
+                    % (label, what))
+                break
+        cap = _LIMITS.get(limit_key or label)
+        if cap and len(text) > cap:
+            problems.append("%s is %d characters, and nothing here should pass %d."
+                            % (label, len(text), cap))
+
+    look("Main Body 1", [parsed["mb1_headline"]] + parsed["mb1_paragraphs"], "Main Body 1")
+    look("Main Body 2", [parsed["mb2_headline"]])
+    look("Main Body 3", [parsed["mb3_headline"]] + parsed["mb3_paragraphs"], "Main Body 3")
+    look("the guarantee", parsed["guarantee_text"], "the guarantee")
+    look("the top-of-page bullets", parsed["emoji_bullets"])
+    look("How It Works", parsed["how_it_works"])
+    for i, blk in enumerate(parsed["mb2_blocks"], 1):
+        look("benefit %d" % i, [blk.get("title", ""), blk.get("desc", "")],
+             "a benefit description")
+    for i, rev in enumerate(parsed["reviews"], 1):
+        look("review %d" % i, rev.get("text", ""), "a review")
+    for i, item in enumerate(parsed["faq_items"], 1):
+        look("FAQ %d" % i, item.get("a", ""), "a FAQ answer")
+
+    # Empty is its own kind of wrong: it means a heading was not recognised.
+    for label, value in (("Main Body 1", parsed["mb1_paragraphs"]),
+                         ("Main Body 3", parsed["mb3_paragraphs"]),
+                         ("the FAQ", parsed["faq_items"]),
+                         ("the benefit blocks", parsed["mb2_blocks"])):
+        if not value:
+            problems.append("%s came out empty, so its heading was not recognised."
+                            % label)
+    return problems
+
+
+class ParseProblem(Exception):
+    """Raised instead of publishing something that would need repairing."""
+
+    def __init__(self, problems):
+        self.problems = problems
+        super().__init__("The generated output did not parse cleanly.")
+
+
 def publish(product_name, generated_text):
     parsed = parse_output(product_name, generated_text)
+    problems = check_parsed(parsed)
+    if problems:
+        raise ParseProblem(problems)
 
     # Create Shopify product
     product = sc.create_product(

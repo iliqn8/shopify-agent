@@ -369,7 +369,13 @@ def product_publish():
     if not product_name or not generated_text:
         return jsonify({"error": "Missing fields"}), 400
     try:
-        result = pub.publish(product_name, generated_text)
+        try:
+            result = pub.publish(product_name, generated_text)
+        except pub.ParseProblem as bad:
+            # Nothing was created. Say what is wrong with the output rather
+            # than publishing a page that has to be repaired by hand.
+            return jsonify({"error": "The generated output did not parse cleanly.",
+                            "problems": bad.problems}), 400
         kb.save_product_page(
             product_name=product_name,
             generated_text=generated_text,

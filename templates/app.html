@@ -1415,6 +1415,18 @@ async function pbPublish() {
         pbLoadTemplates('templates/product.' + data.template_suffix + '.json')
           .then(pbResetPreview);
       }
+    } else if (data.problems && data.problems.length) {
+      // Nothing was created, so this is a fix-and-retry rather than a failure
+      // to bury. Say what ran into what.
+      btn.disabled = false;
+      btn.textContent = '\uD83D\uDECD\uFE0F Create in Shopify';
+      statusEl.style.color = '#e0b183';
+      statusEl.innerHTML =
+        '<strong>Nothing was created.</strong> The output did not parse cleanly:'
+        + '<ul style="margin:8px 0 0;padding-left:18px;text-align:left">'
+        + data.problems.map(p => '<li style="margin-bottom:3px">' + pbEsc(p) + '</li>').join('')
+        + '</ul><div style="margin-top:8px;color:#888">Regenerate, or fix the output above and try again.</div>';
+      return;
     } else {
       throw new Error(data.error || 'Unknown error');
     }
