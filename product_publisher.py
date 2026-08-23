@@ -226,157 +226,196 @@ def parse_output(product_name, text):
 
 # ── Template builder ───────────────────────────────────────────────────────
 
-# Every section fill_template is responsible for, and the copy that proves it
-# was filled. If one still matches the template it was copied from, the page is
-# about the previous product there — the features grid and the FAQ have both
-# shipped that way.
-PERSONALISED = [
-    ('image_with_text_6NJQ98',    'Main Body 1'),
-    ('benefit_icons_image_eNxPJQ', 'Main Body 2'),
-    ('image_with_text_8wqzxh',    'Main Body 3'),
-    ('rich_text_d7MAiq',          'the guarantee'),
-    ('collapsible_content_ea4B3M', 'the FAQ'),
-    ('ds_testimonials_i86BLn',    'the testimonials'),
-]
-
-
-def _fingerprint(section):
-    """Just the copy, so a colour change does not read as a rewrite."""
-    out = []
-    for store in [section.get('settings', {})] + [
-            b.get('settings', {}) for b in (section.get('blocks') or {}).values()]:
-        for key, value in sorted((store or {}).items()):
-            if isinstance(value, str) and not value.startswith('#') and len(value) > 12:
-                out.append(key + '=' + value)
-    return chr(10).join(out)
-
-
-def unchanged_sections(base_json_str, filled_json_str):
-    """The sections that came out of this still wearing the base's copy."""
-    base = json.loads(base_json_str).get('sections', {})
-    filled = json.loads(filled_json_str).get('sections', {})
-    stale = []
-    for sid, label in PERSONALISED:
-        if sid in base and sid in filled:
-            if _fingerprint(base[sid]) == _fingerprint(filled[sid]):
-                stale.append(label)
-    return stale
+def _bullet(text):
+    """A tick-list line: no emoji, no asterisks — the list draws its own icon."""
+    text = re.sub(r'^\s*[^\w\s(&"\'\u2018\u201c-]+\s*', '', text or '')
+    return _plain(text)
 
 
 def fill_template(template_json_str, parsed):
+    """Fill the copy, and return the filled template with a record of every
+    product-specific field written, as (label, section, block, key)."""
     tmpl = json.loads(template_json_str)
     colors = parsed.get('colors', {})
+    written = []
 
-    # ── main section blocks ──
-    main_blocks = tmpl['sections']['main']['blocks']
+    def put(sid, bid, key, value, label=None):
+        """Write one setting.
 
-    # 3 emoji bullets
-    if parsed['emoji_bullets']:
-        html = ''.join(f'<p>{_bold(b)}</p>' for b in parsed['emoji_bullets'])
-        if 'emoji_benefits_xFGiTn' in main_blocks:
-            main_blocks['emoji_benefits_xFGiTn']['settings']['benefits'] = html
+        A label marks it as copy that has to end up different from the template
+        this was copied from. The expectation is recorded whether or not there
+        is anything to write, because a field nobody wrote is exactly how a page
+        ends up talking about the previous product.
+        """
+        sec = tmpl['sections'].get(sid)
+        if not sec:
+            return
+        if bid is None:
+            store = sec.setdefault('settings', {})
+        else:
+            blocks = sec.get('blocks') or {}
+            if bid not in blocks:
+                return
+            store = blocks[bid].setdefault('settings', {})
+        if label and (label, sid, bid, key) not in written:
+            written.append((label, sid, bid, key))
+        if value is None or value == '' or value == []:
+            return
+        store[key] = value
 
-    # How It Works tab
-    if parsed['how_it_works'] and 'collapsible_tab_6mMkwr' in main_blocks:
-        steps = ''.join(f'<p>{i+1}. {_bold(s)}</p>' for i, s in enumerate(parsed['how_it_works']))
-        main_blocks['collapsible_tab_6mMkwr']['settings']['heading'] = 'How It Works'
-        main_blocks['collapsible_tab_6mMkwr']['settings']['content'] = steps
+    # ── the three ticked bullets under the price ──
+    put('main', 'emoji_benefits_xFGiTn', 'benefits',
+        ''.join(f'<p>{_bold(b)}</p>' for b in parsed['emoji_bullets']),
+        'the bullets under the price')
+    if True:
+        # The same three again, in a hand-written list that carries its own
+        # tick icons. It was never filled, so every page has shown the base
+        # template's bullets — pH balance, on a page about vein patches.
+        blocks = tmpl['sections'].get('main', {}).get('blocks', {})
+        for bid, blk in blocks.items():
+            html = (blk.get('settings') or {}).get('custom_liquid', '')
+            if blk.get('type') != 'custom_liquid' or 'product-benefits' not in html:
+                continue
+            lines = [_bullet(b) for b in parsed['emoji_bullets'][:3]]
+            n = [0]
 
-    # Reviews in product info block
-    for i, rev in enumerate(parsed['reviews'][:3], 1):
-        if 'reviews_wbqVgr' in main_blocks:
-            main_blocks['reviews_wbqVgr']['settings'][f'text_{i}'] = f'<p><em>"{rev["text"]}"</em></p>'
-            main_blocks['reviews_wbqVgr']['settings'][f'author_{i}'] = rev['author']
+            def swap(m):
+                i = n[0]
+                n[0] += 1
+                return '<span>%s</span>' % lines[i] if i < len(lines) else m.group(0)
 
-    # Button colors
-    # The buy button reads its colour from Scheme 4 now, so it is left alone.
-    # The sticky bar has no such switch and has to be told the same colour by
-    # hand, or the two disagree with each other on every scroll.
+            put('main', bid, 'custom_liquid',
+                re.sub(r'<span>.*?</span>', swap, html, flags=re.S) if lines else '',
+                'the ticked benefit list')
+
+    # ── How It Works ──
+    if parsed['how_it_works']:
+        put('main', 'collapsible_tab_6mMkwr', 'heading', 'How It Works')
+    put('main', 'collapsible_tab_6mMkwr', 'content',
+        ''.join(f'<p>{i+1}. {_bold(s)}</p>'
+                for i, s in enumerate(parsed['how_it_works'])),
+        'the How It Works tab')
+
+    # ── the three short reviews beside the price ──
+    revs = parsed['reviews'][:3]
+    for i in (1, 2, 3):
+        rev = revs[i - 1] if i <= len(revs) else None
+        put('main', 'reviews_wbqVgr', f'text_{i}',
+            f'<p><em>"{rev["text"]}"</em></p>' if rev else '',
+            f'review {i} beside the price')
+        if rev:
+            put('main', 'reviews_wbqVgr', f'author_{i}', rev['author'])
+
+    # The buy button reads its colour from Scheme 4. The sticky bar has no such
+    # switch and has to be told the same colour by hand.
     dark = colors.get('contrast') or colors.get('accent1')
-    if dark and 'sticky_atc_xbBkLM' in main_blocks:
-        main_blocks['sticky_atc_xbBkLM']['settings']['enable_custom_btn_color'] = True
-        main_blocks['sticky_atc_xbBkLM']['settings']['custom_btn_color'] = dark
+    if dark:
+        put('main', 'sticky_atc_xbBkLM', 'enable_custom_btn_color', True)
+        put('main', 'sticky_atc_xbBkLM', 'custom_btn_color', dark)
 
-    # ── image_with_text_6NJQ98 — Main Body Section 1 ──
-    s1 = tmpl['sections'].get('image_with_text_6NJQ98', {})
-    if s1 and parsed['mb1_headline']:
-        b = s1.get('blocks', {})
-        if 'heading_hJVTy3' in b:
-            b['heading_hJVTy3']['settings']['heading'] = _bold(parsed['mb1_headline'])
-        if 'text_apQhMK' in b and parsed['mb1_paragraphs']:
-            b['text_apQhMK']['settings']['text'] = _paras(parsed['mb1_paragraphs'])
+    # ── Main Body 1 ──
+    put('image_with_text_6NJQ98', 'heading_hJVTy3', 'heading',
+        _bold(parsed['mb1_headline']), 'Main Body 1')
+    put('image_with_text_6NJQ98', 'text_apQhMK', 'text',
+        _paras(parsed['mb1_paragraphs']), 'Main Body 1')
 
-    # ── benefit_icons_image_eNxPJQ — Main Body Section 2 ──
+    # ── Main Body 2 ──
+    put('benefit_icons_image_eNxPJQ', None, 'headline',
+        _bold(parsed['mb2_headline']), 'Main Body 2')
+    if colors.get('bg'):
+        put('benefit_icons_image_eNxPJQ', None, 'bg_color', colors['bg'])
+    if colors.get('text'):
+        put('benefit_icons_image_eNxPJQ', None, 'headline_color', colors['text'])
+        put('benefit_icons_image_eNxPJQ', None, 'subhead_color', colors['text'])
+    if colors.get('accent1'):
+        put('benefit_icons_image_eNxPJQ', None, 'icon_color', colors['accent1'])
     s2 = tmpl['sections'].get('benefit_icons_image_eNxPJQ', {})
-    if s2:
-        if parsed['mb2_headline']:
-            s2['settings']['headline'] = _bold(parsed['mb2_headline'])
-        if colors.get('bg'):
-            s2['settings']['bg_color'] = colors['bg']
-        if colors.get('text'):
-            s2['settings']['headline_color'] = colors['text']
-            s2['settings']['subhead_color'] = colors['text']
-        if colors.get('accent1'):
-            s2['settings']['icon_color'] = colors['accent1']
-        # Fill 4 benefit blocks
-        b = s2.get('blocks', {})
-        bid_list = list(b.keys())
-        for idx, block_data in enumerate(parsed['mb2_blocks'][:4]):
-            if idx < len(bid_list):
-                bid = bid_list[idx]
-                b[bid]['settings']['icon_type'] = 'emoji'
-                b[bid]['settings']['emoji_text'] = block_data.get('emoji', '✨')
-                b[bid]['settings']['title'] = block_data.get('title', '')
-                b[bid]['settings']['text'] = block_data.get('desc', '')
+    bids = list((s2.get('blocks') or {}).keys())
+    for idx in range(min(4, len(bids))):
+        blk = parsed['mb2_blocks'][idx] if idx < len(parsed['mb2_blocks']) else {}
+        if blk:
+            put('benefit_icons_image_eNxPJQ', bids[idx], 'icon_type', 'emoji')
+            put('benefit_icons_image_eNxPJQ', bids[idx], 'emoji_text',
+                blk.get('emoji', '\u2728'))
+        put('benefit_icons_image_eNxPJQ', bids[idx], 'title',
+            blk.get('title', ''), 'benefit %d' % (idx + 1))
+        put('benefit_icons_image_eNxPJQ', bids[idx], 'text',
+            blk.get('desc', ''), 'benefit %d' % (idx + 1))
 
-    # ── image_with_text_8wqzxh — Main Body Section 3 ──
-    s3 = tmpl['sections'].get('image_with_text_8wqzxh', {})
-    if s3 and parsed['mb3_headline']:
-        b = s3.get('blocks', {})
-        if 'heading_MGgztr' in b:
-            b['heading_MGgztr']['settings']['heading'] = _bold(parsed['mb3_headline'])
-        if 'text_KpKUUF' in b and parsed['mb3_paragraphs']:
-            b['text_KpKUUF']['settings']['text'] = _paras(parsed['mb3_paragraphs'])
+    # ── Main Body 3 ──
+    put('image_with_text_8wqzxh', 'heading_MGgztr', 'heading',
+        _bold(parsed['mb3_headline']), 'Main Body 3')
+    put('image_with_text_8wqzxh', 'text_KpKUUF', 'text',
+        _paras(parsed['mb3_paragraphs']), 'Main Body 3')
 
-    # ── rich_text_d7MAiq — 30-Day Guarantee ──
-    rich = tmpl['sections'].get('rich_text_d7MAiq', {})
-    if rich and parsed['guarantee_text']:
-        rb = rich.get('blocks', {})
-        if 'text_Vrfa8P' in rb:
-            rb['text_Vrfa8P']['settings']['text'] = f'<p>{_bold(parsed["guarantee_text"])}</p>'
-    # rich-text's solid button follows Scheme 4 through its own source switch.
+    # ── the guarantee ──
+    put('rich_text_d7MAiq', 'text_Vrfa8P', 'text',
+        f'<p>{_bold(parsed["guarantee_text"])}</p>' if parsed['guarantee_text'] else '',
+        'the guarantee')
 
-    # ── ds_testimonials_i86BLn — Customer Reviews ──
-    testi = tmpl['sections'].get('ds_testimonials_i86BLn', {})
-    if testi and parsed['reviews']:
-        tb = testi.get('blocks', {})
-        tb_ids = list(tb.keys())
-        for idx, rev in enumerate(parsed['reviews'][:3]):
-            if idx < len(tb_ids):
-                bid = tb_ids[idx]
-                tb[bid]['settings']['text'] = f'<p><em>"{rev["text"]}"</em></p>'
-                tb[bid]['settings']['author'] = rev['author']
-                tb[bid]['settings']['title'] = ' '.join(rev['text'].split()[:4]) + '...'
+    # ── the reviews carousel ──
+    # Never filled before, so every page carried the same five reviews about a
+    # ring. Three real ones is better than five borrowed; the spare slots go.
+    hc = [sid for sid, s in tmpl['sections'].items()
+          if s.get('type') == 'custom-happy-customers-carousel']
+    for sid in hc:
+        sec = tmpl['sections'][sid]
+        order = sec.get('block_order') or list((sec.get('blocks') or {}).keys())
+        used = 0
+        if order:
+            put(sid, order[0], 'text', '', 'reviews carousel')
+        for idx, rev in enumerate(parsed['reviews'][:len(order)]):
+            bid = order[idx]
+            put(sid, bid, 'name', rev['author'])
+            put(sid, bid, 'title',
+                _plain(' '.join(rev['text'].split()[:4])).rstrip('.,') + '...')
+            put(sid, bid, 'text', rev['text'], 'reviews carousel')
+            used = idx + 1
+        if used:
+            for bid in order[used:]:
+                (sec.get('blocks') or {}).pop(bid, None)
+            sec['block_order'] = order[:used]
 
-    # ── collapsible_content_ea4B3M — FAQ ──
-    faq_sec = tmpl['sections'].get('collapsible_content_ea4B3M', {})
-    if faq_sec and parsed['faq_items']:
-        fb = faq_sec.get('blocks', {})
-        block_order = faq_sec.get('block_order', [])
-        # Use the first 4 Question slots
-        # This used to look for rows still headed "Question 1", which is what
-        # an empty template carries. The base template has real questions in it
-        # now, so nothing matched and every page kept the base's FAQ. Take the
-        # rows in order instead; the ones past the answers we have are left
-        # alone, which is where the shipping and contact rows live.
-        slots = block_order or list(fb.keys())
-        for idx, faq in enumerate(parsed['faq_items'][:4]):
-            if idx < len(slots):
-                st = fb[slots[idx]].setdefault('settings', {})
-                st['heading'] = _plain(faq['q'])
-                st['row_content'] = f'<p>{_bold(faq["a"])}</p>'
+    # ── the FAQ ──
+    # This used to look for rows still headed "Question 1", which is what an
+    # empty template carries. The base has real questions in it, so nothing
+    # matched and every page kept the base's FAQ. Rows are taken in order now;
+    # the ones past the answers we have are left alone, which is where the
+    # shipping and contact rows live.
+    faq = tmpl['sections'].get('collapsible_content_ea4B3M', {})
+    slots = faq.get('block_order') or list((faq.get('blocks') or {}).keys())
+    for idx in range(min(4, len(slots))):
+        item = parsed['faq_items'][idx] if idx < len(parsed['faq_items']) else {}
+        put('collapsible_content_ea4B3M', slots[idx], 'heading',
+            _plain(item.get('q', '')), 'FAQ %d' % (idx + 1))
+        put('collapsible_content_ea4B3M', slots[idx], 'row_content',
+            f'<p>{_bold(item["a"])}</p>' if item.get('a') else '',
+            'FAQ %d' % (idx + 1))
 
-    return json.dumps(tmpl)
+    return json.dumps(tmpl), written
+
+
+def unwritten(base_json_str, filled_json_str, written):
+    """Copy that was written and still says exactly what the base said.
+
+    Either the response had nothing for it or the write missed, and the page
+    would go live talking about whatever product the template was copied from.
+    """
+    base = json.loads(base_json_str).get('sections', {})
+    filled = json.loads(filled_json_str).get('sections', {})
+
+    def read(tree, sid, bid, key):
+        sec = tree.get(sid) or {}
+        store = (sec.get('settings') or {}) if bid is None else \
+                ((sec.get('blocks') or {}).get(bid) or {}).get('settings') or {}
+        return store.get(key)
+
+    stale = []
+    for label, sid, bid, key in written:
+        if read(base, sid, bid, key) == read(filled, sid, bid, key):
+            if label not in stale:
+                stale.append(label)
+    return stale
 
 
 # ── Main publish function ──────────────────────────────────────────────────
@@ -507,12 +546,12 @@ def publish(product_name, generated_text):
             except Exception:
                 default = sc.get_theme_file(tid, FALLBACK_TEMPLATE)
             base_json = default.get('value') or default.get('attachment') or '{}'
-            filled_json = fill_template(base_json, parsed)
-            stale = unchanged_sections(base_json, filled_json)
+            filled_json, written = fill_template(base_json, parsed)
+            stale = unwritten(base_json, filled_json, written)
             if stale:
                 raise ParseProblem(
                     ["%s came out identical to the template it was copied from, "
-                     "so that section is still about the previous product." % s
+                     "so it would go live about the previous product." % s
                      for s in stale])
             new_key = f'templates/product.{slug}.json'
             sc.update_theme_file(tid, new_key, filled_json)
