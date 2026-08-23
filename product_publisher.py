@@ -15,6 +15,11 @@ def _bold(text):
     return re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
 
 
+def _plain(text):
+    """For fields that take text, not HTML — the ** would show up as itself."""
+    return re.sub(r'\*\*(.+?)\*\*', r'\1', text or '').strip()
+
+
 def _paras(lines):
     return ''.join(f'<p>{_bold(l)}</p>' for l in lines if l.strip())
 
@@ -221,6 +226,43 @@ def parse_output(product_name, text):
 
 # ── Template builder ───────────────────────────────────────────────────────
 
+# Every section fill_template is responsible for, and the copy that proves it
+# was filled. If one still matches the template it was copied from, the page is
+# about the previous product there — the features grid and the FAQ have both
+# shipped that way.
+PERSONALISED = [
+    ('image_with_text_6NJQ98',    'Main Body 1'),
+    ('benefit_icons_image_eNxPJQ', 'Main Body 2'),
+    ('image_with_text_8wqzxh',    'Main Body 3'),
+    ('rich_text_d7MAiq',          'the guarantee'),
+    ('collapsible_content_ea4B3M', 'the FAQ'),
+    ('ds_testimonials_i86BLn',    'the testimonials'),
+]
+
+
+def _fingerprint(section):
+    """Just the copy, so a colour change does not read as a rewrite."""
+    out = []
+    for store in [section.get('settings', {})] + [
+            b.get('settings', {}) for b in (section.get('blocks') or {}).values()]:
+        for key, value in sorted((store or {}).items()):
+            if isinstance(value, str) and not value.startswith('#') and len(value) > 12:
+                out.append(key + '=' + value)
+    return chr(10).join(out)
+
+
+def unchanged_sections(base_json_str, filled_json_str):
+    """The sections that came out of this still wearing the base's copy."""
+    base = json.loads(base_json_str).get('sections', {})
+    filled = json.loads(filled_json_str).get('sections', {})
+    stale = []
+    for sid, label in PERSONALISED:
+        if sid in base and sid in filled:
+            if _fingerprint(base[sid]) == _fingerprint(filled[sid]):
+                stale.append(label)
+    return stale
+
+
 def fill_template(template_json_str, parsed):
     tmpl = json.loads(template_json_str)
     colors = parsed.get('colors', {})
@@ -322,13 +364,17 @@ def fill_template(template_json_str, parsed):
         fb = faq_sec.get('blocks', {})
         block_order = faq_sec.get('block_order', [])
         # Use the first 4 Question slots
-        q_slots = [bid for bid in block_order
-                   if fb.get(bid, {}).get('settings', {}).get('heading', '').startswith('Question')]
+        # This used to look for rows still headed "Question 1", which is what
+        # an empty template carries. The base template has real questions in it
+        # now, so nothing matched and every page kept the base's FAQ. Take the
+        # rows in order instead; the ones past the answers we have are left
+        # alone, which is where the shipping and contact rows live.
+        slots = block_order or list(fb.keys())
         for idx, faq in enumerate(parsed['faq_items'][:4]):
-            if idx < len(q_slots):
-                bid = q_slots[idx]
-                fb[bid]['settings']['heading'] = faq['q']
-                fb[bid]['settings']['row_content'] = f'<p>{_bold(faq["a"])}</p>'
+            if idx < len(slots):
+                st = fb[slots[idx]].setdefault('settings', {})
+                st['heading'] = _plain(faq['q'])
+                st['row_content'] = f'<p>{_bold(faq["a"])}</p>'
 
     return json.dumps(tmpl)
 
@@ -462,6 +508,12 @@ def publish(product_name, generated_text):
                 default = sc.get_theme_file(tid, FALLBACK_TEMPLATE)
             base_json = default.get('value') or default.get('attachment') or '{}'
             filled_json = fill_template(base_json, parsed)
+            stale = unchanged_sections(base_json, filled_json)
+            if stale:
+                raise ParseProblem(
+                    ["%s came out identical to the template it was copied from, "
+                     "so that section is still about the previous product." % s
+                     for s in stale])
             new_key = f'templates/product.{slug}.json'
             sc.update_theme_file(tid, new_key, filled_json)
             template_suffix = slug
