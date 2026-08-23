@@ -513,6 +513,17 @@ def build(text, template_key=TEMPLATE_KEY, do_colors=True, do_copy=True,
             notes.append("No colour block found. Expected a PALETTE block naming "
                          "the twelve roles, or “FIELDS, BY SECTION” "
                          "followed by the fields.")
+    # A section this template has, that the response says nothing about, keeps
+    # whatever the template was copied from. That is how a page about vein
+    # patches ended up advertising magnesium gummies.
+    if do_copy and grid_sections and not grid:
+        problems.append(
+            "This template has a features grid, but the response has no grid copy. "
+            "Applying now would leave the previous product's six benefits on the page.")
+    if do_copy and table_sections and not table:
+        problems.append(
+            "This template has a comparison table, but the response has no table copy. "
+            "Applying now would leave the previous product's rows on the page.")
     if do_copy and not grid and not table:
         notes.append("No copy block found. Expected “SECTION 5” or "
                      "“SECTION 6” with field names.")
