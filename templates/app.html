@@ -1858,34 +1858,66 @@ function pbEditRole(letter, role, hex) {
   pbRenderPalettes(pbLastPalettes);
 }
 
+// The checks are advice, not a gate: theme_writer's `problems` never included
+// contrast, so a palette that misses a threshold applies exactly like one that
+// does not. Red read as a refusal and made people think the edit had failed —
+// hence amber, the word "note", and a way to turn it off entirely.
+function pbChecksHidden() {
+  try { return localStorage.getItem('pbHideChecks') === '1'; } catch (e) { return false; }
+}
+
+function pbToggleChecks() {
+  try { localStorage.setItem('pbHideChecks', pbChecksHidden() ? '0' : '1'); } catch (e) {}
+  pbRenderPalettes(pbLastPalettes);
+}
+
 function pbRenderEditor(letter, p) {
   const checks = pbCheckPalette(p);
-  const bad = checks.filter(c => !c.ok);
-  const swatches = PB_ROLE_ORDER.filter(r => p[r]).map(r =>
-      '<label title="' + pbEsc(PB_ROLE_NOTE[r] || '') + '" style="display:flex;align-items:center;gap:8px;'
-    + 'background:#1a1a1a;border:1px solid #2e2e2e;border-radius:7px;padding:6px 8px;cursor:pointer">'
-    + '<input type="color" value="' + pbEsc(p[r]) + '"'
-    + ' onchange="pbEditRole(\'' + pbEsc(letter) + '\',\'' + r + '\',this.value)"'
-    + ' style="width:26px;height:26px;padding:0;border:1px solid #00000055;border-radius:5px;'
-    + 'background:none;cursor:pointer;flex:none">'
-    + '<span style="display:flex;flex-direction:column;min-width:0">'
-    + '<span style="color:#bbb;font-size:11px;font-weight:600;letter-spacing:.3px">' + r + '</span>'
-    + '<span style="color:#666;font-size:10.5px;font-family:ui-monospace,monospace">' + pbEsc(p[r]) + '</span>'
-    + '</span></label>').join('');
+  const bad = checks.filter(function (c) { return !c.ok; });
+  const hidden = pbChecksHidden();
+  const swatches = PB_ROLE_ORDER.filter(function (r) { return p[r]; }).map(function (r) {
+    return '<label title="' + pbEsc(PB_ROLE_NOTE[r] || '') + '" style="display:flex;align-items:center;gap:8px;'
+      + 'background:#1a1a1a;border:1px solid #2e2e2e;border-radius:7px;padding:6px 8px;cursor:pointer">'
+      + '<input type="color" value="' + pbEsc(p[r]) + '"'
+      + ' onchange="pbEditRole(\'' + pbEsc(letter) + '\',\'' + r + '\',this.value)"'
+      + ' style="width:26px;height:26px;padding:0;border:1px solid #00000055;border-radius:5px;'
+      + 'background:none;cursor:pointer;flex:none">'
+      + '<span style="display:flex;flex-direction:column;min-width:0">'
+      + '<span style="color:#bbb;font-size:11px;font-weight:600;letter-spacing:.3px">' + r + '</span>'
+      + '<span style="color:#666;font-size:10.5px;font-family:ui-monospace,monospace">' + pbEsc(p[r]) + '</span>'
+      + '</span></label>';
+  }).join('');
 
-  const verdict = bad.length
-    ? '<div style="color:#f87171;font-size:12px;margin-bottom:6px">'
-      + bad.length + ' of ' + checks.length + ' checks fail</div>'
-      + bad.map(c => '<div style="color:#c98b8b;font-size:11.5px;font-family:ui-monospace,monospace">'
-          + pbEsc(c.label) + ' — ' + pbEsc(c.got) + ', wants ' + pbEsc(c.need) + '</div>').join('')
-    : '<div style="color:#4ade80;font-size:12px">All ' + checks.length + ' checks pass</div>';
+  const toggle = '<button onclick="pbToggleChecks()" style="background:none;border:none;'
+    + 'color:#5f6672;font-size:11px;cursor:pointer;padding:0;margin-left:auto">'
+    + (hidden ? 'show checks' : 'hide checks') + '</button>';
+
+  let verdict;
+  if (hidden) {
+    verdict = '<div style="display:flex;align-items:center;color:#555;font-size:11.5px">'
+      + 'Contrast notes hidden.' + toggle + '</div>';
+  } else if (bad.length) {
+    verdict = '<div style="display:flex;align-items:center;color:#d3a15e;font-size:12px;margin-bottom:5px">'
+      + '<span>' + bad.length + ' of ' + checks.length
+      + ' outside the prompt\'s thresholds — applies anyway</span>' + toggle + '</div>'
+      + bad.map(function (c) {
+          return '<div style="color:#8c8377;font-size:11.5px;font-family:ui-monospace,monospace">'
+            + pbEsc(c.label) + ' — ' + pbEsc(c.got) + ', prompt asks ' + pbEsc(c.need) + '</div>';
+        }).join('')
+      + '<div style="color:#5f6672;font-size:11px;margin-top:5px">'
+      + 'Nothing is blocked. These are the thresholds the prompt sets for the model; '
+      + 'your own colour wins if you meant it.</div>';
+  } else {
+    verdict = '<div style="display:flex;align-items:center;color:#4ade80;font-size:12px">'
+      + '<span>All ' + checks.length + ' checks pass</span>' + toggle + '</div>';
+  }
 
   return '<div style="background:#141414;border:1px solid #2c2c2c;border-radius:0 0 9px 9px;'
     + 'padding:12px 13px;margin-top:-4px">'
     + '<div style="color:#777;font-size:11.5px;margin-bottom:9px">'
-    + 'Click a colour to change it. These checks are recalculated as you go'
+    + 'Click a colour to change it. Every edit is kept'
     + (pbEdited[letter]
-        ? ', so they are the ones that count — the CHECKS text in the output still shows the model\'s original numbers.'
+        ? ' — the CHECKS text in the output still shows the model\'s original numbers.'
         : '.')
     + '</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:6px">'
