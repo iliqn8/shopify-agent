@@ -360,6 +360,65 @@ def product_build_start():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/palettes-more-start", methods=["POST"])
+def palettes_more_start():
+    """Re-roll just the colours, for when the offered palettes are not it.
+
+    Shares _build_jobs and /api/product-build-poll with the full build, so the
+    front end polls it the same way.
+    """
+    import uuid as _uuid5, re as _re
+    data = request.json or {}
+    product_name = (data.get("product_name") or "").strip()
+    if not product_name:
+        return jsonify({"error": "Product name required"}), 400
+
+    base_color = (data.get("base_color") or "").strip()
+    if base_color:
+        if not _re.fullmatch(r"#[0-9A-Fa-f]{6}", base_color):
+            return jsonify({"error": "Base colour must be a hex like #1F4D3A."}), 400
+        base_color = base_color.upper()
+
+    # What is on screen already, so the re-roll moves away from it and does not
+    # reuse its letters. Parsed from the text rather than trusted from the client.
+    existing = {}
+    text = data.get("text") or ""
+    if text:
+        try:
+            import palette as _pal
+            existing = {k: v for k, v in _pal.parse_palettes(text).items() if k}
+        except Exception:
+            existing = {}
+
+    job_id = str(_uuid5.uuid4())
+    _build_jobs[job_id] = {"events": [], "done": False}
+
+    def run():
+        try:
+            import product_builder
+            for event in product_builder.more_palettes(
+                product_name,
+                (data.get("competitor_url") or "").strip(),
+                data.get("product_cost", "0"),
+                data.get("shipping_cost", "0"),
+                images=data.get("images", []),
+                prompt_override=data.get("prompt", ""),
+                base_color=base_color or None,
+                existing=existing,
+                taken_letters=list(existing.keys()),
+            ):
+                _build_jobs[job_id]["events"].append(event)
+                if event.get("type") == "done":
+                    _build_jobs[job_id]["done"] = True
+        except Exception as e:
+            _build_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
+            _build_jobs[job_id]["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+
 @app.route("/api/product-publish", methods=["POST"])
 def product_publish():
     import product_publisher as pub

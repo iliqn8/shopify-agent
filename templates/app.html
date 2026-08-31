@@ -253,6 +253,26 @@
           </div>
           <div id="pb-palettes" style="display:none"></div>
 
+          <div id="pb-more" style="display:none;background:#151515;border:1px solid #2c2c2c;border-radius:9px;padding:11px 13px">
+            <div style="color:#888;font-size:12px;margin-bottom:9px">None of these? Mix three more.</div>
+            <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+              <button id="pb-more-btn" onclick="pbMorePalettes()" style="background:#1f2430;color:#c9d1e6;border:1px solid #3a4256;padding:8px 13px;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">🎨 More palettes</button>
+              <span style="color:#555;font-size:12px">build around</span>
+              <input type="color" id="pb-base-pick" value="#1F4D3A" oninput="pbBaseFromPicker()" title="Pick a colour to build the palettes around" style="width:34px;height:30px;padding:0;border:1px solid #333;border-radius:7px;background:#1a1a1a;cursor:pointer">
+              <input type="text" id="pb-base-hex" placeholder="#RRGGBB — optional" oninput="pbBaseFromText()" spellcheck="false" style="width:150px;background:#1a1a1a;border:1px solid #333;color:#ddd;padding:7px 9px;border-radius:7px;font-size:12.5px;font-family:ui-monospace,monospace">
+              <button onclick="pbBaseClear()" title="Clear the colour and let the product decide" style="background:none;border:none;color:#666;font-size:12px;cursor:pointer;padding:4px 2px">clear</button>
+            </div>
+            <div id="pb-more-status" style="display:none;color:#888;font-size:12px;margin-top:8px"></div>
+            <div style="color:#5a5a5a;font-size:11.5px;margin-top:7px">
+              Leave the colour empty and the palettes come from the product photo, as before.
+              New ones are added below the current ones — nothing is thrown away.
+              <br>Costs about $0.41, or $0.53 with a colour set. That is more than
+              generating the whole page, because three palettes mean 48 contrast
+              checks and little else to spread the thinking over — but the copy you
+              already have is kept, which regenerating would throw away.
+            </div>
+          </div>
+
           <div id="pb-globals-warn" style="display:none;background:#2a1e14;border:1px solid #6b4a2a;border-left-width:3px;border-radius:8px;padding:11px 14px;color:#e0b183;font-size:12.5px">
             Writes the four colour schemes and the four global colours. The schemes are what
             repaint the section backgrounds — and they are store-wide, so this reaches the header,
@@ -1654,7 +1674,10 @@ const PB_SWATCH = ['BG', 'SURFACE', 'ACCENT', 'ACCENT_SOFT', 'CONTRAST', 'TICK',
 
 function pbRenderPalettes(palettes) {
   const box = document.getElementById('pb-palettes');
+  const more = document.getElementById('pb-more');
   const keys = Object.keys(palettes || {}).filter(k => k).sort();
+  // The re-roll rides with the list: no palettes on screen, nothing to reject.
+  if (more) more.style.display = keys.length ? 'block' : 'none';
   if (keys.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
   box.style.display = 'block';
   box.innerHTML =
@@ -1689,6 +1712,127 @@ function pbPickPalette(k) {
   pbResetPreview();
   pbRenderPalettes(pbLastPalettes);
 }
+
+// ── More palettes ────────────────────────────────────────────────────────
+// Only reachable once palettes are on screen: the point is to reject what you
+// were offered, so there is nothing to reject before then.
+
+let pbBaseColor = '';
+
+function pbBaseFromPicker() {
+  pbBaseColor = document.getElementById('pb-base-pick').value.toUpperCase();
+  document.getElementById('pb-base-hex').value = pbBaseColor;
+}
+
+function pbBaseFromText() {
+  const v = document.getElementById('pb-base-hex').value.trim();
+  pbBaseColor = /^#[0-9A-Fa-f]{6}$/.test(v) ? v.toUpperCase() : '';
+  if (pbBaseColor) document.getElementById('pb-base-pick').value = pbBaseColor;
+}
+
+function pbBaseClear() {
+  pbBaseColor = '';
+  document.getElementById('pb-base-hex').value = '';
+}
+
+// The new blocks belong with the other palettes, above the copy sections.
+// Appending at the end would drop them inside the FAQ, where the publisher
+// reads section copy.
+//
+// Both patterns are case-sensitive and demand a heading's shape. Case-folding
+// here matches the prose instead: the palette notes say "Palette A reads the
+// green label", and Section 5 has a line starting "Checks: hedged verbs" —
+// either one drags the splice point down past Section 5.
+function pbSplicePalettes(text, block) {
+  const clean = String(block || '').trim();
+  if (!clean) return text;
+
+  let lastPal = -1;
+  const head = /^[ \t]*(PALETTE|CHECKS)[ \t]+[A-Z0-9]/gm;
+  let m;
+  while ((m = head.exec(text)) !== null) lastPal = m.index;
+  if (lastPal === -1) return text.trimEnd() + '\n\n' + clean + '\n';
+
+  const after = /^[ \t]*SECTION[ \t]+\d/gm;
+  after.lastIndex = lastPal;
+  const next = after.exec(text);
+  const at = next ? next.index : text.length;
+  return text.slice(0, at).trimEnd() + '\n\n' + clean + '\n\n' + text.slice(at);
+}
+
+async function pbMorePalettes() {
+  const productName = document.getElementById('pb-product').value.trim()
+                   || _pbCurrentProductName || '';
+  if (!productName) { alert('Enter a product name first.'); return; }
+
+  const outputEl = document.getElementById('pb-output');
+  const btn = document.getElementById('pb-more-btn');
+  const status = document.getElementById('pb-more-status');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Mixing…';
+  status.style.display = 'block';
+  status.style.color = '#888';
+  status.textContent = pbBaseColor
+    ? 'Building three more around ' + pbBaseColor + '…'
+    : 'Building three more from the product…';
+
+  const stop = (msg, colour) => {
+    btn.disabled = false;
+    btn.textContent = '🎨 More palettes';
+    status.style.color = colour;
+    status.textContent = msg;
+  };
+
+  try {
+    const res = await fetch('/api/palettes-more-start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        product_name: productName,
+        competitor_url: document.getElementById('pb-url').value.trim(),
+        product_cost: document.getElementById('pb-pcost').value || '0',
+        shipping_cost: document.getElementById('pb-scost').value || '0',
+        prompt: document.getElementById('pb-prompt').value,
+        text: outputEl.value || '',
+        base_color: pbBaseColor,
+        images: pbImages.map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type}))
+      })
+    });
+    const start = await res.json();
+    if (start.error) { stop(start.error, '#f87171'); return; }
+
+    let since = 0;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/product-build-poll/${start.job_id}?since=${since}`);
+        const data = await r.json();
+        since += data.events.length;
+        for (const ev of data.events) {
+          if (ev.type === 'status') status.textContent = ev.text;
+          if (ev.type === 'done') {
+            clearInterval(poll);
+            const reply = ev.reply || '';
+            if (reply.startsWith('Error:')) { stop(reply, '#f87171'); return; }
+            outputEl.value = pbSplicePalettes(outputEl.value, reply);
+            pbShowSpend(ev.usage);
+            pbResetPreview();
+            const made = (ev.letters || []).join(', ');
+            stop(made ? 'Added ' + made + '. Preview to see them.'
+                      : 'Added. Preview to see them.', '#4ade80');
+          }
+        }
+        if (data.done && !data.events.some(e => e.type === 'done')) {
+          clearInterval(poll);
+          stop('Finished without returning anything. Try again.', '#c08552');
+        }
+      } catch(e) { console.error('palette poll error', e); }
+    }, 1500);
+  } catch(e) {
+    stop('Error: ' + e.message, '#f87171');
+  }
+}
+
 
 let pbLastPalettes = {};
 

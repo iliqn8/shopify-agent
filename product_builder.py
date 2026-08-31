@@ -225,3 +225,162 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
         yield {"type": "done", "reply": text, "usage": spend}
     except Exception as e:
         yield {"type": "done", "reply": f"Error: {e}"}
+
+
+# ── More palettes ──────────────────────────────────────────────────────────
+
+# Section 3 and 4 are a small part of a big prompt, but they only make sense
+# with the rest of it: Section 4's role table and its fifteen contrast checks
+# are what makes a palette usable. So the whole prompt is sent again, unchanged,
+# and the ask is narrowed at the end. That also keeps the cached prefix intact —
+# a re-roll reads the same 13,500 tokens for $0.007 instead of paying $0.068.
+# Three palettes is a short answer, but the thinking behind it is not: fifteen
+# contrast checks on each, adjusted and re-run until they pass. At 8000 the
+# whole budget went to thinking and no text came back at all.
+#
+# The first version of the instruction below re-stated Section 4's checks and
+# told the model to adjust and re-run until they passed. The prompt already
+# says that, and saying it twice doubled the thinking: 21,100 output tokens for
+# 1,400 of text, $0.54 — more than generating the whole page, which produces
+# these same palettes alongside five other sections for $0.35. The instruction
+# now points at Section 4 instead of paraphrasing it.
+MORE_MAX_TOKENS = 24000
+
+_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def next_letters(taken, count=3):
+    """The next unused palette letters, so a re-roll never collides."""
+    used = {str(t).strip().upper()[:1] for t in (taken or []) if str(t).strip()}
+    return [c for c in _LETTERS if c not in used][:count]
+
+
+def _more_instruction(product_name, competitor_url, product_cost, shipping_cost,
+                      letters, existing, base_color):
+    """What to append after the prompt for a palette re-roll."""
+    lines = [
+        "\u2014\u2014\u2014",
+        "The product to work from:",
+        "",
+        "Product name: %s" % product_name,
+        "Competitor URL: %s" % (competitor_url or "no competitor URL provided"),
+        "Product cost: $%s" % product_cost,
+        "Shipping cost: $%s" % shipping_cost,
+        "",
+        "THIS TIME, OUTPUT PALETTES ONLY.",
+        "",
+        "No title, no pricing, no features grid, no description — and no "
+        "SECTION headings of any kind. This text is spliced into a page that "
+        "already has its Section 3 and Section 4, so a second copy of those "
+        "headings would give the page two of each.",
+        "",
+        "Section 3 and Section 4 apply in full, as written.",
+        "",
+        "Output exactly this, three times over, and nothing around it:",
+        "",
+        "  PALETTE %s — <two or three words naming it>" % letters[0],
+        "    the twelve role lines",
+        "",
+        "  CHECKS %s" % letters[0],
+        "    every check from STEP 2, one per line",
+        "",
+        "  two or three lines on what this palette reads in the product and who "
+        "it is for",
+        "",
+        "Letter them %s, in that order." % ", ".join(letters),
+    ]
+
+    if existing:
+        lines += [
+            "",
+            "These were already offered and were not what the operator wanted. "
+            "The new ones must be a genuinely different reading of the product, "
+            "not these with the numbers nudged. If a new palette would look like "
+            "the same page as one below, it does not count \u2014 do it again.",
+            "",
+        ]
+        for key in sorted(existing):
+            roles = existing[key] or {}
+            shown = ", ".join("%s %s" % (r, roles[r])
+                              for r in ("BG", "SURFACE", "ACCENT", "CONTRAST", "STAR")
+                              if roles.get(r))
+            lines.append("  %s: %s" % (key or "?", shown))
+
+    if base_color:
+        lines += [
+            "",
+            "The operator has asked for %s to be the colour the palettes are "
+            "built around. Take it as given, not as a suggestion. In at least "
+            "one palette it is ACCENT \u2014 the brand's own colour \u2014 used as "
+            "typed. In the others it may sit as CONTRAST, or shift in shade, as "
+            "long as someone looking at the page would say that is the colour "
+            "they asked for. Everything else is derived to sit with it and to "
+            "clear the checks. If the checks cannot be cleared with it as ACCENT, "
+            "move it to CONTRAST rather than quietly abandoning it, and say in "
+            "that palette's lines why." % base_color,
+        ]
+
+    lines += ["", "Write the three palettes now."]
+    return "\n".join(lines)
+
+
+def more_palettes(product_name, competitor_url, product_cost, shipping_cost,
+                  images=None, prompt_override=None, base_color=None,
+                  existing=None, taken_letters=None):
+    """Generator yielding {type: status/done}. `reply` is palette text only.
+
+    `existing` is {letter: {ROLE: hex}} of what was already shown, so the model
+    can be told what to move away from. `taken_letters` keeps the new blocks
+    from colliding with them.
+    """
+    base = (prompt_override or "").strip() or PROMPT_TEMPLATE
+    prompt = (base
+              .replace("[PRODUCT_NAME]", product_name)
+              .replace("[COMPETITOR_URL]", competitor_url or "no competitor URL provided")
+              .replace("[PRODUCT_COST]", str(product_cost))
+              .replace("[SHIPPING_COST]", str(shipping_cost)))
+
+    letters = next_letters(taken_letters or (existing or {}).keys())
+    if not letters:
+        yield {"type": "done", "reply": "Error: no palette letters left (A-Z all used)."}
+        return
+
+    yield {"type": "status", "text": "🎨 Mixing new palettes..."}
+
+    content = [{"type": "text", "text": prompt,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+    for img in (images or [])[:3]:
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": img["media_type"],
+                       "data": img["b64"]},
+        })
+    content.append({"type": "text",
+                    "text": _more_instruction(product_name, competitor_url,
+                                              product_cost, shipping_cost,
+                                              letters, existing, base_color)})
+
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=MORE_MAX_TOKENS,
+            thinking=THINKING,
+            messages=[{"role": "user", "content": content}],
+            timeout=600.0,
+        )
+        text = "".join(b.text for b in response.content if b.type == "text")
+
+        if response.stop_reason == "max_tokens":
+            yield {"type": "done", "reply": text + (
+                "\n\n[Hit the token ceiling. Any palette below this line is "
+                "incomplete — re-roll rather than writing it into the theme.]")}
+            return
+
+        spend = _spend(response.usage)
+        print("[palettes] %s | in %d, cached %d, written %d, out %d | $%.4f"
+              % (product_name, spend["input"], spend["cache_read"],
+                 spend["cache_write"], spend["output"], spend["usd"]))
+        yield {"type": "done", "reply": text, "usage": spend,
+               "letters": letters}
+    except Exception as e:
+        yield {"type": "done", "reply": f"Error: {e}"}

@@ -168,7 +168,9 @@ def expand(roles):
 
 # ── reading the palettes out of a response ────────────────────────────────
 
-_HEAD = re.compile(r"^\s*PALETTE(?:\s+([A-C]))?\b[^\n]*$", re.I | re.M)
+# A-Z, not A-C: "more palettes" letters its new ones D, E, F and onward, and a
+# block the parser cannot see is a palette the operator cannot pick.
+_HEAD = re.compile(r"^\s*PALETTE(?:\s+([A-Z]))?\b[^\n]*$", re.I | re.M)
 
 
 def parse_palettes(text):
