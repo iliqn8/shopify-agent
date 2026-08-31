@@ -17,6 +17,78 @@ MAX_TOKENS = 16000
 # survives anyone copying a call site somewhere else.
 THINKING = {"type": "adaptive"}
 
+# Opus 5, per 1M tokens. Cache write is 2x because the 1h TTL is worth it here:
+# a single chat turn with tool calls re-sends the whole prefix five or six times.
+USD_IN, USD_OUT = 5.00, 25.00
+USD_CACHE_READ, USD_WRITE_5M, USD_WRITE_1H = 0.50, 6.25, 10.00
+# The system prompt is read on every call of every turn, so the 1h write (2x)
+# pays for itself many times over. The conversation is different: each turn is
+# written once and read on the next call, and a 1h write would cost MORE than
+# sending it fresh. The 5-minute default (1.25x) is the one that pays there.
+CACHE = {"type": "ephemeral", "ttl": "1h"}
+CACHE_TURN = {"type": "ephemeral"}
+
+
+def _cache_last(msgs):
+    """Copy of msgs with one cache marker on the very last content block.
+
+    The conversation grows with every tool result — a loaded skill alone is
+    20k+ tokens — and without a marker here all of it is re-sent fresh on each
+    turn. Marking the tail means the previous turn's prefix is read from cache
+    and only the new part is written.
+
+    Never mutates the caller's list: chat() hands its messages back and they
+    end up in stored history, which must stay free of cache_control.
+    """
+    if not msgs:
+        return msgs
+    out = []
+    for m in msgs:
+        content = m.get("content")
+        if isinstance(content, list):
+            content = [dict(b) if isinstance(b, dict) else b for b in content]
+            for b in content:
+                if isinstance(b, dict):
+                    b.pop("cache_control", None)
+        out.append({**m, "content": content})
+
+    last = out[-1]
+    content = last["content"]
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+        last["content"] = content
+    if not content or not isinstance(content[-1], dict):
+        return out
+    # Thinking blocks cannot carry a cache marker; fall back to the one before.
+    for b in reversed(content):
+        if isinstance(b, dict) and b.get("type") not in ("thinking", "redacted_thinking"):
+            b["cache_control"] = CACHE_TURN
+            break
+    return out
+
+
+def _spend(usage, label=""):
+    """Print what one API call cost. Cheap to keep, and the only way to see
+    whether the cache is actually being hit.
+
+    The two TTLs are priced apart — a 1h write is 2x the input rate, a 5m
+    write 1.25x — so they are read from the breakdown, not lumped together.
+    """
+    fresh = getattr(usage, "input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    detail = getattr(usage, "cache_creation", None)
+    w1h = getattr(detail, "ephemeral_1h_input_tokens", 0) or 0
+    w5m = getattr(detail, "ephemeral_5m_input_tokens", 0) or 0
+    if not detail:  # older API shape: no breakdown, assume the cheaper rate
+        w5m = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cost = (fresh * USD_IN + read * USD_CACHE_READ + w5m * USD_WRITE_5M
+            + w1h * USD_WRITE_1H + out * USD_OUT) / 1_000_000
+    print("[chat]%s in %d, out %d | cache: %d read, %d written | $%.4f"
+          % (label, fresh, out, read, w5m + w1h, cost))
+    return {"input": fresh, "output": out, "cache_read": read,
+            "cache_write": w5m + w1h, "usd": round(cost, 4)}
+
 IMAGE_GEN_URL = os.getenv("IMAGE_GENERATOR_URL", "http://localhost:5001")
 
 
@@ -343,6 +415,27 @@ TOOLS = [
         "description": "Get list of currently running applications/processes",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "load_skill",
+        "description": (
+            "Load a marketing skill's full playbook before doing marketing work. "
+            "The skills are listed in your system prompt with a one-line summary each; "
+            "call this to read the whole thing. Load a skill whenever the task matches "
+            "one — ads, copywriting, SEO, CRO, pricing, email, retention and so on — "
+            "and follow it rather than working from general knowledge. "
+            "Some skills ship reference files (shown as [refs: ...] in the listing); "
+            "pass the filename in 'reference' to read one. "
+            "Loading two or three related skills for one task is fine."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill": {"type": "string", "description": "Skill name exactly as listed, e.g. 'cro'"},
+                "reference": {"type": "string", "description": "Optional reference filename from that skill's [refs: ...] list"},
+            },
+            "required": ["skill"],
+        },
+    },
 ]
 
 # Human-readable tool names for status display
@@ -368,6 +461,7 @@ TOOL_LABELS = {
     "read_file": "📖 Reading file...",
     "write_file": "💾 Writing file...",
     "get_running_processes": "🖥️ Getting running processes...",
+    "load_skill": "📚 Loading marketing skill...",
 }
 
 
@@ -448,6 +542,11 @@ def run_tool(name, inputs, on_progress=None):
                     results.append({"error": str(e), "url": url})
             return {"uploaded": results}
 
+        # Marketing skills — always read here, never on the local agent
+        elif name == "load_skill":
+            return skills_loader.load_skill(inputs.get("skill"),
+                                            inputs.get("reference"))
+
         # Computer Control tools — route to local agent if available
         elif name in ("run_command", "open_application", "list_files",
                       "read_file", "write_file", "get_running_processes"):
@@ -506,8 +605,9 @@ def chat(messages, extra_context=""):
         thinking=THINKING,
         system=system,
         tools=TOOLS,
-        messages=messages,
+        messages=_cache_last(messages),
     )
+    _spend(response.usage, " chat")
 
     while response.stop_reason == "tool_use":
         tool_results = []
@@ -533,8 +633,9 @@ def chat(messages, extra_context=""):
             thinking=THINKING,
             system=system,
             tools=TOOLS,
-            messages=messages,
+            messages=_cache_last(messages),
         )
+        _spend(response.usage, " chat/tool-loop")
 
     text = ""
     for block in response.content:
@@ -552,19 +653,7 @@ def chat_stream(messages, extra_context=""):
       {"type": "status", "text": "..."} — live progress update
       {"type": "done", "reply": "...", "messages": [...]} — final answer
     """
-    # Extract user text from last message to detect relevant skills
-    user_text = ""
-    if messages:
-        last = messages[-1]
-        if isinstance(last.get("content"), str):
-            user_text = last["content"]
-        elif isinstance(last.get("content"), list):
-            for block in last["content"]:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    user_text += block.get("text", "")
-
-    skills_content = skills_loader.get_relevant_skills(user_text)
-    system = _build_system(extra_context, skills_content)
+    system = _build_system(extra_context)
 
     yield {"type": "status", "text": "🤔 Thinking..."}
 
@@ -610,9 +699,10 @@ def chat_stream(messages, extra_context=""):
             thinking=THINKING,
             system=system,
             tools=TOOLS,
-            messages=current_messages,
+            messages=_cache_last(current_messages),
             timeout=300.0,
         )
+        _spend(response.usage, " stream")
 
         iteration = 0
         while response.stop_reason == "tool_use" and iteration < 15:
@@ -654,9 +744,10 @@ def chat_stream(messages, extra_context=""):
                 thinking=THINKING,
                 system=system,
                 tools=TOOLS,
-                messages=current_messages,
+                messages=_cache_last(current_messages),
                 timeout=300.0,
             )
+            _spend(response.usage, " stream/tool-loop")
 
         text = ""
         for block in response.content:
@@ -669,7 +760,7 @@ def chat_stream(messages, extra_context=""):
         yield {"type": "done", "reply": f"Error: {str(e)}"}
 
 
-def _build_system(extra_context="", skills_content=""):
+def _build_system(extra_context=""):
     system = """You are an AI agent for managing a Shopify store and controlling the user's computer.
 You have tools for: Shopify product/order/collection management, AI product image generation, and computer control (run commands, open apps, read/write files).
 Always respond in English. Be concise and clear. When you complete a task, confirm what was done.
@@ -691,10 +782,24 @@ Fields marked with * are required. You can upload a product photo using the 📎
 Once the user replies with the details (and the product title is provided), call the generate_product_images tool immediately with all the information they gave you.
 If the user already provided ALL required fields in their first message, call the tool immediately without showing the form."""
 
-    if skills_content:
-        system += f"\n\n## Active Marketing Skills (apply these for this task):\n{skills_content}"
+    # The base prompt and the skill catalogue never change between calls, so
+    # they go in their own block and get cached. Store training data changes
+    # per message and must stay AFTER the cache marker, or it would
+    # invalidate the prefix every time.
+    catalogue = skills_loader.catalogue_text()
+    if catalogue:
+        system += (
+            "\n\n## Marketing Skills\n"
+            "You have expert playbooks for the areas below. When a task matches "
+            "one, call the load_skill tool to read it BEFORE answering, and follow "
+            "it — these are more specific than your general knowledge. Load more "
+            "than one when a task spans areas. Do not load a skill for an "
+            "unrelated question.\n\n"
+            + catalogue
+        )
 
+    blocks = [{"type": "text", "text": system, "cache_control": CACHE}]
     if extra_context:
-        system += f"\n\n## Store Training Data:\n{extra_context}"
-
-    return system
+        blocks.append({"type": "text",
+                       "text": "## Store Training Data:\n" + extra_context})
+    return blocks

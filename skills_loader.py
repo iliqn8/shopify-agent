@@ -1,71 +1,130 @@
+"""Marketing skills, exposed as a tool instead of injected into every prompt.
+
+The agent sees a short catalogue of every skill in its system prompt and calls
+load_skill() when one is actually relevant. Nothing is truncated on load — the
+old loader capped each skill at 6000 characters and never opened references/.
+"""
+
 import os
+import re
 
 SKILLS_DIR = os.path.join(os.path.dirname(__file__), ".claude", "skills")
 
-# keyword (lowercase) -> skill folder name(s)
-SKILL_MAP = [
-    (["email", "имейл", "newsletter", "мейл", "бюлетин"],           ["emails", "copywriting"]),
-    (["cold email", "студен имейл", "outreach"],                     ["cold-email"]),
-    (["facebook ads", "google ads", "реклам", " ads "],              ["ads", "ad-creative"]),
-    (["social", "социални", "instagram", "tiktok", "пост", "post"],  ["social", "copywriting"]),
-    (["seo", "класиране", "search engine"],                          ["seo-audit", "ai-seo"]),
-    (["страниц", "product page", "листинг", "listing"],             ["product-marketing", "copywriting"]),
-    (["конверс", "conversion", "checkout"],                          ["cro"]),
-    (["цен", "price", "pricing", "ценообраз"],                       ["pricing", "offers"]),
-    (["промоц", "discount", "отстъпк", "offer", "купон"],            ["offers"]),
-    (["launch", "пускане", "стартирам"],                             ["launch", "product-marketing"]),
-    (["конкурент", "competitor"],                                     ["competitors", "competitor-profiling"]),
-    (["аналит", "analytics", "статистик", "метрик"],                 ["analytics"]),
-    (["маркетинг план", "marketing plan", "стратегия"],              ["marketing-plan"]),
-    (["маркетинг идеи", "marketing ideas", "идеи за"],               ["marketing-ideas"]),
-    (["задърж", "retention", "churn"],                               ["churn-prevention"]),
-    (["реферал", "referral", "препоръч", "affiliate"],               ["referrals"]),
-    (["блог", "blog", "content strategy", "съдържание"],             ["content-strategy"]),
-    (["lead magnet", "лийд"],                                        ["lead-magnets"]),
-    (["popup", "изскачащ"],                                          ["popups"]),
-    (["onboarding", "онбординг"],                                    ["onboarding"]),
-    (["a/b test", "сплит тест", "ab test"],                          ["ab-testing"]),
-    (["pr ", "пиар", "медии", "public relations"],                   ["public-relations"]),
-    (["видео", "video", "youtube", "reels"],                         ["video"]),
-    (["sms", "смс"],                                                 ["sms"]),
-    (["копирайт", "copywriting", "текст за", "опис"],                ["copywriting"]),
-    (["психолог", "psychology"],                                     ["marketing-psychology"]),
-]
+# A whole SKILL.md plus a reference file can be long; this only guards against a
+# pathological file, it is not the routine trim the old loader did.
+MAX_CHARS = 60000
 
-MAX_SKILLS = 4
+_catalogue_cache = None
 
 
-def _load_skill(skill_name):
-    path = os.path.join(SKILLS_DIR, skill_name, "SKILL.md")
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read(6000)  # cap per skill to avoid token explosion
+def _read_frontmatter(path):
+    """Return the frontmatter dict of a SKILL.md. Values stay strings."""
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(8000)
+    except OSError:
+        return out
+    if not head.startswith("---"):
+        return out
+    end = head.find("\n---", 3)
+    if end == -1:
+        return out
+    for line in head[3:end].split("\n"):
+        m = re.match(r'^(\w[\w-]*):\s*(.*)$', line)
+        if m:
+            out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+    return out
 
 
-def get_relevant_skills(message):
-    """Return combined skill content relevant to the user message. Empty string if none match."""
-    if not message or not os.path.exists(SKILLS_DIR):
+def _first_sentence(text, limit=200):
+    """Trim a long skill description down to something routable."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    dot = cut.rfind(". ")
+    if dot > 60:
+        return cut[:dot + 1]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > 60 else cut).rstrip(",;") + "..."
+
+
+def list_skills():
+    """Every available skill as {name, description, references}. Cached."""
+    global _catalogue_cache
+    if _catalogue_cache is not None:
+        return _catalogue_cache
+    if not os.path.isdir(SKILLS_DIR):
+        _catalogue_cache = []
+        return _catalogue_cache
+
+    skills = []
+    for name in sorted(os.listdir(SKILLS_DIR)):
+        skill_md = os.path.join(SKILLS_DIR, name, "SKILL.md")
+        if not os.path.exists(skill_md):
+            continue
+        fm = _read_frontmatter(skill_md)
+        skills.append({
+            "name": name,
+            "description": fm.get("description", ""),
+            "references": list_references(name),
+        })
+    _catalogue_cache = skills
+    return skills
+
+
+def list_references(skill_name):
+    """Reference filenames that ship with a skill (empty list if none)."""
+    ref_dir = os.path.join(SKILLS_DIR, skill_name, "references")
+    if not os.path.isdir(ref_dir):
+        return []
+    return sorted(f for f in os.listdir(ref_dir)
+                  if os.path.isfile(os.path.join(ref_dir, f)))
+
+
+def catalogue_text():
+    """The one-line-per-skill listing that goes into the system prompt."""
+    skills = list_skills()
+    if not skills:
         return ""
+    lines = []
+    for s in skills:
+        desc = _first_sentence(s["description"]) if s["description"] else "(no description)"
+        extra = f" [refs: {', '.join(s['references'])}]" if s["references"] else ""
+        lines.append(f"- **{s['name']}** — {desc}{extra}")
+    return "\n".join(lines)
 
-    msg = message.lower()
-    matched = []
-    seen = set()
 
-    for keywords, skills in SKILL_MAP:
-        if any(kw in msg for kw in keywords):
-            for s in skills:
-                if s not in seen:
-                    seen.add(s)
-                    matched.append(s)
+def load_skill(skill_name, reference=None):
+    """Full text of a skill, or one of its reference files.
 
-    if not matched:
-        return ""
+    Returns a dict so the tool result carries its own error text instead of
+    raising into the agent loop.
+    """
+    if not skill_name:
+        return {"error": "No skill name given."}
 
-    parts = []
-    for skill_name in matched[:MAX_SKILLS]:
-        content = _load_skill(skill_name)
-        if content:
-            parts.append(f"### [{skill_name}]\n{content}")
+    # Keep the name a plain folder name — it arrives from the model.
+    safe = os.path.basename(str(skill_name).strip())
+    skill_dir = os.path.join(SKILLS_DIR, safe)
+    skill_md = os.path.join(skill_dir, "SKILL.md")
+    if not os.path.exists(skill_md):
+        names = [s["name"] for s in list_skills()]
+        near = [n for n in names if safe in n or n in safe]
+        return {"error": f"No skill called '{safe}'.",
+                "did_you_mean": near[:5] or names[:10]}
 
-    return "\n\n---\n\n".join(parts) if parts else ""
+    if reference:
+        safe_ref = os.path.basename(str(reference).strip())
+        ref_path = os.path.join(skill_dir, "references", safe_ref)
+        if not os.path.exists(ref_path):
+            return {"error": f"'{safe}' has no reference file '{safe_ref}'.",
+                    "available": list_references(safe)}
+        with open(ref_path, "r", encoding="utf-8", errors="ignore") as f:
+            body = f.read(MAX_CHARS)
+        return {"skill": safe, "reference": safe_ref, "content": body}
+
+    with open(skill_md, "r", encoding="utf-8", errors="ignore") as f:
+        body = f.read(MAX_CHARS)
+    return {"skill": safe, "content": body, "references": list_references(safe)}
