@@ -340,8 +340,11 @@ def options():
         })
     # Deliberate order, not alphabetical: best first, draft-quality last.
     # Sorting by label put "Kling 2.5 Standard — visibly weaker" second.
+    # A model missing from this list ranks 99 and lands under the draft-quality
+    # one, so anything added to CLIP_MODELS has to be placed here too.
     rank = {k: i for i, k in enumerate(
-        ("seedance-2.5", "kling-2.6-pro", "kling-2.5-pro",
+        ("seedance-2.5", "kling-3.0-o3-pro", "kling-3.0-v3-pro",
+         "kling-2.6-pro", "kling-2.5-pro",
          "seedance-2.0", "kling-2.5-standard"))}
     models.sort(key=lambda m: rank.get(m["key"], 99))
 
