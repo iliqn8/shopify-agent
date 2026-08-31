@@ -1678,7 +1678,7 @@ function pbRenderPalettes(palettes) {
   const keys = Object.keys(palettes || {}).filter(k => k).sort();
   // The re-roll rides with the list: no palettes on screen, nothing to reject.
   if (more) more.style.display = keys.length ? 'block' : 'none';
-  if (keys.length < 2) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  if (!keys.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
   box.style.display = 'block';
   box.innerHTML =
     '<div style="color:#aaa;font-size:12px;margin-bottom:8px">PALETTE</div>'
@@ -1686,11 +1686,11 @@ function pbRenderPalettes(palettes) {
     + keys.map(k => {
         const p = palettes[k];
         const on = pbPalette === k;
-        return `<button onclick="pbPickPalette('${pbEsc(k)}')" style="
-            display:flex;align-items:center;gap:12px;text-align:left;cursor:pointer;
+        return `<div><button onclick="pbPickPalette('${pbEsc(k)}')" style="
+            display:flex;align-items:center;gap:12px;text-align:left;cursor:pointer;width:100%;
             background:${on ? '#20242e' : '#1a1a1a'};
             border:1px solid ${on ? '#6366f1' : '#333'};
-            border-radius:9px;padding:10px 12px">
+            border-radius:${on ? '9px 9px 0 0' : '9px'};padding:10px 12px">
           <span style="color:${on ? '#fff' : '#888'};font-size:13px;font-weight:600;width:14px">${pbEsc(k)}</span>
           <span style="display:flex;gap:4px">`
           + PB_SWATCH.map(r => `<span title="${r}: ${pbEsc(p[r] || '')}" style="
@@ -1698,7 +1698,7 @@ function pbRenderPalettes(palettes) {
               background:${pbEsc(p[r] || '#000')}"></span>`).join('')
           + `</span>
           <span style="color:#666;font-size:11.5px;margin-left:auto">${pbEsc(p.ACCENT || '')} · ${pbEsc(p.CONTRAST || '')}</span>
-        </button>`;
+        </button>${on ? pbRenderEditor(k, p) : ''}</div>`;
       }).join('')
     + '</div>'
     + '<div style="color:#666;font-size:12px;margin-top:7px">'
@@ -1712,6 +1712,188 @@ function pbPickPalette(k) {
   pbResetPreview();
   pbRenderPalettes(pbLastPalettes);
 }
+
+// ── Editing a palette by hand ────────────────────────────────────────────
+// Nothing in the app has ever checked contrast: the prompt asks the model to
+// run Section 4's checks and the model reports them in its CHECKS block, which
+// is prose. The moment a human can move a colour, that stops being enough — a
+// HAIRLINE nudged two shades lighter makes the comparison table's row lines
+// vanish, and nothing downstream would notice. So the checks are re-run here,
+// in the browser, against whatever the colours currently are.
+
+const PB_ROLE_ORDER = ['BG', 'SURFACE', 'INK', 'MUTED', 'ACCENT', 'ACCENT_SOFT',
+                       'ON_ACCENT', 'HAIRLINE', 'CONTRAST', 'TICK', 'NEGATIVE', 'STAR'];
+
+const PB_ROLE_NOTE = {
+  BG: 'page ground, scheme-1',
+  SURFACE: 'alternating band, cards',
+  INK: 'headings',
+  MUTED: 'paragraphs',
+  ACCENT: 'header, cart, sale badge',
+  ACCENT_SOFT: 'glows, badge grounds',
+  ON_ACCENT: 'text sitting on ACCENT',
+  HAIRLINE: 'row lines, empty stars',
+  CONTRAST: 'buy button, guarantee band',
+  TICK: 'tick in the table',
+  NEGATIVE: 'cross in the table',
+  STAR: 'every rating'
+};
+
+function pbLum(hex) {
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return null;
+  const c = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
+    .map(x => x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+function pbRatio(a, b) {
+  const la = pbLum(a), lb = pbLum(b);
+  if (la === null || lb === null) return null;
+  const hi = Math.max(la, lb), lo = Math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+function pbLightness(hex) {
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return null;
+  const c = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+  return (Math.max.apply(null, c) + Math.min.apply(null, c)) / 2;
+}
+
+// Section 4, STEP 2 — the same thresholds, in the same order.
+function pbCheckPalette(p) {
+  const out = [];
+  const pair = (label, a, b, need) => {
+    const r = pbRatio(p[a], p[b]);
+    if (r === null) return;
+    out.push({label: label, got: r.toFixed(2) + ':1', ok: r >= need,
+              need: 'at least ' + need + ':1'});
+  };
+  pair('INK on BG', 'INK', 'BG', 7);
+  pair('INK on SURFACE', 'INK', 'SURFACE', 7);
+  pair('MUTED on BG', 'MUTED', 'BG', 4.5);
+  pair('MUTED on SURFACE', 'MUTED', 'SURFACE', 4.5);
+  pair('ON_ACCENT on ACCENT', 'ON_ACCENT', 'ACCENT', 4.5);
+  pair('CONTRAST on BG, the buy button', 'CONTRAST', 'BG', 7);
+  pair('ACCENT on BG', 'ACCENT', 'BG', 3);
+  pair('ACCENT_SOFT on BG', 'ACCENT_SOFT', 'BG', 1.2);
+  pair('TICK on SURFACE', 'TICK', 'SURFACE', 3);
+  pair('STAR on BG', 'STAR', 'BG', 3);
+  pair('STAR against TICK', 'STAR', 'TICK', 1.3);
+  pair('NEGATIVE on BG', 'NEGATIVE', 'BG', 4.5);
+
+  // HAIRLINE has a ceiling as well as a floor: too dark and the row lines stop
+  // being hairlines and start being borders.
+  const hair = pbRatio(p.HAIRLINE, p.BG);
+  if (hair !== null) {
+    out.push({label: 'HAIRLINE on BG', got: hair.toFixed(2) + ':1',
+              ok: hair >= 1.5 && hair <= 3, need: 'between 1.5 and 3:1'});
+  }
+
+  // The star must not outshout the CTA it sits near.
+  const star = pbRatio(p.STAR, p.BG), cta = pbRatio(p.CONTRAST, p.BG);
+  if (star !== null && cta !== null) {
+    out.push({label: 'STAR quieter than CONTRAST',
+              got: star.toFixed(2) + ':1 against ' + cta.toFixed(2) + ':1',
+              ok: star <= cta, need: 'never brighter'});
+  }
+
+  // Close together the page reads flat; far apart it reads as stripes.
+  const lb = pbLightness(p.BG), ls = pbLightness(p.SURFACE);
+  if (lb !== null && ls !== null) {
+    const gap = Math.abs(lb - ls) * 100;
+    out.push({label: 'SURFACE against BG lightness', got: gap.toFixed(1) + '%',
+              ok: gap > 0 && gap <= 10, need: 'above 0, up to 10%'});
+  }
+
+  // A CTA that is a deeper shade of the primary is allowed; identical is not.
+  const ca = pbRatio(p.CONTRAST, p.ACCENT);
+  if (ca !== null) {
+    out.push({label: 'CONTRAST against ACCENT', got: ca.toFixed(3) + ':1',
+              ok: ca > 1.05, need: 'more than 1.05:1'});
+  }
+  return out;
+}
+
+// Replace one role's hex inside one PALETTE block, leaving every other block
+// alone. Anchored on the block's own heading, so palette B's ACCENT cannot be
+// hit while editing A's.
+function pbReplaceRole(text, letter, role, hex) {
+  // A lookahead rather than a word boundary: a boundary built into a RegExp
+  // from a string is silently dead in some engines, and this states the real
+  // intent anyway — palette D must not match a heading for DD.
+  const start = new RegExp('^[ \t]*PALETTE[ \t]+' + letter + '(?![A-Za-z0-9])', 'm').exec(text);
+  if (!start) return null;
+  const from = start.index + start[0].length;
+  const rest = text.slice(from);
+  const nextHead = /^[ \t]*(PALETTE|CHECKS)[ \t]+[A-Z0-9]|^[ \t]*SECTION[ \t]+\d/m.exec(rest);
+  const to = nextHead ? from + nextHead.index : text.length;
+
+  const body = text.slice(from, to);
+  // 
+  // A pasted output can carry CRLF, and the trailing anchor will not cross
+  // a carriage return, so the pattern allows for one.
+  const line = new RegExp('^([ \t]*' + role + '[ \t]*=[ \t]*)#[0-9A-Fa-f]{6}([ \t]*\r?)$', 'm');
+  if (!line.test(body)) return null;
+  return text.slice(0, from) + body.replace(line, '$1' + hex + '$2') + text.slice(to);
+}
+
+let pbEdited = {};
+
+function pbEditRole(letter, role, hex) {
+  const el = document.getElementById('pb-output');
+  const next = pbReplaceRole(el.value, letter, role, hex.toUpperCase());
+  if (next === null) {
+    alert('Could not find ' + role + ' in palette ' + letter
+          + '. The output may have been edited by hand.');
+    return;
+  }
+  el.value = next;
+  const updated = Object.assign({}, pbLastPalettes[letter]);
+  updated[role] = hex.toUpperCase();
+  pbLastPalettes[letter] = updated;
+  pbEdited[letter] = true;
+  pbResetPreview();
+  pbRenderPalettes(pbLastPalettes);
+}
+
+function pbRenderEditor(letter, p) {
+  const checks = pbCheckPalette(p);
+  const bad = checks.filter(c => !c.ok);
+  const swatches = PB_ROLE_ORDER.filter(r => p[r]).map(r =>
+      '<label title="' + pbEsc(PB_ROLE_NOTE[r] || '') + '" style="display:flex;align-items:center;gap:8px;'
+    + 'background:#1a1a1a;border:1px solid #2e2e2e;border-radius:7px;padding:6px 8px;cursor:pointer">'
+    + '<input type="color" value="' + pbEsc(p[r]) + '"'
+    + ' onchange="pbEditRole(\'' + pbEsc(letter) + '\',\'' + r + '\',this.value)"'
+    + ' style="width:26px;height:26px;padding:0;border:1px solid #00000055;border-radius:5px;'
+    + 'background:none;cursor:pointer;flex:none">'
+    + '<span style="display:flex;flex-direction:column;min-width:0">'
+    + '<span style="color:#bbb;font-size:11px;font-weight:600;letter-spacing:.3px">' + r + '</span>'
+    + '<span style="color:#666;font-size:10.5px;font-family:ui-monospace,monospace">' + pbEsc(p[r]) + '</span>'
+    + '</span></label>').join('');
+
+  const verdict = bad.length
+    ? '<div style="color:#f87171;font-size:12px;margin-bottom:6px">'
+      + bad.length + ' of ' + checks.length + ' checks fail</div>'
+      + bad.map(c => '<div style="color:#c98b8b;font-size:11.5px;font-family:ui-monospace,monospace">'
+          + pbEsc(c.label) + ' — ' + pbEsc(c.got) + ', wants ' + pbEsc(c.need) + '</div>').join('')
+    : '<div style="color:#4ade80;font-size:12px">All ' + checks.length + ' checks pass</div>';
+
+  return '<div style="background:#141414;border:1px solid #2c2c2c;border-radius:0 0 9px 9px;'
+    + 'padding:12px 13px;margin-top:-4px">'
+    + '<div style="color:#777;font-size:11.5px;margin-bottom:9px">'
+    + 'Click a colour to change it. These checks are recalculated as you go'
+    + (pbEdited[letter]
+        ? ', so they are the ones that count — the CHECKS text in the output still shows the model\'s original numbers.'
+        : '.')
+    + '</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:6px">'
+    + swatches + '</div>'
+    + '<div style="margin-top:10px;padding-top:9px;border-top:1px solid #262626">'
+    + verdict + '</div></div>';
+}
+
 
 // ── More palettes ────────────────────────────────────────────────────────
 // Only reachable once palettes are on screen: the point is to reject what you
