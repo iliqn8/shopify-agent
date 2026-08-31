@@ -390,6 +390,13 @@ def options():
 
 # ── Reference image ────────────────────────────────────────────────────────
 
+# fal rejects a starting frame smaller than this on either edge, with a 422 that
+# names the limit. Past four times up there is no detail left to stretch, so it
+# is better to say the photo is too small than to spend a generation on mush.
+FAL_MIN_EDGE = 300
+MAX_UPSCALE = 4.0
+
+
 def crop_to_aspect(raw, aspect):
     """Centre-crop image bytes to an aspect ratio. Returns (bytes, content_type).
 
@@ -399,6 +406,7 @@ def crop_to_aspect(raw, aspect):
     starting frame get animated along with everything else.
     """
     import cv2
+    import math
     import numpy as np
 
     arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
@@ -419,6 +427,26 @@ def crop_to_aspect(raw, aspect):
             new_h = int(round(w / want))
             y = (h - new_h) // 2
             arr = arr[y:y + new_h]
+
+    # Cropping only ever removes pixels, and fal refuses a starting frame under
+    # 300x300. An ordinary square photo falls through that gap: 512x512 cropped
+    # to 9:16 is 288x512, and 288 is under the floor. Scale back up rather than
+    # letting the generate call fail after the user has already paid attention
+    # to everything else.
+    h2, w2 = arr.shape[:2]
+    short = min(w2, h2)
+    if short < FAL_MIN_EDGE:
+        scale = FAL_MIN_EDGE / short
+        if scale > MAX_UPSCALE:
+            raise ClipError(
+                "That image is too small to use as a starting frame. After "
+                "cropping to %s it is %dx%d, and fal needs at least %dx%d. "
+                "Use a photo at least %d pixels on its short side."
+                % (aspect, w2, h2, FAL_MIN_EDGE, FAL_MIN_EDGE,
+                   int(math.ceil(FAL_MIN_EDGE / MAX_UPSCALE * (max(w2, h2) / short)))))
+        arr = cv2.resize(arr,
+                         (int(math.ceil(w2 * scale)), int(math.ceil(h2 * scale))),
+                         interpolation=cv2.INTER_CUBIC)
 
     ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
     if not ok:
