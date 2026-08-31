@@ -47,10 +47,12 @@ MAX_SECONDS = 30
 #                 only the listed lengths and anything else is rounded to one.
 #   resolutions   None means the endpoint has no resolution field at all.
 #   aspect_from_image
-#                 True when the image-to-video endpoint pins aspect_ratio to
-#                 "auto" and takes the shape from the starting frame. The
-#                 reference is cropped either way; this only decides whether the
-#                 parameter is sent.
+#                 True when the image-to-video endpoint takes its shape from the
+#                 starting frame, so aspect_ratio should not be sent with an
+#                 image. Two different reasons land here: Seedance pins the
+#                 field to "auto", and Kling has no such field on i2v at all —
+#                 its text-to-video does, which is why this is decided per call
+#                 and not per model. The reference is cropped either way.
 #   audio         supported=False hides the control; free=False means the rate
 #                 doubles with audio on, which is real money on Kling.
 #   pricing       "tokens" bills by pixel count (see USD_PER_1K_TOKENS);
@@ -71,6 +73,40 @@ CLIP_MODELS = {
         "negative_prompt": False,
         "recommended": True,
     },
+    "kling-3.0-o3-pro": {
+        "label": "Kling 3.0 Pro (o3)",
+        "tagline": "3–15s · newest · audio at a quarter over silent · no negative prompt",
+        "i2v": "fal-ai/kling-video/o3/pro/image-to-video",
+        "t2v": "fal-ai/kling-video/o3/pro/text-to-video",
+        # o3 takes `image_url`, where v3 below takes `start_image_url`. Two
+        # endpoints of the same generation, named differently — this is exactly
+        # the field 2.6 renamed, and getting it wrong downgrades the call to
+        # text-to-video without an error.
+        "image_field": "image_url",
+        "duration": {"mode": "range", "min": 3, "max": 15},
+        "resolutions": None,
+        "aspect_from_image": True,
+        "audio": {"supported": True, "free": False},
+        # $0.112/s silent, $0.14/s with audio.
+        "pricing": {"kind": "flat", "usd_per_second": 0.112, "audio_multiplier": 1.25},
+        # The schema has no negative_prompt on either o3 endpoint.
+        "negative_prompt": False,
+    },
+    "kling-3.0-v3-pro": {
+        "label": "Kling 3.0 Pro (v3)",
+        "tagline": "3–15s · takes a negative prompt · audio at half again",
+        "i2v": "fal-ai/kling-video/v3/pro/image-to-video",
+        "t2v": "fal-ai/kling-video/v3/pro/text-to-video",
+        "image_field": "start_image_url",
+        "duration": {"mode": "range", "min": 3, "max": 15},
+        "resolutions": None,
+        "aspect_from_image": True,
+        "audio": {"supported": True, "free": False},
+        # $0.112/s silent, $0.168/s with audio. Voice control is $0.196/s and
+        # is not wired up here, so the quote stays honest.
+        "pricing": {"kind": "flat", "usd_per_second": 0.112, "audio_multiplier": 1.5},
+        "negative_prompt": True,
+    },
     "kling-2.6-pro": {
         "label": "Kling 2.6 Pro",
         "tagline": "5s or 10s · most realistic per dollar · audio doubles the rate",
@@ -81,7 +117,7 @@ CLIP_MODELS = {
         "image_field": "start_image_url",
         "duration": {"mode": "choice", "values": [5, 10]},
         "resolutions": None,
-        "aspect_from_image": False,
+        "aspect_from_image": True,
         "audio": {"supported": True, "free": False},
         "pricing": {"kind": "flat", "usd_per_second": 0.07, "audio_multiplier": 2.0},
         "negative_prompt": True,
@@ -94,7 +130,7 @@ CLIP_MODELS = {
         "image_field": "image_url",
         "duration": {"mode": "choice", "values": [5, 10]},
         "resolutions": None,
-        "aspect_from_image": False,
+        "aspect_from_image": True,
         "audio": {"supported": False, "free": True},
         "pricing": {"kind": "flat", "usd_per_second": 0.07},
         "negative_prompt": True,
@@ -119,11 +155,14 @@ CLIP_MODELS = {
         "label": "Kling 2.5 Standard",
         "tagline": "5s or 10s · cheapest · visibly weaker, good for drafts",
         "i2v": "fal-ai/kling-video/v2.5-turbo/standard/image-to-video",
-        "t2v": "fal-ai/kling-video/v2.5-turbo/standard/text-to-video",
+        # The standard tier is image-to-video only. The text-to-video path was
+        # listed here and 404s on fal — picking this model without a reference
+        # would have failed at submit time.
+        "t2v": None,
         "image_field": "image_url",
         "duration": {"mode": "choice", "values": [5, 10]},
         "resolutions": None,
-        "aspect_from_image": False,
+        "aspect_from_image": True,
         "audio": {"supported": False, "free": True},
         "pricing": {"kind": "flat", "usd_per_second": 0.042},
         "negative_prompt": True,
@@ -1094,8 +1133,12 @@ def build_payload(spec, prompt, seconds, resolution, aspect, audio, image_url):
     if image_url:
         payload[spec["image_field"]] = image_url
 
-    # Kling wants the length as a string; Seedance wants a number.
-    payload["duration"] = str(seconds) if spec["pricing"]["kind"] == "flat" else int(seconds)
+    # Every endpoint here types duration as a string with an enum of digits —
+    # Seedance included, whose enum also carries "auto" as its default. This
+    # used to send a number whenever pricing was token-based, which was a
+    # coincidence rather than a rule: the two happened to line up because all
+    # the Kling models are flat-priced and all the Seedance ones are not.
+    payload["duration"] = str(int(seconds))
 
     if spec["resolutions"] and resolution:
         payload["resolution"] = resolution
