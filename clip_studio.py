@@ -107,6 +107,35 @@ CLIP_MODELS = {
         "pricing": {"kind": "flat", "usd_per_second": 0.112, "audio_multiplier": 1.5},
         "negative_prompt": True,
     },
+    "kling-3.0-o3-standard": {
+        "label": "Kling 3.0 Standard (o3)",
+        "tagline": "3–15s · cheapest of the 3.0s · fal calls it ~3x faster than pro",
+        "i2v": "fal-ai/kling-video/o3/standard/image-to-video",
+        "t2v": "fal-ai/kling-video/o3/standard/text-to-video",
+        "image_field": "image_url",
+        "duration": {"mode": "range", "min": 3, "max": 15},
+        "resolutions": None,
+        "aspect_from_image": True,
+        "audio": {"supported": True, "free": False},
+        # $0.084/s silent, $0.112/s with audio.
+        "pricing": {"kind": "flat", "usd_per_second": 0.084, "audio_multiplier": 1.3333},
+        "negative_prompt": False,
+    },
+    "kling-3.0-v3-standard": {
+        "label": "Kling 3.0 Standard (v3)",
+        "tagline": "3–15s · takes a negative prompt · cheaper than v3 pro",
+        "i2v": "fal-ai/kling-video/v3/standard/image-to-video",
+        "t2v": "fal-ai/kling-video/v3/standard/text-to-video",
+        "image_field": "start_image_url",
+        "duration": {"mode": "range", "min": 3, "max": 15},
+        "resolutions": None,
+        "aspect_from_image": True,
+        "audio": {"supported": True, "free": False},
+        # $0.084/s silent, $0.126/s with audio. Voice control is $0.154/s and
+        # is not wired up, so the quote stays honest.
+        "pricing": {"kind": "flat", "usd_per_second": 0.084, "audio_multiplier": 1.5},
+        "negative_prompt": True,
+    },
     "kling-2.6-pro": {
         "label": "Kling 2.6 Pro",
         "tagline": "5s or 10s · most realistic per dollar · audio doubles the rate",
@@ -344,6 +373,7 @@ def options():
     # one, so anything added to CLIP_MODELS has to be placed here too.
     rank = {k: i for i, k in enumerate(
         ("seedance-2.5", "kling-3.0-o3-pro", "kling-3.0-v3-pro",
+         "kling-3.0-o3-standard", "kling-3.0-v3-standard",
          "kling-2.6-pro", "kling-2.5-pro",
          "seedance-2.0", "kling-2.5-standard"))}
     models.sort(key=lambda m: rank.get(m["key"], 99))
