@@ -270,14 +270,13 @@ def usd_per_second(model=DEFAULT_MODEL, resolution="720p", aspect="16:9", audio=
     return round((w * h * 24) / 1024 / 1000 * per_1k * ESTIMATE_MARGIN, 4)
 
 
-def clamp_seconds(seconds, model=DEFAULT_MODEL):
-    """The length this model will actually sell, nearest to what was asked.
+def clamp_to(spec, seconds):
+    """The length THIS spec will actually sell, nearest to what was asked.
 
-    Models that sell fixed blocks are the reason this exists: asking Kling for
-    23 seconds and being handed 10 without a word is exactly the kind of silent
-    mismatch that makes a clip look broken rather than mispriced.
+    Takes a spec rather than a model key so the prompt writer can be pointed at
+    a model that does not live in CLIP_MODELS — the BytePlus studio reuses the
+    writer with a spec of its own.
     """
-    spec = model_spec(model)
     try:
         want = float(seconds)
     except (TypeError, ValueError):
@@ -287,6 +286,16 @@ def clamp_seconds(seconds, model=DEFAULT_MODEL):
     if d["mode"] == "choice":
         return min(d["values"], key=lambda v: (abs(v - want), v))
     return max(d["min"], min(d["max"], int(round(want))))
+
+
+def clamp_seconds(seconds, model=DEFAULT_MODEL):
+    """The length this model will actually sell, nearest to what was asked.
+
+    Models that sell fixed blocks are the reason this exists: asking Kling for
+    23 seconds and being handed 10 without a word is exactly the kind of silent
+    mismatch that makes a clip look broken rather than mispriced.
+    """
+    return clamp_to(model_spec(model), seconds)
 
 
 def estimate_cost(seconds, resolution="720p", aspect="16:9",
@@ -798,8 +807,16 @@ _ANGLE_GUIDANCE = (
 
 
 def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
-                  has_image=False, n_photos=0, angle=""):
-    spec = model_spec(model)
+                  has_image=False, n_photos=0, angle="", spec=None, extra=""):
+    """The user turn's text.
+
+    `spec` and `extra` exist so another provider's studio can borrow this
+    writer: the spec describes the model being written for, and `extra` carries
+    that model's own prompt conventions, appended last so they are the final
+    word. Left out, this behaves exactly as it did — a fal model by key.
+    """
+    spec = spec or model_spec(model)
+    aspects = spec.get("aspects") or ASPECTS
     angle = (angle or "").strip()
     lines = []
     if n_photos:
@@ -824,8 +841,8 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         "",
         "THE SETTINGS CURRENTLY SET IN THE APP — this is what the clip will actually be generated at:",
         f"- Video model: {spec['label']}",
-        f"- Length: {clamp_seconds(seconds, model)} seconds",
-        f"- Framing: {aspect} ({ASPECTS.get(aspect, {}).get('label', '')})",
+        f"- Length: {clamp_to(spec, seconds)} seconds",
+        f"- Framing: {aspect} ({aspects.get(aspect, {}).get('label', '')})",
         "",
         "If what the user wrote asks for a different length or shape from these, write what THEY "
         "asked for and say so in one line in your note, so they can change the setting to match. "
@@ -862,6 +879,8 @@ def _writer_brief(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
             "would really make (water, footsteps, room tone) in a short clause. No music, and no "
             "dialogue unless the idea calls for someone speaking.",
         ]
+    if (extra or "").strip():
+        lines += ["", extra.strip()]
     return "\n".join(lines)
 
 
@@ -1050,7 +1069,8 @@ def generate_angles_stream(url="", photos=None, note=""):
 # ── Revising a written prompt ──────────────────────────────────────────────
 
 def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
-                         aspect="16:9", has_image=False, photos=None, angle=""):
+                         aspect="16:9", has_image=False, photos=None, angle="",
+                         spec=None, extra=""):
     """Apply a requested change to an existing prompt, keeping the rest intact."""
     current = (current or "").strip()
     instructions = (instructions or "").strip()
@@ -1065,7 +1085,8 @@ def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
     try:
         yield {"type": "status", "text": "🔧 Applying your change…"}
 
-        spec = model_spec(model)
+        spec = spec or model_spec(model)
+        aspects = spec.get("aspects") or ASPECTS
         content = _photo_blocks(photos, "PHOTO FROM THE USER")
         brief = []
         if photos:
@@ -1079,8 +1100,8 @@ def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
             "",
             "THE SETTINGS (unchanged):",
             f"- Video model: {spec['label']}",
-            f"- Length: {clamp_seconds(seconds, model)} seconds",
-            f"- Framing: {aspect} ({ASPECTS.get(aspect, {}).get('label', '')})",
+            f"- Length: {clamp_to(spec, seconds)} seconds",
+            f"- Framing: {aspect} ({aspects.get(aspect, {}).get('label', '')})",
         ]
         if (angle or "").strip():
             brief += ["", "THE MARKETING ANGLE IT SHOULD STILL SERVE:", angle.strip(),
@@ -1088,6 +1109,8 @@ def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
         if has_image:
             brief += ["", "A product reference still supplies the first frame, so keep referring "
                           "to the product generically rather than describing its appearance."]
+        if (extra or "").strip():
+            brief += ["", extra.strip()]
         content.append({"type": "text", "text": "\n".join(brief)})
 
         for kind, payload in _drain(_ask_claude(
@@ -1114,7 +1137,8 @@ def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
 
 
-def _writer_content(idea, model, seconds, aspect, has_image, photos, angle=""):
+def _writer_content(idea, model, seconds, aspect, has_image, photos, angle="",
+                    spec=None, extra=""):
     """The user turn: the photos first, then the brief.
 
     Images go before the text they relate to — the model reads the block order,
@@ -1122,12 +1146,13 @@ def _writer_content(idea, model, seconds, aspect, has_image, photos, angle=""):
     """
     content = _photo_blocks(photos, "PHOTO FROM THE USER")
     content.append({"type": "text", "text": _writer_brief(
-        idea, model, seconds, aspect, has_image, n_photos=len(photos), angle=angle)})
+        idea, model, seconds, aspect, has_image, n_photos=len(photos), angle=angle,
+        spec=spec, extra=extra)})
     return content
 
 
 def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
-                        has_image=False, photos=None, angle=""):
+                        has_image=False, photos=None, angle="", spec=None, extra=""):
     """Turn a one-line idea into a finished video prompt. Yields status events.
 
     `photos` are shown to Claude so it can write from what the user's product
@@ -1142,9 +1167,9 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
         return
 
     try:
-        spec = model_spec(model)
+        spec = spec or model_spec(model)
         yield {"type": "status", "text": (
-            f"✍️ Writing a {clamp_seconds(seconds, model)}s {aspect} prompt for "
+            f"✍️ Writing a {clamp_to(spec, seconds)}s {aspect} prompt for "
             f"{spec['label']}"
             + (f", reading your {len(photos)} photo(s)" if photos else "")
             + (", on your angle" if (angle or "").strip() else "")
@@ -1152,7 +1177,8 @@ def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
 
         for kind, payload in _drain(_ask_claude(
                 PROMPT_WRITER_SYSTEM,
-                _writer_content(idea, model, seconds, aspect, has_image, photos, angle),
+                _writer_content(idea, model, seconds, aspect, has_image, photos, angle,
+                                spec=spec, extra=extra),
                 PROMPT_WRITER_SCHEMA, "a prompt")):
             if kind == "status":
                 yield payload

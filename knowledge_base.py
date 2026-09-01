@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 import base64
 from collections import defaultdict
 
@@ -373,13 +374,32 @@ def save_studio_clip(prompt, settings_json=None, filename=None):
     return cid
 
 
-def list_studio_clips():
+def list_studio_clips(provider=None):
+    """Clips made in one of the studios, newest first.
+
+    Two studios write to this table, so `provider` says which list is being
+    asked for. It lives inside settings_json rather than in a column: every row
+    already carries a JSON blob of what was made, and filtering in Python over a
+    list this size is not worth a migration. Rows written before the second
+    studio existed have no provider at all, and those are fal's — they are the
+    only ones that could have been.
+    """
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("SELECT id, prompt, settings_json, filename, created_at "
                         "FROM studio_clips ORDER BY created_at DESC, id DESC").fetchall()
     conn.close()
-    return [{"id": r[0], "prompt": r[1], "settings_json": r[2],
-             "filename": r[3], "created_at": r[4]} for r in rows]
+    out = [{"id": r[0], "prompt": r[1], "settings_json": r[2],
+            "filename": r[3], "created_at": r[4]} for r in rows]
+    if not provider:
+        return out
+
+    def made_by(row):
+        try:
+            return (json.loads(row["settings_json"] or "{}").get("provider") or "fal")
+        except Exception:
+            return "fal"
+
+    return [r for r in out if made_by(r) == provider]
 
 
 def delete_studio_clip(clip_id):

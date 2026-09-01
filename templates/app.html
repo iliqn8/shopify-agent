@@ -111,6 +111,7 @@
   <div class="tab" onclick="switchTab('sections', this)">🧩 Section Builder</div>
   <div class="tab" onclick="switchTab('video', this)">🎬 Video Cloner</div>
   <div class="tab" onclick="switchTab('clips', this)">🎞️ Clip Studio</div>
+  <div class="tab" onclick="switchTab('dreamina', this)">🌙 Dreamina Studio</div>
 </div>
 
 <!-- Chat Panel -->
@@ -884,6 +885,216 @@
   </div>
 </div>
 
+<div class="panel" id="panel-dreamina" style="overflow-y:auto">
+  <div style="max-width:820px;margin:0 auto;padding:24px 20px">
+    <h2 style="color:#fff;font-size:18px;margin:0 0 4px">🌙 Dreamina Studio</h2>
+    <p style="color:#888;font-size:13px;margin:0 0 8px">The same flow as Clip Studio, running on Dreamina Seedance 2.5 straight from BytePlus instead of through fal — about half the price for the same model, six shapes instead of three, and up to 30 seconds in one clip. Describe your idea and Claude writes the prompt, or write it yourself. Add a product photo to animate your own product instead of an invented one.</p>
+    <div id="dm-account" style="font-size:12px;margin:0 0 4px;color:#666"></div>
+    <div id="dm-promo" style="font-size:12px;margin:0 0 20px;color:#fbbf24;display:none"></div>
+
+    <div style="display:grid;gap:20px">
+
+      <!-- Idea → prompt writer -->
+      <div style="background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+          <label style="color:#a5b4fc;font-size:12px">
+            ✨ YOUR IDEA <span style="color:#666">— one line is enough; Claude writes the prompt below</span>
+          </label>
+          <select id="dm-saved-ideas" onchange="dmUseSavedIdea()" style="margin-left:auto;background:#0d0d14;border:1px solid #2a2a3a;color:#ccc;padding:5px 8px;border-radius:6px;font-size:12px;max-width:280px">
+            <option value="">📁 Saved ideas…</option>
+          </select>
+          <button class="btn-sm" onclick="dmSaveIdea()" title="Save this text so you can pick it next time">💾 Save</button>
+          <button class="btn-sm" id="dm-del-saved-idea" onclick="dmDeleteSavedIdea()" style="display:none" title="Delete the selected saved idea">🗑</button>
+        </div>
+        <textarea id="dm-idea" rows="2" placeholder="e.g. my dog jumping into a pool wearing the life jacket, sunny afternoon"
+          style="width:100%;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+
+        <input type="file" id="dm-idea-files" accept="image/*" multiple style="display:none" onchange="dmAddIdeaPhotos(this)">
+        <div id="dm-idea-thumbs" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
+
+        <!-- Marketing angle -->
+        <div style="margin-top:12px;border-top:1px solid #23233a;padding-top:10px">
+          <label style="color:#a5b4fc;font-size:12px;display:block;margin-bottom:6px">
+            🎯 MARKETING ANGLE <span style="color:#666">— optional; leave empty and Claude just follows your idea</span>
+          </label>
+          <textarea id="dm-angle" rows="2" placeholder="e.g. the relief of never worrying about deep water again — or press Suggest angles below"
+            style="width:100%;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:9px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+
+          <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <input id="dm-angle-url" type="text" placeholder="https://your-store.com/products/…"
+              style="flex:1;min-width:240px;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:7px 10px;font-size:12px">
+            <button class="btn-sm" id="dm-angles-btn" onclick="dmSuggestAngles()"
+              title="Claude reads the product page and proposes angles you can pick from">💡 Suggest angles</button>
+            <span id="dm-angles-status" style="color:#666;font-size:11px"></span>
+          </div>
+          <div id="dm-angles-list" style="display:none;flex-direction:column;gap:6px;margin-top:10px"></div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap;border-top:1px solid #23233a;padding-top:10px">
+          <button class="btn-sm" id="dm-write-btn" onclick="dmWritePrompt()"
+            style="border-color:#6366f1;color:#c7d2fe">✨ Write my prompt</button>
+          <button class="btn-sm" onclick="document.getElementById('dm-idea-files').click()"
+            title="Claude looks at these to see what your product really looks like">📷 Add photos</button>
+          <span id="dm-idea-photo-status" style="color:#666;font-size:11px">Claude will read any photos you add</span>
+          <span id="dm-write-status" style="color:#666;font-size:11px"></span>
+        </div>
+      </div>
+
+      <!-- Prompt -->
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+          <label style="color:#aaa;font-size:12px">PROMPT *</label>
+          <select id="dm-saved" onchange="dmUseSaved()" style="margin-left:auto;background:#1e1e1e;border:1px solid #333;color:#ccc;padding:5px 8px;border-radius:6px;font-size:12px;max-width:280px">
+            <option value="">📁 Saved prompts…</option>
+          </select>
+          <button class="btn-sm" onclick="dmSavePrompt()" title="Save this prompt so you can pick it next time">💾 Save</button>
+          <button class="btn-sm" id="dm-del-saved" onclick="dmDeleteSaved()" style="display:none" title="Delete the selected saved prompt">🗑</button>
+        </div>
+        <textarea id="dm-prompt" rows="4" placeholder="Describe the clip: what is in shot, what moves, the camera, the light, the mood."
+          style="width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+        <div style="color:#666;font-size:11px;margin-top:5px">
+          Seedance 2.5 reads brackets as sound: <span style="color:#999">(…)</span> music,
+          <span style="color:#999">&lt;…&gt;</span> effects, <span style="color:#999">{…}</span> spoken dialogue, lip-synced.
+        </div>
+
+        <!-- Voiceover script, when the brief asked for one as its own deliverable -->
+        <div id="dm-vo-row" style="display:none;margin-top:8px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;flex-wrap:wrap">
+            <label style="color:#a5b4fc;font-size:12px">🎙️ VOICEOVER SCRIPT
+              <span style="color:#666">— spoken lines only, ready to paste into a voice tool</span></label>
+            <button class="btn-sm" onclick="dmCopyVo(this)">📋 Copy</button>
+          </div>
+          <textarea id="dm-vo" rows="5"
+            style="width:100%;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+        </div>
+
+        <!-- Refine the written prompt -->
+        <div id="dm-refine-row" style="display:none;margin-top:8px;background:#141420;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px">
+          <label style="color:#a5b4fc;font-size:12px;display:block;margin-bottom:6px">
+            🔧 WHAT SHOULD CHANGE? <span style="color:#666">— Claude edits this prompt, keeping the rest as it is</span>
+          </label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start">
+            <textarea id="dm-refine" rows="2" placeholder="e.g. closer on the product, make it morning instead of afternoon, lose the boat"
+              style="flex:1;min-width:260px;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:9px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+            <button class="btn-sm" id="dm-refine-btn" onclick="dmRefinePrompt()"
+              style="border-color:#6366f1;color:#c7d2fe">🔧 Apply change</button>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
+            <span id="dm-refine-status" style="color:#666;font-size:11px"></span>
+            <button class="btn-sm" id="dm-undo-btn" onclick="dmUndoRefine()" style="display:none">↩︎ Undo</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Product reference -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">
+          PRODUCT REFERENCE <span style="color:#555">— optional; upload a photo or paste an image URL</span>
+        </label>
+        <input type="file" id="dm-file" accept="image/*" style="display:none" onchange="dmHandleFile(this)">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <button class="btn-sm" onclick="document.getElementById('dm-file').click()">📷 Upload photo</button>
+          <input id="dm-url" type="text" placeholder="https://…/product.jpg"
+            style="flex:1;min-width:220px;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:7px 10px;font-size:12px">
+          <button class="btn-sm" onclick="dmUseUrl()">Use URL</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <div id="dm-ref-thumb" style="display:none"></div>
+          <span id="dm-ref-status" style="color:#555;font-size:12px">No reference — the clip will be generated from the prompt alone</span>
+          <button class="btn-sm" id="dm-ref-clear" onclick="dmClearRef()" style="display:none">✕ Remove</button>
+        </div>
+        <div style="color:#666;font-size:11px;margin-top:6px">
+          Seedance 2.5 will not take a reference photo of a real person's face.
+        </div>
+      </div>
+
+      <!-- Model -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">MODEL</label>
+        <div id="dm-models" style="display:grid;gap:8px"></div>
+      </div>
+
+      <!-- Aspect ratio -->
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">ASPECT RATIO</label>
+        <div id="dm-aspects" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end"></div>
+        <div id="dm-aspect-note" style="color:#666;font-size:11px;margin-top:8px"></div>
+      </div>
+
+      <!-- Resolution -->
+      <div id="dm-resolution-row">
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">RESOLUTION</label>
+        <div id="dm-resolutions" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+      </div>
+
+      <!-- Duration -->
+      <div>
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+          <label style="color:#aaa;font-size:12px">DURATION</label>
+          <span id="dm-seconds-label" style="color:#fff;font-size:15px;font-weight:600">8s</span>
+          <span id="dm-seconds-note" style="color:#555;font-size:11px"></span>
+        </div>
+        <div id="dm-seconds-range">
+          <input type="range" id="dm-seconds" min="4" max="30" step="1" value="8"
+            oninput="dmSecondsChanged()"
+            style="width:100%;accent-color:#6366f1;cursor:pointer">
+          <div id="dm-seconds-ticks" style="display:flex;justify-content:space-between;color:#444;font-size:10px;margin-top:2px"></div>
+        </div>
+        <div id="dm-seconds-choice" style="display:none;gap:8px;flex-wrap:wrap"></div>
+      </div>
+
+      <!-- Audio + format -->
+      <div style="display:flex;gap:28px;flex-wrap:wrap">
+        <div id="dm-audio-row">
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">AUDIO</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="dm-audio" checked style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
+            <span style="color:#ddd;font-size:13px">Generate AI audio synchronised with the video</span>
+          </label>
+          <div id="dm-audio-note" style="color:#666;font-size:11px;margin-top:4px">Sound effects, ambience and lip-synced speech.</div>
+        </div>
+        <div>
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">FORMAT</label>
+          <div id="dm-formats" style="display:flex;gap:8px"></div>
+        </div>
+      </div>
+
+      <!-- Generate -->
+      <div style="border-top:1px solid #222;padding-top:16px">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <button class="btn" id="dm-generate-btn" onclick="dmGenerate()">🌙 Generate clip</button>
+          <span id="dm-cost" style="color:#fbbf24;font-size:14px;font-weight:600"></span>
+          <span id="dm-summary" style="color:#666;font-size:12px"></span>
+        </div>
+        <pre id="dm-log" style="display:none;margin-top:12px;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:12px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:260px;overflow-y:auto;white-space:pre-wrap"></pre>
+      </div>
+
+      <!-- Result -->
+      <div id="dm-result" style="display:none;border-top:1px solid #222;padding-top:16px">
+        <h3 style="color:#fff;font-size:15px;margin:0 0 10px">✅ Your clip</h3>
+        <video id="dm-player" controls style="width:100%;max-width:420px;border-radius:10px;background:#000"></video>
+        <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <a id="dm-download" class="btn-sm" download style="text-decoration:none">⬇️ Download</a>
+          <span id="dm-result-meta" style="color:#666;font-size:12px"></span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- History -->
+    <div style="margin-top:36px;border-top:1px solid #2a2a2a;padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 style="color:#fff;font-size:16px;margin:0">📚 Clips</h2>
+        <button class="btn-sm" onclick="dmLoadHistory()">↻ Refresh</button>
+      </div>
+      <div id="dm-history" style="display:flex;flex-direction:column;gap:8px">
+        <div style="color:#555;font-size:13px">No clips yet.</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <script>
 let sending = false;
 let networkUrl = '';
@@ -973,6 +1184,7 @@ function switchTab(tab, el) {
   if (tab === 'sections') secLoadHistory();
   if (tab === 'video') vidInit();
   if (tab === 'clips') clipInit();
+  if (tab === 'dreamina') dmInit();
 }
 
 async function loadImageGen() {
@@ -4379,6 +4591,741 @@ async function clipDelete(id) {
   await fetch('/api/clip-history/' + id, { method: 'DELETE' });
   clipLoadHistory();
 }
+
+// ══ Dreamina Studio (BytePlus) ══════════════════════════════════════════
+// Clip Studio's twin. Kept as its own set of functions rather than folded into
+// the clip* ones: the two talk to different providers with different rules —
+// six shapes here instead of three, one flat token price instead of per-model
+// rates — and a shared implementation would be a knot of conditionals through
+// working code. What IS shared is the saved-prompt library, on purpose.
+
+let dmOpts = null;
+let dmInited = false;
+let dmModel = null;
+let dmAspect = '16:9';
+let dmResolution = '720p';
+let dmFormat = 'mp4';
+let dmSeconds = 8;
+let dmRefUrl = null;
+// Kept so the reference can be re-cropped when the aspect ratio changes. On
+// Seedance 2.5 this is not a nicety: with a first frame the API refuses any
+// ratio but "adaptive" and copies the shape of that frame, so cropping is the
+// only way the chosen ratio reaches the output.
+let dmRefSource = null;   // {kind:'file', file} | {kind:'url', url}
+
+// A little scene drawn at the real proportions, so the shape is something you
+// look at rather than a ratio you have to picture.
+function dmAspectArt(aspect) {
+  const box = {
+    '16:9': [150, 84], '1:1': [116, 116], '9:16': [70, 124],
+    '4:3': [132, 99], '3:4': [84, 112], '21:9': [162, 69]
+  }[aspect] || [150, 84];
+  const [w, h] = box;
+  const id = 'dmsky-' + aspect.replace(':', '-');
+  const cx = w / 2, horizon = h * 0.62;
+  const bw = Math.min(w, h) * 0.30, bh = bw * 0.78;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;border-radius:6px">
+    <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a8a"/><stop offset="100%" stop-color="#60a5fa"/>
+    </linearGradient></defs>
+    <rect width="${w}" height="${h}" fill="url(#${id})"/>
+    <circle cx="${w * 0.78}" cy="${h * 0.22}" r="${Math.min(w, h) * 0.09}" fill="#fde68a" opacity="0.9"/>
+    <rect y="${horizon}" width="${w}" height="${h - horizon}" fill="#0f766e"/>
+    <rect x="${cx - bw / 2}" y="${horizon - bh + 4}" width="${bw}" height="${bh}" rx="3" fill="#f472b6"/>
+    <rect x="${cx - bw / 2}" y="${horizon - bh + 4}" width="${bw}" height="${bh * 0.28}" rx="3" fill="#fb7185"/>
+  </svg>`;
+}
+
+function dmDrawAspects() {
+  const wrap = document.getElementById('dm-aspects');
+  wrap.innerHTML = dmOpts.aspects.map(a => `
+    <div onclick="dmPickAspect('${a.key}')" data-aspect="${a.key}"
+         style="cursor:pointer;text-align:center;padding:8px;border-radius:10px;border:2px solid ${a.key === dmAspect ? '#6366f1' : '#2a2a2a'};background:${a.key === dmAspect ? '#1a1a2e' : '#141414'};transition:all .15s">
+      ${dmAspectArt(a.key)}
+      <div style="color:${a.key === dmAspect ? '#fff' : '#999'};font-size:12px;font-weight:600;margin-top:6px">${a.key}</div>
+      <div style="color:#666;font-size:10px">${a.label}</div>
+    </div>`).join('');
+  const cur = dmOpts.aspects.find(a => a.key === dmAspect);
+  document.getElementById('dm-aspect-note').textContent = cur ? cur.note : '';
+}
+
+function dmSpec() {
+  return (dmOpts.models || []).find(m => m.key === dmModel) || dmOpts.models[0];
+}
+
+function dmDrawModels() {
+  const wrap = document.getElementById('dm-models');
+  wrap.innerHTML = dmOpts.models.map(m => {
+    const on = m.key === dmModel;
+    const rates = m.resolutions.map(r => r.usd_per_second[dmAspect]);
+    const price = `$${Math.min(...rates).toFixed(3)}–$${Math.max(...rates).toFixed(3)}/s`;
+    return `
+      <div onclick="dmPickModel('${m.key}')"
+           style="cursor:pointer;padding:10px 14px;border-radius:10px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};display:flex;align-items:center;gap:12px">
+        <div style="flex:1;min-width:0">
+          <div style="color:${on ? '#fff' : '#ccc'};font-size:14px;font-weight:600">
+            ${m.label}${m.recommended ? ' <span style="color:#4ade80;font-size:10px;font-weight:500">★ recommended</span>' : ''}
+          </div>
+          <div style="color:#666;font-size:11px;margin-top:2px">${m.tagline}</div>
+        </div>
+        <div style="color:#888;font-size:11px;text-align:right;white-space:nowrap">${price}</div>
+      </div>`;
+  }).join('');
+}
+
+function dmPickModel(key) {
+  dmModel = key;
+  const m = dmSpec();
+  if (!m.resolutions.some(r => r.key === dmResolution)) {
+    dmResolution = m.default_resolution || m.resolutions[0].key;
+  }
+  dmDrawModels();
+  dmDrawResolutions();
+  dmDrawDuration();
+  dmUpdateCost();
+}
+
+function dmDrawDuration() {
+  const d = dmSpec().duration;
+  const sl = document.getElementById('dm-seconds');
+  sl.min = d.min; sl.max = d.max;
+  if (dmSeconds < d.min) dmSeconds = d.min;
+  if (dmSeconds > d.max) dmSeconds = d.max;
+  sl.value = dmSeconds;
+  document.getElementById('dm-seconds-note').textContent =
+    `minimum ${d.min}s, maximum ${d.max}s — this model makes the whole ${d.max}s in one shot`;
+  const ticks = [d.min, Math.round(d.max / 3), Math.round(d.max * 2 / 3), d.max];
+  document.getElementById('dm-seconds-ticks').innerHTML =
+    ticks.map(t => `<span>${t}s</span>`).join('');
+  document.getElementById('dm-seconds-label').textContent = dmSeconds + 's';
+}
+
+function dmDrawResolutions() {
+  const m = dmSpec();
+  const wrap = document.getElementById('dm-resolutions');
+  wrap.innerHTML = m.resolutions.map(r => {
+    const per = r.usd_per_second[dmAspect] || 0;
+    const on = r.key === dmResolution;
+    const pricey = r.key === '1080p';
+    return `
+      <div onclick="dmPickResolution('${r.key}')" title="${(r.note || '').replace(/"/g, '&quot;')}"
+           style="cursor:pointer;padding:10px 14px;border-radius:10px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};min-width:132px">
+        <div style="color:${on ? '#fff' : '#ccc'};font-size:14px;font-weight:600">${r.key}${pricey ? ' <span style="color:#fbbf24;font-size:10px">$$$</span>' : ''}</div>
+        <div style="color:#666;font-size:10px;margin-top:2px">${r.dimensions[dmAspect]}</div>
+        <div style="color:${pricey ? '#fbbf24' : '#888'};font-size:11px;margin-top:3px">$${per.toFixed(3)}/s</div>
+      </div>`;
+  }).join('');
+  const cur = m.resolutions.find(r => r.key === dmResolution);
+  const note = document.getElementById('dm-audio-note');
+  if (cur && cur.note && dmResolution === '1080p') {
+    note.innerHTML = 'Sound effects, ambience and lip-synced speech. Costs nothing extra.' +
+      ` <span style="color:#fbbf24">${cur.note}</span>`;
+  } else {
+    note.textContent = 'Sound effects, ambience and lip-synced speech. Costs nothing extra.';
+  }
+}
+
+function dmDrawFormats() {
+  const wrap = document.getElementById('dm-formats');
+  wrap.innerHTML = dmOpts.formats.map(f => {
+    const on = f.key === dmFormat;
+    return `<div onclick="dmPickFormat('${f.key}')" title="${f.note}"
+      style="cursor:pointer;padding:8px 16px;border-radius:8px;border:2px solid ${on ? '#6366f1' : '#2a2a2a'};background:${on ? '#1a1a2e' : '#141414'};color:${on ? '#fff' : '#999'};font-size:13px;font-weight:600">${f.label}</div>`;
+  }).join('');
+}
+
+function dmPickAspect(key) {
+  dmAspect = key;
+  dmDrawAspects();
+  dmDrawModels();
+  dmDrawResolutions();
+  dmUpdateCost();
+  // With a first frame set, the API takes the output shape from that frame and
+  // rejects the ratio parameter outright, so re-cropping is the only way this
+  // choice takes effect.
+  if (dmRefSource) dmUploadRef();
+}
+
+function dmPickResolution(key) { dmResolution = key; dmDrawResolutions(); dmUpdateCost(); }
+function dmPickFormat(key) { dmFormat = key; dmDrawFormats(); dmUpdateCost(); }
+
+function dmSecondsChanged() {
+  dmSeconds = parseInt(document.getElementById('dm-seconds').value, 10);
+  document.getElementById('dm-seconds-label').textContent = dmSeconds + 's';
+  dmUpdateCost();
+}
+
+function dmUpdateCost() {
+  if (!dmOpts) return;
+  const m = dmSpec();
+  const r = m.resolutions.find(x => x.key === dmResolution) || m.resolutions[0];
+  const per = r ? (r.usd_per_second[dmAspect] || 0) : 0;
+  document.getElementById('dm-cost').textContent = '≈ $' + (per * dmSeconds).toFixed(2);
+  const audio = document.getElementById('dm-audio').checked;
+  document.getElementById('dm-summary').textContent =
+    [m.label, dmSeconds + 's', dmResolution + ' ' + dmAspect,
+     dmFormat.toUpperCase(), audio ? 'with audio' : 'silent'].join(' · ');
+}
+
+async function dmInit() {
+  document.getElementById('dm-audio').addEventListener('change', dmUpdateCost);
+  const promptBox = document.getElementById('dm-prompt');
+  promptBox.addEventListener('input', () => dmShowRefine(!!promptBox.value.trim()));
+  dmShowRefine(!!promptBox.value.trim());
+  if (dmInited) { dmLoadHistory(); return; }
+  dmInited = true;
+  try {
+    const r = await fetch('/api/dreamina-options');
+    dmOpts = await r.json();
+    document.getElementById('dm-account').textContent = dmOpts.account_message || '';
+    document.getElementById('dm-account').style.color = dmOpts.account_ok ? '#4ade80' : '#f87171';
+    if (dmOpts.promo) {
+      const p = document.getElementById('dm-promo');
+      p.textContent = '🏷️ ' + dmOpts.promo;
+      p.style.display = 'block';
+    }
+    dmModel = dmOpts.default_model;
+    const m = dmSpec();
+    dmResolution = m.default_resolution || m.resolutions[0].key;
+    dmDrawAspects(); dmDrawModels(); dmDrawResolutions();
+    dmDrawDuration(); dmDrawFormats();
+    dmUpdateCost();
+  } catch (e) {
+    document.getElementById('dm-account').textContent = 'Could not load options: ' + e.message;
+    document.getElementById('dm-account').style.color = '#f87171';
+  }
+  dmLoadSaved('prompt');
+  dmLoadSaved('idea');
+  dmLoadHistory();
+}
+
+// ── Reference image ──
+
+function dmHandleFile(input) {
+  const f = input.files[0];
+  if (!f) return;
+  dmRefSource = { kind: 'file', file: f };
+  dmUploadRef();
+}
+
+function dmUseUrl() {
+  const url = document.getElementById('dm-url').value.trim();
+  if (!url) { alert('Paste an image URL first.'); return; }
+  dmRefSource = { kind: 'url', url };
+  dmUploadRef();
+}
+
+async function dmUploadRef() {
+  const status = document.getElementById('dm-ref-status');
+  status.textContent = 'Cropping to ' + dmAspect + '…';
+  status.style.color = '#8ab4f8';
+  const fd = new FormData();
+  fd.append('aspect', dmAspect);
+  if (dmRefSource.kind === 'file') fd.append('file', dmRefSource.file);
+  else fd.append('url', dmRefSource.url);
+  try {
+    const r = await fetch('/api/dreamina-reference', { method: 'POST', body: fd });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+    // Comes back as a data URI, which BytePlus takes inline — so the thumbnail
+    // below is literally the frame the model starts from.
+    dmRefUrl = d.url;
+    document.getElementById('dm-ref-thumb').style.display = 'block';
+    document.getElementById('dm-ref-thumb').innerHTML =
+      `<img src="${d.url}" style="height:56px;border-radius:6px;display:block">`;
+    status.textContent = 'Reference ready — cropped to ' + dmAspect + ', and the clip takes that shape';
+    status.style.color = '#4ade80';
+    document.getElementById('dm-ref-clear').style.display = 'inline-block';
+  } catch (e) {
+    dmRefUrl = null;
+    status.textContent = '❌ ' + e.message;
+    status.style.color = '#f87171';
+  }
+}
+
+function dmClearRef() {
+  dmRefUrl = null; dmRefSource = null;
+  document.getElementById('dm-file').value = '';
+  document.getElementById('dm-url').value = '';
+  document.getElementById('dm-ref-thumb').style.display = 'none';
+  document.getElementById('dm-ref-clear').style.display = 'none';
+  const s = document.getElementById('dm-ref-status');
+  s.textContent = 'No reference — the clip will be generated from the prompt alone';
+  s.style.color = '#555';
+}
+
+// ── Idea → prompt ──
+
+// Photos Claude reads to write the prompt. Not the same thing as dmRefUrl,
+// which is the clip's first frame — the same picture can be used for both.
+let dmIdeaPhotos = [];   // [{b64, media_type, thumb}]
+const DM_MAX_IDEA_PHOTOS = 4;
+
+function dmDrawIdeaPhotos() {
+  const wrap = document.getElementById('dm-idea-thumbs');
+  wrap.innerHTML = dmIdeaPhotos.map((p, i) => `
+    <div style="position:relative">
+      <img src="${p.thumb}" style="height:58px;border-radius:6px;display:block;border:1px solid #2a2a3a">
+      <button onclick="dmRemoveIdeaPhoto(${i})" title="Remove"
+        style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
+    </div>`).join('');
+  const s = document.getElementById('dm-idea-photo-status');
+  s.textContent = dmIdeaPhotos.length
+    ? `${dmIdeaPhotos.length} photo(s) — Claude will read ${dmIdeaPhotos.length > 1 ? 'them' : 'it'}`
+    : 'Claude will read any photos you add';
+  s.style.color = dmIdeaPhotos.length ? '#4ade80' : '#666';
+}
+
+function dmRemoveIdeaPhoto(i) { dmIdeaPhotos.splice(i, 1); dmDrawIdeaPhotos(); }
+
+async function dmAddIdeaPhotos(input) {
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (!files.length) return;
+  const status = document.getElementById('dm-idea-photo-status');
+
+  const room = DM_MAX_IDEA_PHOTOS - dmIdeaPhotos.length;
+  if (room <= 0) {
+    status.style.color = '#fbbf24';
+    status.textContent = `That's the limit — ${DM_MAX_IDEA_PHOTOS} photos max`;
+    return;
+  }
+
+  status.style.color = '#8ab4f8';
+  status.textContent = 'Reading…';
+  for (const f of files.slice(0, room)) {
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const r = await fetch('/api/dreamina-idea-image', { method: 'POST', body: fd });
+      const d = await vidJson(r);
+      if (d.error) throw new Error(d.error);
+      dmIdeaPhotos.push(d);
+    } catch (e) {
+      status.style.color = '#f87171';
+      status.textContent = '❌ ' + e.message;
+      dmDrawIdeaPhotos();
+      return;
+    }
+  }
+  dmDrawIdeaPhotos();
+  if (files.length > room) {
+    status.style.color = '#fbbf24';
+    status.textContent = `Kept ${room} — ${DM_MAX_IDEA_PHOTOS} photos max`;
+  }
+}
+
+// ── Marketing angles ──
+
+function dmShowRefine(on) {
+  document.getElementById('dm-refine-row').style.display = on ? 'block' : 'none';
+}
+
+function dmShowVo(text) {
+  const row = document.getElementById('dm-vo-row');
+  if ((text || '').trim()) {
+    document.getElementById('dm-vo').value = text.trim();
+    row.style.display = 'block';
+  } else {
+    row.style.display = 'none';
+    document.getElementById('dm-vo').value = '';
+  }
+}
+
+function dmCopyVo(btn) {
+  const t = document.getElementById('dm-vo').value;
+  navigator.clipboard.writeText(t).then(() => {
+    const was = btn.textContent;
+    btn.textContent = '✅ Copied';
+    setTimeout(() => { btn.textContent = was; }, 1500);
+  });
+}
+
+async function dmSuggestAngles() {
+  const url = document.getElementById('dm-angle-url').value.trim();
+  if (!url && !dmIdeaPhotos.length) {
+    alert('Paste a product page URL so Claude can see what it is selling.');
+    return;
+  }
+  const btn = document.getElementById('dm-angles-btn');
+  const status = document.getElementById('dm-angles-status');
+  const list = document.getElementById('dm-angles-list');
+  btn.disabled = true;
+  btn.textContent = 'Thinking…';
+  status.style.color = '#8ab4f8';
+  status.textContent = 'Reading…';
+
+  const done = (msg, colour) => {
+    btn.disabled = false;
+    btn.textContent = '💡 Suggest angles';
+    status.style.color = colour;
+    status.textContent = msg;
+  };
+
+  try {
+    const r = await fetch('/api/dreamina-angles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        photos: dmIdeaPhotos.map(p => ({ b64: p.b64, media_type: p.media_type })),
+        note: document.getElementById('dm-idea').value.trim()
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { status.textContent = t; },
+      ev => {
+        if (ev.error) { done('❌ ' + ev.error, '#f87171'); return; }
+        list.style.display = 'flex';
+        list.innerHTML = ev.angles.map((a, i) => `
+          <div onclick="dmPickAngle(${i})" data-angle-idx="${i}"
+               style="cursor:pointer;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;padding:9px 12px;transition:border-color .15s"
+               onmouseover="this.style.borderColor='#6366f1'" onmouseout="this.style.borderColor='#2a2a3a'">
+            <div style="color:#ddd;font-size:13px;font-weight:600">${(a.title||'').replace(/</g,'&lt;')}</div>
+            <div style="color:#999;font-size:12px;margin-top:2px;line-height:1.45">${(a.angle||'').replace(/</g,'&lt;')}</div>
+            <div style="color:#666;font-size:11px;margin-top:3px">👤 ${(a.audience||'').replace(/</g,'&lt;')}</div>
+          </div>`).join('');
+        list.dataset.angles = JSON.stringify(ev.angles);
+        done(`Pick one — it goes into the box above`, '#4ade80');
+      });
+  } catch (e) {
+    done('❌ ' + e.message, '#f87171');
+  }
+}
+
+function dmPickAngle(i) {
+  const list = document.getElementById('dm-angles-list');
+  const angles = JSON.parse(list.dataset.angles || '[]');
+  const a = angles[i];
+  if (!a) return;
+  const parts = [(a.title || '').trim(), (a.angle || '').trim()].filter(Boolean);
+  if ((a.audience || '').trim()) parts.push('Aimed at: ' + a.audience.trim());
+  document.getElementById('dm-angle').value = parts.join(' — ');
+  list.querySelectorAll('[data-angle-idx]').forEach(el => {
+    const on = el.dataset.angleIdx === String(i);
+    el.style.borderColor = on ? '#6366f1' : '#2a2a3a';
+    el.style.background = on ? '#1a1a2e' : '#0d0d14';
+  });
+  const status = document.getElementById('dm-angles-status');
+  status.style.color = '#4ade80';
+  status.textContent = `✅ “${a.title}” — press Write my prompt`;
+}
+
+// ── Refining a written prompt ──
+
+let dmPromptBefore = null;   // one step of undo, so a bad edit is not a dead end
+
+async function dmRefinePrompt() {
+  const box = document.getElementById('dm-prompt');
+  const current = box.value.trim();
+  const instructions = document.getElementById('dm-refine').value.trim();
+  if (!current) { alert('Write or generate a prompt first.'); return; }
+  if (!instructions) { alert('Say what you would like changed.'); return; }
+
+  const btn = document.getElementById('dm-refine-btn');
+  const status = document.getElementById('dm-refine-status');
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  status.style.color = '#8ab4f8';
+  status.textContent = 'Thinking…';
+
+  const done = (msg, colour) => {
+    btn.disabled = false;
+    btn.textContent = '🔧 Apply change';
+    status.style.color = colour;
+    status.textContent = msg;
+  };
+
+  try {
+    const r = await fetch('/api/dreamina-refine-prompt', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: current,
+        instructions,
+        model: dmModel,
+        seconds: dmSeconds,
+        aspect: dmAspect,
+        has_image: !!dmRefUrl,
+        angle: document.getElementById('dm-angle').value.trim(),
+        photos: dmIdeaPhotos.map(p => ({ b64: p.b64, media_type: p.media_type }))
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { status.textContent = t; },
+      ev => {
+        if (ev.error) { done('❌ ' + ev.error, '#f87171'); return; }
+        dmPromptBefore = current;
+        box.value = ev.prompt;
+        if ((ev.voiceover_script || '').trim()) dmShowVo(ev.voiceover_script);
+        document.getElementById('dm-refine').value = '';
+        document.getElementById('dm-undo-btn').style.display = 'inline-block';
+        done(ev.note ? '💡 ' + ev.note : '✅ Updated — ask for another change if you like', '#4ade80');
+      });
+  } catch (e) {
+    done('❌ ' + e.message, '#f87171');
+  }
+}
+
+function dmUndoRefine() {
+  if (dmPromptBefore === null) return;
+  document.getElementById('dm-prompt').value = dmPromptBefore;
+  dmPromptBefore = null;
+  document.getElementById('dm-undo-btn').style.display = 'none';
+  const status = document.getElementById('dm-refine-status');
+  status.style.color = '#666';
+  status.textContent = 'Reverted to the previous version';
+}
+
+async function dmWritePrompt() {
+  const idea = document.getElementById('dm-idea').value.trim();
+  if (!idea && !dmIdeaPhotos.length) {
+    alert('Describe your idea, or attach a photo.');
+    return;
+  }
+
+  const btn = document.getElementById('dm-write-btn');
+  const status = document.getElementById('dm-write-status');
+  btn.disabled = true;
+  btn.textContent = 'Writing…';
+  status.style.color = '#8ab4f8';
+  status.textContent = 'Thinking…';
+
+  const done = (msg, colour) => {
+    btn.disabled = false;
+    btn.textContent = '✨ Write my prompt';
+    status.style.color = colour;
+    status.textContent = msg;
+  };
+
+  try {
+    const r = await fetch('/api/dreamina-write-prompt', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idea,
+        photos: dmIdeaPhotos.map(p => ({ b64: p.b64, media_type: p.media_type })),
+        angle: document.getElementById('dm-angle').value.trim(),
+        model: dmModel,
+        seconds: dmSeconds,
+        aspect: dmAspect,
+        has_image: !!dmRefUrl
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { status.textContent = t; },
+      ev => {
+        if (ev.error) { done('❌ ' + ev.error, '#f87171'); return; }
+        document.getElementById('dm-prompt').value = ev.prompt;
+        dmPromptBefore = null;
+        document.getElementById('dm-undo-btn').style.display = 'none';
+        document.getElementById('dm-refine-status').textContent = '';
+        dmShowRefine(true);
+        dmShowVo(ev.voiceover_script);
+        done(ev.note ? '💡 ' + ev.note : '✅ Written — edit it, or ask for a change below', '#4ade80');
+        document.getElementById('dm-prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+  } catch (e) {
+    done('❌ ' + e.message, '#f87171');
+  }
+}
+
+// ── Saved prompts ──
+// Deliberately the same library as Clip Studio: /api/clip-prompts. A prompt is
+// a prompt, and having to re-save one to use it on the other model would be a
+// nuisance rather than a separation worth having.
+
+const DM_SAVE_KINDS = {
+  prompt: { box: 'dm-prompt', select: 'dm-saved', del: 'dm-del-saved',
+            label: 'prompts', noun: 'prompt' },
+  idea:   { box: 'dm-idea', select: 'dm-saved-ideas', del: 'dm-del-saved-idea',
+            label: 'ideas', noun: 'idea' },
+};
+
+async function dmLoadSaved(kind) {
+  const k = DM_SAVE_KINDS[kind];
+  try {
+    const r = await fetch('/api/clip-prompts?kind=' + kind);
+    const rows = await r.json();
+    const sel = document.getElementById(k.select);
+    sel.innerHTML = `<option value="">📁 Saved ${k.label}…</option>` +
+      rows.map(p => `<option value="${p.id}">${(p.title || '').replace(/</g, '&lt;')}</option>`).join('');
+    sel.dataset.rows = JSON.stringify(rows);
+  } catch (e) { console.error('dreamina saved ' + kind, e); }
+}
+
+function dmUseSavedOf(kind) {
+  const k = DM_SAVE_KINDS[kind];
+  const sel = document.getElementById(k.select);
+  const rows = JSON.parse(sel.dataset.rows || '[]');
+  const row = rows.find(p => String(p.id) === sel.value);
+  document.getElementById(k.del).style.display = row ? 'inline-block' : 'none';
+  if (!row) return;
+  document.getElementById(k.box).value = row.prompt;
+  if (kind === 'prompt') dmShowRefine(!!row.prompt.trim());
+}
+
+async function dmSaveOf(kind) {
+  const k = DM_SAVE_KINDS[kind];
+  const text = document.getElementById(k.box).value.trim();
+  if (!text) { alert(`Write your ${k.noun} first.`); return; }
+  const title = window.prompt(`Name this ${k.noun} so you can find it later:`,
+    text.slice(0, 40));
+  if (title === null) return;
+  const r = await fetch('/api/clip-prompts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: text, title, kind })
+  });
+  const d = await vidJson(r);
+  if (d.error) { alert(d.error); return; }
+  await dmLoadSaved(kind);
+  document.getElementById(k.select).value = d.id;
+  document.getElementById(k.del).style.display = 'inline-block';
+}
+
+async function dmDeleteSavedOf(kind) {
+  const k = DM_SAVE_KINDS[kind];
+  const sel = document.getElementById(k.select);
+  if (!sel.value) return;
+  if (!confirm(`Delete this saved ${k.noun}?`)) return;
+  await fetch('/api/clip-prompts/' + sel.value, { method: 'DELETE' });
+  await dmLoadSaved(kind);
+  document.getElementById(k.del).style.display = 'none';
+}
+
+// Names the markup calls.
+const dmUseSaved        = () => dmUseSavedOf('prompt');
+const dmSavePrompt      = () => dmSaveOf('prompt');
+const dmDeleteSaved     = () => dmDeleteSavedOf('prompt');
+const dmUseSavedIdea    = () => dmUseSavedOf('idea');
+const dmSaveIdea        = () => dmSaveOf('idea');
+const dmDeleteSavedIdea = () => dmDeleteSavedOf('idea');
+
+// ── Generate ──
+
+async function dmGenerate() {
+  const prompt = document.getElementById('dm-prompt').value.trim();
+  if (!prompt) { alert('Write a prompt first.'); return; }
+
+  const btn = document.getElementById('dm-generate-btn');
+  const log = document.getElementById('dm-log');
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  log.style.display = 'block';
+  log.textContent = 'Starting…';
+  document.getElementById('dm-result').style.display = 'none';
+
+  try {
+    const r = await fetch('/api/dreamina-generate-start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        model: dmModel,
+        seconds: dmSeconds,
+        resolution: dmResolution,
+        aspect: dmAspect,
+        audio: document.getElementById('dm-audio').checked,
+        container: dmFormat,
+        image_url: dmRefUrl
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
+      ev => {
+        btn.disabled = false;
+        btn.textContent = '🌙 Generate clip';
+        if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
+        const url = '/generated-videos/' + ev.filename;
+        document.getElementById('dm-result').style.display = 'block';
+        document.getElementById('dm-player').src = url;
+        const dl = document.getElementById('dm-download');
+        dl.href = url;
+        dl.setAttribute('download', ev.filename);
+        document.getElementById('dm-result-meta').textContent =
+          [ev.model_label, ev.seconds + 's',
+           (ev.resolution ? ev.resolution + ' ' : '') + ev.aspect,
+           (ev.container || 'mp4').toUpperCase(),
+           ev.audio ? 'with audio' : 'silent',
+           // The billed figure, from the token count BytePlus returned.
+           ev.cost ? '$' + ev.cost.toFixed(2) + ' billed' : null].filter(Boolean).join(' · ');
+        dmLoadHistory();
+      });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '🌙 Generate clip';
+    log.textContent += '\n❌ ' + e.message;
+  }
+}
+
+// ── History ──
+
+async function dmLoadHistory() {
+  const wrap = document.getElementById('dm-history');
+  try {
+    const r = await fetch('/api/dreamina-history');
+    const rows = await r.json();
+    if (!rows.length) { wrap.innerHTML = '<div style="color:#555;font-size:13px">No clips yet.</div>'; return; }
+    wrap.innerHTML = rows.map(c => {
+      let s = {};
+      try { s = JSON.parse(c.settings_json || '{}'); } catch (e) {}
+      const meta = [s.model_label, s.seconds ? s.seconds + 's' : null, s.resolution, s.aspect,
+                    (s.container || '').toUpperCase(), s.audio ? 'audio' : 'silent',
+                    s.cost ? '$' + Number(s.cost).toFixed(2) : null]
+        .filter(Boolean).join(' · ');
+      const url = c.filename ? '/generated-videos/' + c.filename : null;
+      return `<div style="background:#141414;border:1px solid #222;border-radius:10px;padding:10px 12px">
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <div style="color:#ddd;font-size:13px;margin-bottom:3px">${(c.prompt || '').slice(0, 110).replace(/</g, '&lt;')}${(c.prompt || '').length > 110 ? '…' : ''}</div>
+            <div style="color:#555;font-size:11px">${meta} · ${c.created_at || ''}</div>
+          </div>
+          ${url ? `<a class="btn-sm" href="${url}" download style="text-decoration:none">⬇️</a>` : ''}
+          <button class="btn-sm" onclick="dmReuse(${c.id})" title="Put this prompt back in the box">↩︎</button>
+          <button class="btn-sm" onclick="dmDelete(${c.id})">🗑</button>
+        </div>
+        ${url ? `<video controls preload="none" src="${url}" style="width:100%;max-width:280px;margin-top:8px;border-radius:8px;background:#000"></video>` : ''}
+      </div>`;
+    }).join('');
+    wrap.dataset.rows = JSON.stringify(rows);
+  } catch (e) {
+    wrap.innerHTML = '<div style="color:#f87171;font-size:13px">Could not load clips: ' + e.message + '</div>';
+  }
+}
+
+function dmReuse(id) {
+  const rows = JSON.parse(document.getElementById('dm-history').dataset.rows || '[]');
+  const row = rows.find(c => c.id === id);
+  if (!row) return;
+  document.getElementById('dm-prompt').value = row.prompt || '';
+  dmShowRefine(!!(row.prompt || '').trim());
+  try {
+    const s = JSON.parse(row.settings_json || '{}');
+    if (s.model && dmOpts.models.some(m => m.key === s.model)) dmPickModel(s.model);
+    if (s.aspect) dmPickAspect(s.aspect);
+    if (s.resolution) dmPickResolution(s.resolution);
+    if (s.container) dmPickFormat(s.container);
+    if (typeof s.audio === 'boolean') document.getElementById('dm-audio').checked = s.audio;
+    if (s.seconds) { dmSeconds = s.seconds; dmDrawDuration(); }
+    dmUpdateCost();
+  } catch (e) {}
+  document.getElementById('dm-prompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function dmDelete(id) {
+  if (!confirm('Delete this clip?')) return;
+  await fetch('/api/dreamina-history/' + id, { method: 'DELETE' });
+  dmLoadHistory();
+}
+
 </script>
 </body>
 </html>

@@ -1363,10 +1363,11 @@ def clip_generate_start():
                 try:
                     # Record what was actually made, not what was asked for —
                     # the model may sell a different length than the one typed.
-                    kb.save_studio_clip(prompt, _json_c.dumps({
-                        k: event.get(k) for k in
-                        ("model", "model_label", "seconds", "resolution",
-                         "aspect", "audio", "container", "cost")}),
+                    kb.save_studio_clip(prompt, _json_c.dumps(dict(
+                        {k: event.get(k) for k in
+                         ("model", "model_label", "seconds", "resolution",
+                          "aspect", "audio", "container", "cost")},
+                        provider="fal")),
                         event["filename"])
                 except Exception:
                     pass          # a history row is not worth losing the clip over
@@ -1401,11 +1402,204 @@ def delete_clip_prompt(pid):
 
 @app.route("/api/clip-history", methods=["GET"])
 def clip_history():
-    return jsonify(kb.list_studio_clips())
+    return jsonify(kb.list_studio_clips("fal"))
 
 
 @app.route("/api/clip-history/<int:cid>", methods=["DELETE"])
 def delete_clip_history(cid):
+    kb.delete_studio_clip(cid)
+    return jsonify({"ok": True})
+
+
+# ── Dreamina Studio (BytePlus ModelArk) ────────────────────────────────────
+# Clip Studio's twin on a different provider. Same job queue, same poller, and
+# deliberately the same saved-prompt library — a prompt is a prompt, and having
+# to re-save one to use it on the other model would be a nuisance, not a
+# feature. The clip history IS separate, filtered by the provider recorded on
+# each row, because a list of clips you cannot regenerate from that tab is just
+# clutter.
+
+@app.route("/api/dreamina-options")
+def dreamina_options():
+    import dreamina_studio
+    import byteplus_client
+    ok, msg = byteplus_client.check_account()
+    return jsonify({**dreamina_studio.options(),
+                    "account_ok": ok, "account_message": msg})
+
+
+@app.route("/api/dreamina-estimate", methods=["POST"])
+def dreamina_estimate():
+    import dreamina_studio
+    d = request.json or {}
+    model = d.get("model") or dreamina_studio.DEFAULT_MODEL
+    seconds = dreamina_studio.clamp_seconds(
+        d.get("seconds") or dreamina_studio.MIN_SECONDS, model)
+    return jsonify({
+        "seconds": seconds,
+        "usd": dreamina_studio.estimate_cost(
+            seconds, d.get("resolution"), d.get("aspect") or "16:9",
+            model, bool(d.get("audio", True))),
+    })
+
+
+@app.route("/api/dreamina-reference", methods=["POST"])
+def dreamina_reference():
+    """Crop an upload or a pasted URL to the chosen ratio.
+
+    Returns a data URI rather than a hosted link: BytePlus has no file storage
+    and takes the image inline, so what comes back here is literally the bytes
+    the model will start from — which makes the thumbnail an honest preview.
+    """
+    import dreamina_studio
+    aspect = request.form.get("aspect") or (request.json or {}).get("aspect") or "16:9"
+    try:
+        f = request.files.get("file")
+        if f:
+            raw = f.read()
+        else:
+            url = (request.form.get("url") or (request.json or {}).get("url") or "").strip()
+            if not url:
+                return jsonify({"error": "Upload an image or paste an image URL."}), 400
+            raw = dreamina_studio.fetch_reference(url)
+        return jsonify({"url": dreamina_studio.prepare_reference(raw, aspect)})
+    except dreamina_studio.DreaminaError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/dreamina-idea-image", methods=["POST"])
+def dreamina_idea_image():
+    """Prepare a photo for the prompt writer to look at."""
+    import clip_studio
+    import dreamina_studio
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file"}), 400
+    try:
+        return jsonify(dreamina_studio.prepare_idea_image(f.read()))
+    except clip_studio.ClipError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/dreamina-write-prompt", methods=["POST"])
+def dreamina_write_prompt():
+    import uuid as _uuid_dw
+    import dreamina_studio
+
+    d = request.json or {}
+    idea = (d.get("idea") or "").strip()
+    photos = d.get("photos") or []
+    if not idea and not photos:
+        return jsonify({"error": "Describe your idea, or attach a photo."}), 400
+
+    job_id = str(_uuid_dw.uuid4())
+    _run_video_job(job_id, lambda: dreamina_studio.write_prompt_stream(
+        idea,
+        model=d.get("model") or dreamina_studio.DEFAULT_MODEL,
+        seconds=d.get("seconds") or dreamina_studio.MIN_SECONDS,
+        aspect=d.get("aspect") or "16:9",
+        has_image=bool(d.get("has_image")),
+        photos=photos,
+        angle=d.get("angle") or "",
+    ))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/dreamina-angles", methods=["POST"])
+def dreamina_angles():
+    import uuid as _uuid_da
+    import dreamina_studio
+
+    d = request.json or {}
+    job_id = str(_uuid_da.uuid4())
+    _run_video_job(job_id, lambda: dreamina_studio.generate_angles_stream(
+        url=d.get("url") or "",
+        photos=d.get("photos") or [],
+        note=d.get("note") or "",
+    ))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/dreamina-refine-prompt", methods=["POST"])
+def dreamina_refine_prompt():
+    import uuid as _uuid_dr
+    import dreamina_studio
+
+    d = request.json or {}
+    current = (d.get("prompt") or "").strip()
+    instructions = (d.get("instructions") or "").strip()
+    if not current:
+        return jsonify({"error": "There is no prompt to change yet."}), 400
+    if not instructions:
+        return jsonify({"error": "Say what you would like changed."}), 400
+
+    job_id = str(_uuid_dr.uuid4())
+    _run_video_job(job_id, lambda: dreamina_studio.refine_prompt_stream(
+        current, instructions,
+        model=d.get("model") or dreamina_studio.DEFAULT_MODEL,
+        seconds=d.get("seconds") or dreamina_studio.MIN_SECONDS,
+        aspect=d.get("aspect") or "16:9",
+        has_image=bool(d.get("has_image")),
+        photos=d.get("photos") or [],
+        angle=d.get("angle") or "",
+    ))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/dreamina-generate-start", methods=["POST"])
+def dreamina_generate_start():
+    import uuid as _uuid_dg
+    import json as _json_dg
+    import dreamina_studio
+
+    d = request.json or {}
+    prompt = (d.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Write a prompt first."}), 400
+
+    settings = {
+        "model": d.get("model") or dreamina_studio.DEFAULT_MODEL,
+        "seconds": d.get("seconds") or dreamina_studio.MIN_SECONDS,
+        "resolution": d.get("resolution"),
+        "aspect": d.get("aspect") or "16:9",
+        "audio": bool(d.get("audio", True)),
+        "container": d.get("container") or "mp4",
+        "image_url": d.get("image_url") or None,
+    }
+
+    job_id = str(_uuid_dg.uuid4())
+
+    def factory():
+        for event in dreamina_studio.generate_stream(prompt, **settings):
+            if event.get("type") == "done" and event.get("filename"):
+                try:
+                    # `cost` here is the real one, worked out from the token
+                    # count BytePlus returned — not the pre-flight estimate.
+                    kb.save_studio_clip(prompt, _json_dg.dumps(dict(
+                        {k: event.get(k) for k in
+                         ("model", "model_label", "seconds", "resolution",
+                          "aspect", "audio", "container", "cost", "tokens")},
+                        provider="byteplus")),
+                        event["filename"])
+                except Exception:
+                    pass          # a history row is not worth losing the clip over
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/dreamina-history", methods=["GET"])
+def dreamina_history():
+    return jsonify(kb.list_studio_clips("byteplus"))
+
+
+@app.route("/api/dreamina-history/<int:cid>", methods=["DELETE"])
+def delete_dreamina_history(cid):
     kb.delete_studio_clip(cid)
     return jsonify({"ok": True})
 
