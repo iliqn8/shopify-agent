@@ -673,9 +673,23 @@ def unaddressed_references(prompt, count):
 EDIT_MIN_SECONDS = 4
 EDIT_MAX_SECONDS = 30
 
+# An edit is billed at roughly TWICE a generation of the same shape and length —
+# the source video is read as well as the result written. Measured, not guessed:
+# a 7.04s 480p 9:16 edit billed 134,905 tokens where the published formula gives
+# 67,636 for that output. Quoting one of those and charging the other is the kind
+# of surprise this app exists to avoid.
+EDIT_BILLING_MULTIPLIER = 2.0
+
 # BytePlus's own list, plus the obvious synonyms a person actually types.
 EDIT_TRIGGERS = ("edit", "add", "insert", "remove", "delete", "modify",
                  "replace", "change", "swap", "erase", "take out", "put")
+
+
+def estimate_edit_cost(seconds, resolution="720p", aspect="16:9",
+                       model=DEFAULT_MODEL):
+    """What an edit of a clip this long will cost. See EDIT_BILLING_MULTIPLIER."""
+    return round(estimate_cost(seconds, resolution, aspect, model)
+                 * EDIT_BILLING_MULTIPLIER, 4)
 
 
 def has_edit_trigger(text):
@@ -766,9 +780,10 @@ def edit_stream(video_url, instructions, reference_images=None,
         return
 
     prompt = compose_edit_prompt(instructions)
-    # The edit keeps the source's length, so its price is the source's price.
-    cost = estimate_cost(source_seconds or EDIT_MIN_SECONDS, resolution, aspect,
-                         s["model"], audio)
+    # The edit keeps the source's length, and is billed at about double a
+    # generation of that length, because the source is read as well as written.
+    cost = estimate_edit_cost(source_seconds or EDIT_MIN_SECONDS, resolution,
+                              aspect, s["model"])
 
     try:
         pending = []

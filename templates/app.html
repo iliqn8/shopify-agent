@@ -1116,9 +1116,10 @@
             <span id="dm-edit-status" style="color:#666;font-size:11px"></span>
           </div>
           <div style="color:#666;font-size:11px;margin-top:7px">
-            This clip is <span style="color:#a5b4fc">@Video1</span>. Editing costs a full generation —
-            it makes a new clip rather than patching this one, and the result can come back a fraction
-            of a second shorter.
+            This clip is <span style="color:#a5b4fc">@Video1</span>. An edit makes a NEW clip rather
+            than patching this one, and bills about <span style="color:#fbbf24">double a generation of
+            the same length</span> — the model reads the original as well as writing the result. It can
+            come back a fraction of a second shorter.
           </div>
           <pre id="dm-edit-log" style="display:none;margin-top:10px;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:10px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap"></pre>
         </div>
@@ -5428,6 +5429,7 @@ const dmDeleteSavedIdea = () => dmDeleteSavedOf('idea');
 
 let dmLastClip = null;      // the clip the edit box acts on
 let dmEditPhotos = [];      // [{source, url, error}] — same shape as dmRefs
+const DM_EDIT_COST_X = 2;   // an edit bills about twice a generation of the same length
 
 function dmShowClip(ev) {
   dmLastClip = ev;
@@ -5458,9 +5460,11 @@ function dmUpdateEditCost() {
   const m = dmSpec();
   const r = (m.resolutions || []).find(x => x.key === dmLastClip.resolution);
   const per = r ? (r.usd_per_second[dmLastClip.aspect] || 0) : 0;
-  // An edit keeps the source's length, so it is priced like the source.
+  // An edit keeps the source's length, and is billed at about DOUBLE a
+  // generation of that length — the source is read as well as written.
+  // Measured: a 7s 480p edit quoted at $0.72 was billed $1.44.
   const secs = dmLastClip.seconds || 4;
-  el.textContent = per ? '≈ $' + (per * secs).toFixed(2) : '';
+  el.textContent = per ? '≈ $' + (per * secs * DM_EDIT_COST_X).toFixed(2) : '';
 }
 
 function dmAddEditPhotos(input) {
