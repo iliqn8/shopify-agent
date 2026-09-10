@@ -1621,6 +1621,94 @@ def dreamina_generate_start():
     return jsonify({"job_id": job_id})
 
 
+def _public_video_url(filename, origin=""):
+    """A URL BytePlus can fetch one of our finished clips from.
+
+    Unlike images, ARK has no inline form for video — it goes and gets the file
+    itself. So editing only works when this app is reachable from the internet,
+    and the honest failure is a message saying so rather than a task that dies
+    at BytePlus with a fetch error.
+
+    Preference order: an explicitly configured base URL, then Railway's own
+    public domain, then whatever origin the browser is being served from.
+    """
+    from urllib.parse import urlparse
+
+    base = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        domain = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip().rstrip("/")
+        if domain:
+            base = domain if domain.startswith("http") else "https://" + domain
+    if not base:
+        base = (origin or "").strip().rstrip("/")
+    if not base:
+        return None, ("This clip has no public address. Editing needs the app to be "
+                      "reachable from the internet — it works on Railway.")
+
+    host = (urlparse(base).hostname or "").lower()
+    private = (host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+               or host.endswith(".local")
+               or host.startswith(("192.168.", "10.", "172.16.", "172.17.",
+                                   "172.18.", "172.19.", "172.2", "172.30.",
+                                   "172.31.")))
+    if private:
+        return None, ("Editing runs on BytePlus's servers, and they have to download the "
+                      "clip — which they cannot do from %s. Use the app on Railway to "
+                      "edit a clip." % (host or "this address"))
+
+    return "%s/generated-videos/%s" % (base, filename), None
+
+
+@app.route("/api/dreamina-edit-start", methods=["POST"])
+def dreamina_edit_start():
+    """Re-generate an existing clip with a change applied."""
+    import uuid as _uuid_de
+    import json as _json_de
+    import dreamina_studio
+
+    d = request.json or {}
+    instructions = (d.get("instructions") or "").strip()
+    filename = (d.get("filename") or "").strip()
+    if not instructions:
+        return jsonify({"error": "Say what should change about the clip."}), 400
+    if not filename or "/" in filename or "\\" in filename:
+        return jsonify({"error": "Which clip should be edited?"}), 400
+
+    source_url, problem = _public_video_url(filename, d.get("origin") or "")
+    if problem:
+        return jsonify({"error": problem}), 400
+
+    settings = {
+        "resolution": d.get("resolution") or "720p",
+        "aspect": d.get("aspect") or "16:9",
+        "audio": bool(d.get("audio", True)),
+        "container": d.get("container") or "mp4",
+        "source_seconds": d.get("seconds"),
+        "reference_images": d.get("reference_images") or [],
+        "model": d.get("model") or dreamina_studio.DEFAULT_MODEL,
+    }
+
+    job_id = str(_uuid_de.uuid4())
+
+    def factory():
+        for event in dreamina_studio.edit_stream(source_url, instructions, **settings):
+            if event.get("type") == "done" and event.get("filename"):
+                try:
+                    kb.save_studio_clip(event.get("prompt") or instructions,
+                        _json_de.dumps(dict(
+                            {k: event.get(k) for k in
+                             ("model", "model_label", "seconds", "resolution",
+                              "aspect", "audio", "container", "cost", "tokens")},
+                            provider="byteplus", edited_from=filename)),
+                        event["filename"])
+                except Exception:
+                    pass          # a history row is not worth losing the clip over
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/dreamina-history", methods=["GET"])
 def dreamina_history():
     return jsonify(kb.list_studio_clips("byteplus"))

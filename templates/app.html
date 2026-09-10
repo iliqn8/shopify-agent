@@ -1094,6 +1094,34 @@
           <a id="dm-download" class="btn-sm" download style="text-decoration:none">⬇️ Download</a>
           <span id="dm-result-meta" style="color:#666;font-size:12px"></span>
         </div>
+
+        <!-- Edit the finished clip. Seedance's third task type: it re-generates
+             the clip with the change applied, keeping its shape and length. -->
+        <div style="margin-top:16px;background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px">
+          <label style="color:#a5b4fc;font-size:12px;display:block;margin-bottom:6px">
+            ✏️ EDIT THIS CLIP <span style="color:#666">— say what should change; the model re-generates it, keeping the shape and length</span>
+          </label>
+          <textarea id="dm-edit" rows="2" placeholder="e.g. remove the bottle on the left · replace the jacket with the one in @Image1 · change the sky to sunset · take out the background music"
+            style="width:100%;background:#0d0d14;border:1px solid #2a2a3a;border-radius:8px;color:#ddd;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+
+          <input type="file" id="dm-edit-files" accept="image/*" multiple style="display:none" onchange="dmAddEditPhotos(this)">
+          <div id="dm-edit-thumbs" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px"></div>
+
+          <div style="display:flex;align-items:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+            <button class="btn-sm" id="dm-edit-btn" onclick="dmApplyEdit()"
+              style="border-color:#6366f1;color:#c7d2fe">✏️ Apply edit</button>
+            <button class="btn-sm" onclick="document.getElementById('dm-edit-files').click()"
+              title="Photos the edit can draw on — addressed as @Image1, @Image2">📷 Add photos</button>
+            <span id="dm-edit-cost" style="color:#fbbf24;font-size:13px;font-weight:600"></span>
+            <span id="dm-edit-status" style="color:#666;font-size:11px"></span>
+          </div>
+          <div style="color:#666;font-size:11px;margin-top:7px">
+            This clip is <span style="color:#a5b4fc">@Video1</span>. Editing costs a full generation —
+            it makes a new clip rather than patching this one, and the result can come back a fraction
+            of a second shorter.
+          </div>
+          <pre id="dm-edit-log" style="display:none;margin-top:10px;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:10px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap"></pre>
+        </div>
       </div>
 
     </div>
@@ -5390,6 +5418,184 @@ const dmDeleteSavedIdea = () => dmDeleteSavedOf('idea');
 
 // ── Generate ──
 
+// ── The finished clip, and editing it ──
+//
+// Editing is Seedance's third task type: it RE-GENERATES the clip with the
+// change applied rather than patching it, so it costs a full generation and
+// comes back a new file. BytePlus fetch the source themselves — there is no
+// inline form for video — which is why the server needs a public URL and says
+// so plainly when there isn't one.
+
+let dmLastClip = null;      // the clip the edit box acts on
+let dmEditPhotos = [];      // [{source, url, error}] — same shape as dmRefs
+
+function dmShowClip(ev) {
+  dmLastClip = ev;
+  const url = '/generated-videos/' + ev.filename;
+  document.getElementById('dm-result').style.display = 'block';
+  document.getElementById('dm-player').src = url;
+  const dl = document.getElementById('dm-download');
+  dl.href = url;
+  dl.setAttribute('download', ev.filename);
+  document.getElementById('dm-result-meta').textContent =
+    [ev.model_label, ev.seconds + 's',
+     (ev.resolution ? ev.resolution + ' ' : '') + ev.aspect,
+     (ev.container || 'mp4').toUpperCase(),
+     ev.audio ? 'with audio' : 'silent',
+     // The billed figure, from the token count BytePlus returned.
+     ev.cost ? '$' + ev.cost.toFixed(2) + ' billed' : null,
+     ev.edited ? 'edited' : null].filter(Boolean).join(' · ');
+  document.getElementById('dm-edit').value = '';
+  document.getElementById('dm-edit-status').textContent = '';
+  dmEditPhotos = [];
+  dmDrawEditPhotos();
+  dmUpdateEditCost();
+}
+
+function dmUpdateEditCost() {
+  const el = document.getElementById('dm-edit-cost');
+  if (!dmLastClip || !dmOpts) { el.textContent = ''; return; }
+  const m = dmSpec();
+  const r = (m.resolutions || []).find(x => x.key === dmLastClip.resolution);
+  const per = r ? (r.usd_per_second[dmLastClip.aspect] || 0) : 0;
+  // An edit keeps the source's length, so it is priced like the source.
+  const secs = dmLastClip.seconds || 4;
+  el.textContent = per ? '≈ $' + (per * secs).toFixed(2) : '';
+}
+
+function dmAddEditPhotos(input) {
+  Array.from(input.files || []).forEach(f => {
+    if (dmEditPhotos.length >= DM_MAX_REFS) return;
+    const entry = { source: { kind: 'file', file: f }, url: null, error: null };
+    dmEditPhotos.push(entry);
+    dmDrawEditPhotos();
+    dmPrepareEditPhoto(entry);
+  });
+  input.value = '';
+}
+
+async function dmPrepareEditPhoto(entry) {
+  const fd = new FormData();
+  fd.append('aspect', dmAspect);
+  fd.append('mode', 'reference');    // never cropped: the shape comes from the clip
+  fd.append('file', entry.source.file);
+  try {
+    const r = await fetch('/api/dreamina-reference', { method: 'POST', body: fd });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+    entry.url = d.url;
+  } catch (e) {
+    entry.error = e.message;
+  }
+  dmDrawEditPhotos();
+}
+
+function dmDrawEditPhotos() {
+  document.getElementById('dm-edit-thumbs').innerHTML = dmEditPhotos.map((r, i) => {
+    const inner = r.error
+      ? `<div style="height:56px;width:56px;border-radius:7px;background:#2a1414;border:1px solid #7f1d1d;display:flex;align-items:center;justify-content:center;color:#f87171" title="${r.error.replace(/"/g, '&quot;')}">!</div>`
+      : r.url
+        ? `<img src="${r.url}" style="height:56px;border-radius:7px;display:block;border:1px solid #2a2a3a">`
+        : `<div style="height:56px;width:56px;border-radius:7px;background:#141414;border:1px solid #2a2a3a;display:flex;align-items:center;justify-content:center;color:#555;font-size:11px">…</div>`;
+    return `<div style="position:relative">
+      ${inner}
+      <div onclick="dmInsertEditToken(${i + 1})" title="Insert @Image${i + 1} into the edit"
+           style="cursor:pointer;text-align:center;margin-top:3px;font-size:10px;color:#a5b4fc">@Image${i + 1}</div>
+      <button onclick="dmRemoveEditPhoto(${i})" title="Remove"
+        style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function dmRemoveEditPhoto(i) { dmEditPhotos.splice(i, 1); dmDrawEditPhotos(); }
+
+function dmInsertEditToken(n) {
+  const box = document.getElementById('dm-edit');
+  const token = '@Image' + n;
+  const at = box.selectionStart === null ? box.value.length : box.selectionStart;
+  const before = box.value.slice(0, at), after = box.value.slice(box.selectionEnd || at);
+  const padL = (before && !/\s$/.test(before)) ? ' ' : '';
+  const padR = (after && !/^[\s.,;:!?)]/.test(after)) ? ' ' : '';
+  box.value = before + padL + token + padR + after;
+  const pos = (before + padL + token).length;
+  box.focus();
+  box.setSelectionRange(pos, pos);
+}
+
+// Load an older clip into the player so the edit box acts on it. The settings
+// come from the history row rather than from the form above, because an edit
+// keeps the SOURCE's shape and length — whatever the sliders happen to say now.
+function dmEditFromHistory(id) {
+  const rows = JSON.parse(document.getElementById('dm-history').dataset.rows || '[]');
+  const row = rows.find(c => c.id === id);
+  if (!row || !row.filename) return;
+  let s = {};
+  try { s = JSON.parse(row.settings_json || '{}'); } catch (e) {}
+  dmShowClip({
+    filename: row.filename,
+    model_label: s.model_label, model: s.model,
+    seconds: s.seconds, resolution: s.resolution, aspect: s.aspect,
+    audio: s.audio, container: s.container, cost: s.cost, edited: !!s.edited_from
+  });
+  document.getElementById('dm-edit').focus();
+  document.getElementById('dm-result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function dmApplyEdit() {
+  const instructions = document.getElementById('dm-edit').value.trim();
+  if (!instructions) { alert('Say what should change about the clip.'); return; }
+  if (!dmLastClip) { alert('Generate a clip first.'); return; }
+  const pending = dmEditPhotos.filter(p => !p.url && !p.error).length;
+  if (pending) { alert('One moment — ' + pending + ' photo(s) still uploading.'); return; }
+
+  const btn = document.getElementById('dm-edit-btn');
+  const status = document.getElementById('dm-edit-status');
+  const log = document.getElementById('dm-edit-log');
+  btn.disabled = true;
+  btn.textContent = 'Editing…';
+  status.textContent = '';
+  log.style.display = 'block';
+  log.textContent = '✏️ Sending the clip to Seedance…';
+
+  const finish = () => { btn.disabled = false; btn.textContent = '✏️ Apply edit'; };
+
+  try {
+    const r = await fetch('/api/dreamina-edit-start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: dmLastClip.filename,
+        instructions,
+        seconds: dmLastClip.seconds,
+        resolution: dmLastClip.resolution,
+        aspect: dmLastClip.aspect,
+        audio: dmLastClip.audio,
+        container: dmLastClip.container,
+        model: dmLastClip.model,
+        reference_images: dmEditPhotos.filter(p => p.url).map(p => p.url),
+        // The server prefers its own configured domain; this is the fallback.
+        origin: window.location.origin
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+
+    vidPoll(d.job_id,
+      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
+      ev => {
+        finish();
+        if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
+        // The edit replaces what the box acts on, so a second edit builds on
+        // the first rather than silently re-editing the original.
+        dmShowClip(ev);
+        dmLoadHistory();
+        document.getElementById('dm-result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+  } catch (e) {
+    finish();
+    log.textContent += '\n❌ ' + e.message;
+  }
+}
+
 async function dmGenerate() {
   const prompt = document.getElementById('dm-prompt').value.trim();
   if (!prompt) { alert('Write a prompt first.'); return; }
@@ -5426,19 +5632,7 @@ async function dmGenerate() {
         btn.disabled = false;
         btn.textContent = '🌙 Generate clip';
         if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
-        const url = '/generated-videos/' + ev.filename;
-        document.getElementById('dm-result').style.display = 'block';
-        document.getElementById('dm-player').src = url;
-        const dl = document.getElementById('dm-download');
-        dl.href = url;
-        dl.setAttribute('download', ev.filename);
-        document.getElementById('dm-result-meta').textContent =
-          [ev.model_label, ev.seconds + 's',
-           (ev.resolution ? ev.resolution + ' ' : '') + ev.aspect,
-           (ev.container || 'mp4').toUpperCase(),
-           ev.audio ? 'with audio' : 'silent',
-           // The billed figure, from the token count BytePlus returned.
-           ev.cost ? '$' + ev.cost.toFixed(2) + ' billed' : null].filter(Boolean).join(' · ');
+        dmShowClip(ev);
         dmLoadHistory();
       });
   } catch (e) {
@@ -5471,6 +5665,7 @@ async function dmLoadHistory() {
             <div style="color:#555;font-size:11px">${meta} · ${c.created_at || ''}</div>
           </div>
           ${url ? `<a class="btn-sm" href="${url}" download style="text-decoration:none">⬇️</a>` : ''}
+          ${url ? `<button class="btn-sm" onclick="dmEditFromHistory(${c.id})" title="Edit this clip">✏️</button>` : ''}
           <button class="btn-sm" onclick="dmReuse(${c.id})" title="Put this prompt back in the box">↩︎</button>
           <button class="btn-sm" onclick="dmDelete(${c.id})">🗑</button>
         </div>

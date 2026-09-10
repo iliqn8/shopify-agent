@@ -661,6 +661,177 @@ def unaddressed_references(prompt, count):
     return [i for i in range(1, count + 1) if i not in named]
 
 
+# ── Editing a finished clip ────────────────────────────────────────────────
+# Seedance's third task type. It re-generates the clip with a change applied,
+# rather than patching pixels, so the result is a NEW video of roughly the same
+# length — BytePlus say it can come back up to 0.4s shorter, and at a
+# non-integer duration.
+#
+# The constraints are not advice. `ratio` must be adaptive, `duration` must be
+# -1, the source must be 4-30 seconds, and the prompt must contain an editing
+# verb or the model will classify the task as something else and fail it.
+EDIT_MIN_SECONDS = 4
+EDIT_MAX_SECONDS = 30
+
+# BytePlus's own list, plus the obvious synonyms a person actually types.
+EDIT_TRIGGERS = ("edit", "add", "insert", "remove", "delete", "modify",
+                 "replace", "change", "swap", "erase", "take out", "put")
+
+
+def has_edit_trigger(text):
+    low = " %s " % (text or "").lower()
+    return any(t in low for t in EDIT_TRIGGERS)
+
+
+def compose_edit_prompt(instructions):
+    """Turn what the user typed into something Seedance will read as an edit.
+
+    Two things have to be true of the text, and neither is worth making the user
+    remember: it must name the asset being edited (@Video1), and it must contain
+    an editing verb. BytePlus's own example is shaped exactly like the prefix
+    below — "Video edit: remove everyone in @Video1 except the protagonist."
+    """
+    text = (instructions or "").strip()
+    if not text:
+        return ""
+    if re.search(r"@\s*[Vv]ideo\s*\d*", text):
+        # They addressed the clip themselves; only guarantee the verb.
+        return text if has_edit_trigger(text) else "Video edit: " + text
+    return "Video edit on @Video1: " + text
+
+
+def build_edit_payload(spec, prompt, video_url, resolution, audio, container,
+                       reference_images=None):
+    """The ARK body for an edit. Separate from build_payload because almost
+    every field is pinned differently, and sharing one function would mean a
+    branch on every line.
+    """
+    refs = [u for u in (reference_images or []) if u]
+    if len(refs) > MAX_REFERENCE_IMAGES:
+        raise DreaminaError(
+            "Seedance 2.5 takes at most %d reference images; %d were sent."
+            % (MAX_REFERENCE_IMAGES, len(refs)))
+    if not video_url:
+        raise DreaminaError("There is no video to edit.")
+
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "video_url", "video_url": {"url": video_url},
+         "role": "reference_video"},
+    ]
+    for url in refs:
+        content.append({"type": "image_url", "image_url": {"url": url},
+                        "role": "reference_image"})
+
+    return {
+        "model": spec["id"],
+        "content": content,
+        "resolution": resolution,
+        "ratio": "adaptive",          # pinned by the API for edits
+        "duration": -1,               # likewise: the source's length is kept
+        "generate_audio": bool(audio),
+        "output_format": container,
+        "watermark": False,
+        "omni_reference_task_type": "edit",
+    }
+
+
+def edit_stream(video_url, instructions, reference_images=None,
+                resolution="720p", aspect="16:9", audio=True, container="mp4",
+                source_seconds=None, model=DEFAULT_MODEL):
+    """Re-generate a finished clip with a change applied.
+
+    `video_url` must be reachable from the internet — ARK fetches it, and unlike
+    images there is no base64 form for video, so a local file cannot be sent.
+    """
+    instructions = (instructions or "").strip()
+    if not instructions:
+        yield {"type": "done", "error": "Say what should change about the clip."}
+        return
+    if not video_url:
+        yield {"type": "done",
+               "error": "This clip has no address the model can fetch it from."}
+        return
+
+    reference_images = [u for u in (reference_images or []) if u]
+    s = normalise(model=model, resolution=resolution, aspect=aspect, audio=audio,
+                  container=container, seconds=source_seconds or EDIT_MIN_SECONDS)
+    spec = s["spec"]
+    resolution, container, audio = s["resolution"], s["container"], s["audio"]
+
+    if source_seconds and not (EDIT_MIN_SECONDS <= source_seconds <= EDIT_MAX_SECONDS):
+        yield {"type": "done", "error": (
+            "Seedance can only edit a clip between %d and %d seconds; this one is %ss."
+            % (EDIT_MIN_SECONDS, EDIT_MAX_SECONDS, source_seconds))}
+        return
+
+    prompt = compose_edit_prompt(instructions)
+    # The edit keeps the source's length, so its price is the source's price.
+    cost = estimate_cost(source_seconds or EDIT_MIN_SECONDS, resolution, aspect,
+                         s["model"], audio)
+
+    try:
+        pending = []
+
+        def status(text):
+            pending.append(text)
+
+        def drain():
+            while pending:
+                yield {"type": "status", "text": "   " + pending.pop(0)}
+
+        yield {"type": "status", "text": (
+            "✏️ Editing the clip · %s · keeps its %s shape and length · ≈$%.2f"
+            % (resolution, aspect, cost))}
+        if prompt != instructions:
+            yield {"type": "status", "text": "   sent as: " + prompt}
+        if reference_images:
+            yield {"type": "status", "text": (
+                "   with %d reference photo%s — @Image1%s"
+                % (len(reference_images), "" if len(reference_images) == 1 else "s",
+                   "–@Image%d" % len(reference_images) if len(reference_images) > 1 else ""))}
+
+        payload = build_edit_payload(spec, prompt, video_url, resolution, audio,
+                                     container, reference_images)
+        task = byteplus_client.run(payload, on_status=status, timeout=1800)
+        yield from drain()
+
+        url = ((task.get("content") or {}).get("video_url"))
+        if not url:
+            yield {"type": "done",
+                   "error": f"The edit finished but returned no video: {str(task)[:300]}"}
+            return
+
+        made_seconds = task.get("duration") or source_seconds
+        made_resolution = task.get("resolution") or resolution
+        tokens = (task.get("usage") or {}).get("completion_tokens") or 0
+        actual = cost_of_tokens(tokens, made_resolution) if tokens else cost
+
+        yield {"type": "status", "text": f"⬇️ Downloading the {container.upper()}…"}
+        filename = save_output(url, prompt, container)
+
+        if tokens:
+            yield {"type": "status", "text": f"💰 Billed {tokens:,} tokens ≈ ${actual:.2f}"}
+        yield {"type": "status", "text": "✅ Done"}
+        yield {"type": "done", "filename": filename, "video_url": url,
+               "cost": actual, "estimated_cost": cost, "tokens": tokens,
+               "seconds": made_seconds, "resolution": made_resolution,
+               "aspect": task.get("ratio") or aspect, "audio": bool(audio),
+               "container": container, "model": s["model"],
+               "model_label": spec["label"], "prompt": prompt, "edited": True}
+
+    except byteplus_client.ArkError as e:
+        msg = str(e)
+        if "TaskTypeMismatch" in msg or "TaskTypeConstraint" in msg:
+            msg += ("  —  Seedance read this as something other than an edit. Phrase it as a "
+                    "change to the existing clip (\"remove the…\", \"replace the… with…\").")
+        yield {"type": "done", "error": msg}
+    except DreaminaError as e:
+        yield {"type": "done", "error": str(e)}
+    except Exception as e:
+        yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
 def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
                     audio=True, container="mp4", image_url=None,
                     reference_images=None, model=DEFAULT_MODEL):
