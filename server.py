@@ -1445,24 +1445,30 @@ def dreamina_estimate():
 
 @app.route("/api/dreamina-reference", methods=["POST"])
 def dreamina_reference():
-    """Crop an upload or a pasted URL to the chosen ratio.
+    """Prepare an upload or a pasted URL for whichever mode it is going into.
 
     Returns a data URI rather than a hosted link: BytePlus has no file storage
     and takes the image inline, so what comes back here is literally the bytes
-    the model will start from — which makes the thumbnail an honest preview.
+    the model receives — which makes the thumbnail an honest preview.
+
+    `mode` is "first_frame" (cropped to the chosen ratio, because the output
+    copies that frame's shape) or "reference" (left as it is, because an
+    @Image reference is material to read, not a frame to start from).
     """
     import dreamina_studio
-    aspect = request.form.get("aspect") or (request.json or {}).get("aspect") or "16:9"
+    d = request.json if request.is_json else {}
+    aspect = request.form.get("aspect") or (d or {}).get("aspect") or "16:9"
+    mode = request.form.get("mode") or (d or {}).get("mode") or "first_frame"
     try:
         f = request.files.get("file")
         if f:
             raw = f.read()
         else:
-            url = (request.form.get("url") or (request.json or {}).get("url") or "").strip()
+            url = (request.form.get("url") or (d or {}).get("url") or "").strip()
             if not url:
                 return jsonify({"error": "Upload an image or paste an image URL."}), 400
             raw = dreamina_studio.fetch_reference(url)
-        return jsonify({"url": dreamina_studio.prepare_reference(raw, aspect)})
+        return jsonify({"url": dreamina_studio.prepare_reference(raw, aspect, mode)})
     except dreamina_studio.DreaminaError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1493,6 +1499,16 @@ def dreamina_write_prompt():
     d = request.json or {}
     idea = (d.get("idea") or "").strip()
     photos = d.get("photos") or []
+    refs = d.get("reference_images") or []
+
+    # Show the writer the references themselves when the user has not attached
+    # separate idea photos. Naming @Image1 without ever seeing it is guesswork,
+    # and the references are already uploaded — there is nothing to ask for.
+    shown = 0
+    if refs and not photos:
+        photos = dreamina_studio.photos_from_references(refs)
+        shown = len(photos)
+
     if not idea and not photos:
         return jsonify({"error": "Describe your idea, or attach a photo."}), 400
 
@@ -1505,6 +1521,8 @@ def dreamina_write_prompt():
         has_image=bool(d.get("has_image")),
         photos=photos,
         angle=d.get("angle") or "",
+        references=int(d.get("references") or len(refs)),
+        references_shown=shown,
     ))
     return jsonify({"job_id": job_id})
 
@@ -1537,6 +1555,13 @@ def dreamina_refine_prompt():
     if not instructions:
         return jsonify({"error": "Say what you would like changed."}), 400
 
+    photos = d.get("photos") or []
+    refs = d.get("reference_images") or []
+    shown = 0
+    if refs and not photos:
+        photos = dreamina_studio.photos_from_references(refs)
+        shown = len(photos)
+
     job_id = str(_uuid_dr.uuid4())
     _run_video_job(job_id, lambda: dreamina_studio.refine_prompt_stream(
         current, instructions,
@@ -1544,8 +1569,10 @@ def dreamina_refine_prompt():
         seconds=d.get("seconds") or dreamina_studio.MIN_SECONDS,
         aspect=d.get("aspect") or "16:9",
         has_image=bool(d.get("has_image")),
-        photos=d.get("photos") or [],
+        photos=photos,
         angle=d.get("angle") or "",
+        references=int(d.get("references") or len(refs)),
+        references_shown=shown,
     ))
     return jsonify({"job_id": job_id})
 
@@ -1569,6 +1596,7 @@ def dreamina_generate_start():
         "audio": bool(d.get("audio", True)),
         "container": d.get("container") or "mp4",
         "image_url": d.get("image_url") or None,
+        "reference_images": d.get("reference_images") or [],
     }
 
     job_id = str(_uuid_dg.uuid4())

@@ -988,21 +988,38 @@
 
       <!-- Product reference -->
       <div>
-        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">
-          PRODUCT REFERENCE <span style="color:#555">— optional; upload a photo or paste an image URL</span>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">
+          PRODUCT REFERENCE <span style="color:#555">— optional; upload photos or paste image URLs</span>
         </label>
-        <input type="file" id="dm-file" accept="image/*" style="display:none" onchange="dmHandleFile(this)">
+
+        <!-- The two modes are different task types on Seedance, not a preference -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <div id="dm-mode-first" onclick="dmSetRefMode('first_frame')"
+               style="cursor:pointer;flex:1;min-width:230px;padding:9px 12px;border-radius:9px;border:2px solid #2a2a2a;background:#141414">
+            <div style="font-size:13px;font-weight:600">🎬 Starting frame</div>
+            <div style="color:#666;font-size:11px;margin-top:2px">One photo. The clip literally begins on it and takes its shape.</div>
+          </div>
+          <div id="dm-mode-ref" onclick="dmSetRefMode('reference')"
+               style="cursor:pointer;flex:1;min-width:230px;padding:9px 12px;border-radius:9px;border:2px solid #2a2a2a;background:#141414">
+            <div style="font-size:13px;font-weight:600">🖼️ References <span style="color:#666;font-weight:400">@Image1…</span></div>
+            <div style="color:#666;font-size:11px;margin-top:2px">Up to 30 photos the model reads. Name them in the prompt to say what each is for.</div>
+          </div>
+        </div>
+
+        <input type="file" id="dm-file" accept="image/*" multiple style="display:none" onchange="dmHandleFile(this)">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-          <button class="btn-sm" onclick="document.getElementById('dm-file').click()">📷 Upload photo</button>
+          <button class="btn-sm" id="dm-add-btn" onclick="document.getElementById('dm-file').click()">📷 Upload photo</button>
           <input id="dm-url" type="text" placeholder="https://…/product.jpg"
             style="flex:1;min-width:220px;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:7px 10px;font-size:12px">
           <button class="btn-sm" onclick="dmUseUrl()">Use URL</button>
         </div>
-        <div style="display:flex;align-items:center;gap:12px">
-          <div id="dm-ref-thumb" style="display:none"></div>
-          <span id="dm-ref-status" style="color:#555;font-size:12px">No reference — the clip will be generated from the prompt alone</span>
-          <button class="btn-sm" id="dm-ref-clear" onclick="dmClearRef()" style="display:none">✕ Remove</button>
-        </div>
+
+        <div id="dm-ref-thumbs" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px"></div>
+        <div id="dm-ref-status" style="color:#555;font-size:12px">No reference — the clip will be generated from the prompt alone</div>
+
+        <!-- Only shown in reference mode: which numbers the prompt actually uses -->
+        <div id="dm-ref-usage" style="display:none;font-size:11px;margin-top:7px;padding:8px 10px;border-radius:8px"></div>
+
         <div style="color:#666;font-size:11px;margin-top:6px">
           Seedance 2.5 will not take a reference photo of a real person's face.
         </div>
@@ -4606,12 +4623,14 @@ let dmAspect = '16:9';
 let dmResolution = '720p';
 let dmFormat = 'mp4';
 let dmSeconds = 8;
-let dmRefUrl = null;
-// Kept so the reference can be re-cropped when the aspect ratio changes. On
-// Seedance 2.5 this is not a nicety: with a first frame the API refuses any
-// ratio but "adaptive" and copies the shape of that frame, so cropping is the
-// only way the chosen ratio reaches the output.
-let dmRefSource = null;   // {kind:'file', file} | {kind:'url', url}
+// Reference photos, in upload order — that order IS the @Image numbering.
+// Each entry keeps its source so it can be prepared again when the aspect ratio
+// or the mode changes. On Seedance 2.5 re-cropping is not a nicety: with a first
+// frame the API refuses any ratio but "adaptive" and copies the shape of that
+// frame, so cropping is the only way the chosen ratio reaches the output.
+let dmRefs = [];          // [{source:{kind,file|url}, url, error}]
+let dmRefMode = 'first_frame';
+const DM_MAX_REFS = 30;
 
 // A little scene drawn at the real proportions, so the shape is something you
 // look at rather than a ratio you have to picture.
@@ -4742,8 +4761,9 @@ function dmPickAspect(key) {
   dmUpdateCost();
   // With a first frame set, the API takes the output shape from that frame and
   // rejects the ratio parameter outright, so re-cropping is the only way this
-  // choice takes effect.
-  if (dmRefSource) dmUploadRef();
+  // choice takes effect. References are never cropped, so they are left alone.
+  if (dmRefMode === 'first_frame') dmRefs.forEach(dmPrepareRef);
+  else dmDrawRefStatus();
 }
 
 function dmPickResolution(key) { dmResolution = key; dmDrawResolutions(); dmUpdateCost(); }
@@ -4770,8 +4790,13 @@ function dmUpdateCost() {
 async function dmInit() {
   document.getElementById('dm-audio').addEventListener('change', dmUpdateCost);
   const promptBox = document.getElementById('dm-prompt');
-  promptBox.addEventListener('input', () => dmShowRefine(!!promptBox.value.trim()));
+  promptBox.addEventListener('input', () => {
+    dmShowRefine(!!promptBox.value.trim());
+    dmUpdateRefUsage();     // the tally is about THIS prompt, so it follows edits
+  });
   dmShowRefine(!!promptBox.value.trim());
+  dmDrawRefMode();
+  dmDrawRefs();
   if (dmInited) { dmLoadHistory(); return; }
   dmInited = true;
   try {
@@ -4799,64 +4824,212 @@ async function dmInit() {
   dmLoadHistory();
 }
 
-// ── Reference image ──
+// ── Reference images ──
+//
+// Two modes, because Seedance treats them as two different task types and
+// refuses to mix them:
+//
+//   first_frame — exactly one photo. The clip begins on it, so it is cropped to
+//                 the chosen ratio and the output copies that shape.
+//   reference   — 1-30 photos the model READS. Not cropped (the ratio comes
+//                 from the setting), and addressed from the prompt as @Image1,
+//                 @Image2 in upload order. Naming one does not switch it on —
+//                 every reference is read regardless — it says what the photo
+//                 is FOR, which is what the tally below is about.
+
+function dmFirstFrameUrl() {
+  return (dmRefMode === 'first_frame' && dmRefs.length && dmRefs[0].url) ? dmRefs[0].url : null;
+}
+
+function dmReferenceUrls() {
+  return dmRefMode === 'reference' ? dmRefs.filter(r => r.url).map(r => r.url) : [];
+}
+
+function dmSetRefMode(mode, quiet) {
+  if (mode === dmRefMode) return;
+  // Going back to a single starting frame cannot carry a pile of photos with it.
+  if (mode === 'first_frame' && dmRefs.length > 1) {
+    if (!confirm('A starting frame is one photo. Keep the first and drop the other '
+                 + (dmRefs.length - 1) + '?')) return;
+    dmRefs = dmRefs.slice(0, 1);
+  }
+  dmRefMode = mode;
+  dmDrawRefMode();
+  // The bytes differ between modes — a first frame is cropped, a reference is
+  // not — so anything already uploaded has to be prepared again.
+  dmRefs.forEach(r => { r.url = null; });
+  dmDrawRefs();
+  dmRefs.forEach(dmPrepareRef);
+  if (!quiet) dmUpdateRefUsage();
+}
+
+function dmDrawRefMode() {
+  [['dm-mode-first', 'first_frame'], ['dm-mode-ref', 'reference']].forEach(([id, key]) => {
+    const el = document.getElementById(id);
+    const on = dmRefMode === key;
+    el.style.borderColor = on ? '#6366f1' : '#2a2a2a';
+    el.style.background = on ? '#1a1a2e' : '#141414';
+    el.querySelector('div').style.color = on ? '#fff' : '#999';
+  });
+  document.getElementById('dm-add-btn').textContent =
+    dmRefMode === 'reference' ? '📷 Add photos' : '📷 Upload photo';
+  document.getElementById('dm-file').multiple = (dmRefMode === 'reference');
+}
+
+function dmAddRef(source) {
+  // A second photo only makes sense as a reference, so switch rather than refuse.
+  if (dmRefMode === 'first_frame' && dmRefs.length >= 1) {
+    dmRefMode = 'reference';
+    dmDrawRefMode();
+    const prev = dmRefs[0];
+    if (prev) { prev.url = null; dmPrepareRef(prev); }
+  }
+  if (dmRefs.length >= DM_MAX_REFS) {
+    alert('Seedance 2.5 takes at most ' + DM_MAX_REFS + ' reference images.');
+    return;
+  }
+  const entry = { source, url: null, error: null };
+  dmRefs.push(entry);
+  dmDrawRefs();
+  dmPrepareRef(entry);
+}
 
 function dmHandleFile(input) {
-  const f = input.files[0];
-  if (!f) return;
-  dmRefSource = { kind: 'file', file: f };
-  dmUploadRef();
+  Array.from(input.files || []).forEach(f => dmAddRef({ kind: 'file', file: f }));
+  input.value = '';
 }
 
 function dmUseUrl() {
-  const url = document.getElementById('dm-url').value.trim();
+  const box = document.getElementById('dm-url');
+  const url = box.value.trim();
   if (!url) { alert('Paste an image URL first.'); return; }
-  dmRefSource = { kind: 'url', url };
-  dmUploadRef();
+  dmAddRef({ kind: 'url', url });
+  box.value = '';
 }
 
-async function dmUploadRef() {
-  const status = document.getElementById('dm-ref-status');
-  status.textContent = 'Cropping to ' + dmAspect + '…';
-  status.style.color = '#8ab4f8';
+async function dmPrepareRef(entry) {
+  entry.error = null;
+  dmDrawRefStatus();
   const fd = new FormData();
   fd.append('aspect', dmAspect);
-  if (dmRefSource.kind === 'file') fd.append('file', dmRefSource.file);
-  else fd.append('url', dmRefSource.url);
+  fd.append('mode', dmRefMode);
+  if (entry.source.kind === 'file') fd.append('file', entry.source.file);
+  else fd.append('url', entry.source.url);
   try {
     const r = await fetch('/api/dreamina-reference', { method: 'POST', body: fd });
     const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
     // Comes back as a data URI, which BytePlus takes inline — so the thumbnail
-    // below is literally the frame the model starts from.
-    dmRefUrl = d.url;
-    document.getElementById('dm-ref-thumb').style.display = 'block';
-    document.getElementById('dm-ref-thumb').innerHTML =
-      `<img src="${d.url}" style="height:56px;border-radius:6px;display:block">`;
-    status.textContent = 'Reference ready — cropped to ' + dmAspect + ', and the clip takes that shape';
-    status.style.color = '#4ade80';
-    document.getElementById('dm-ref-clear').style.display = 'inline-block';
+    // is literally what the model receives, not a re-render of it.
+    entry.url = d.url;
   } catch (e) {
-    dmRefUrl = null;
-    status.textContent = '❌ ' + e.message;
-    status.style.color = '#f87171';
+    entry.error = e.message;
+  }
+  dmDrawRefs();
+}
+
+function dmDrawRefs() {
+  const wrap = document.getElementById('dm-ref-thumbs');
+  wrap.innerHTML = dmRefs.map((r, i) => {
+    const tag = dmRefMode === 'reference' ? '@Image' + (i + 1) : 'First frame';
+    const inner = r.error
+      ? `<div style="height:64px;width:64px;border-radius:7px;background:#2a1414;border:1px solid #7f1d1d;display:flex;align-items:center;justify-content:center;color:#f87171;font-size:18px" title="${r.error.replace(/"/g, '&quot;')}">!</div>`
+      : r.url
+        ? `<img src="${r.url}" style="height:64px;border-radius:7px;display:block;border:1px solid #2a2a3a">`
+        : `<div style="height:64px;width:64px;border-radius:7px;background:#141414;border:1px solid #2a2a3a;display:flex;align-items:center;justify-content:center;color:#555;font-size:11px">…</div>`;
+    // Clicking the label drops "@ImageN" into the prompt at the cursor — the
+    // point of the numbers is that they get written into the sentence.
+    const label = dmRefMode === 'reference'
+      ? `<div onclick="dmInsertRefToken(${i + 1})" title="Insert ${tag} into the prompt"
+             style="cursor:pointer;text-align:center;margin-top:3px;font-size:10px;color:#a5b4fc">${tag}</div>`
+      : `<div style="text-align:center;margin-top:3px;font-size:10px;color:#666">${tag}</div>`;
+    return `<div style="position:relative">
+      ${inner}${label}
+      <button onclick="dmRemoveRef(${i})" title="Remove"
+        style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
+    </div>`;
+  }).join('');
+  dmDrawRefStatus();
+  dmUpdateRefUsage();
+}
+
+function dmDrawRefStatus() {
+  const s = document.getElementById('dm-ref-status');
+  const pending = dmRefs.filter(r => !r.url && !r.error).length;
+  const bad = dmRefs.filter(r => r.error).length;
+  if (!dmRefs.length) {
+    s.textContent = 'No reference — the clip will be generated from the prompt alone';
+    s.style.color = '#555';
+  } else if (pending) {
+    s.textContent = 'Preparing ' + pending + ' photo' + (pending === 1 ? '' : 's') + '…';
+    s.style.color = '#8ab4f8';
+  } else if (bad) {
+    s.textContent = '❌ ' + (dmRefs.find(r => r.error) || {}).error;
+    s.style.color = '#f87171';
+  } else if (dmRefMode === 'first_frame') {
+    s.textContent = 'Starting frame ready — cropped to ' + dmAspect + ', and the clip takes that shape';
+    s.style.color = '#4ade80';
+  } else {
+    s.textContent = dmRefs.length + ' reference image' + (dmRefs.length === 1 ? '' : 's')
+      + ' ready — uncropped, and the clip uses the ' + dmAspect + ' you picked above';
+    s.style.color = '#4ade80';
   }
 }
 
-function dmClearRef() {
-  dmRefUrl = null; dmRefSource = null;
+// Which @ImageN the prompt actually mentions. Measured on a real pair of
+// generations: an unnamed reference IS still read — colours that appeared in
+// neither prompt came through from both photos. So this is not a warning that
+// something will be ignored; it is about who chooses what each photo is for.
+function dmUpdateRefUsage() {
+  const box = document.getElementById('dm-ref-usage');
+  if (dmRefMode !== 'reference' || !dmRefs.length) { box.style.display = 'none'; return; }
+  const prompt = document.getElementById('dm-prompt').value || '';
+  const named = new Set((prompt.match(/@\s*[Ii]mage\s*\d+/g) || [])
+                        .map(m => parseInt(m.replace(/\D/g, ''), 10)));
+  const missing = dmRefs.map((_, i) => i + 1).filter(n => !named.has(n));
+  box.style.display = 'block';
+  if (!missing.length) {
+    box.style.background = '#132a1b';
+    box.style.border = '1px solid #14532d';
+    box.style.color = '#86efac';
+    box.textContent = '✓ The prompt names every reference, so each one has a job.';
+  } else {
+    box.style.background = '#141c2a';
+    box.style.border = '1px solid #1e3a5f';
+    box.style.color = '#93c5fd';
+    box.innerHTML = 'ℹ️ ' + missing.map(n => '@Image' + n).join(', ')
+      + (missing.length === 1 ? ' is' : ' are') + ' not named in the prompt. Seedance still reads '
+      + (missing.length === 1 ? 'it' : 'them') + ', but decides what for — name a photo to say '
+      + 'whether it is the product, the setting or just the mood. Click the label under one to '
+      + 'drop its name in, or let ✨ Write my prompt do it.';
+  }
+}
+
+function dmInsertRefToken(n) {
+  const box = document.getElementById('dm-prompt');
+  const token = '@Image' + n;
+  const at = box.selectionStart === null ? box.value.length : box.selectionStart;
+  const before = box.value.slice(0, at), after = box.value.slice(box.selectionEnd || at);
+  // Space on whichever side does not already have one. Dropping @Image2 into
+  // the middle of a sentence must not weld it to the next word.
+  const padL = (before && !/\s$/.test(before)) ? ' ' : '';
+  const padR = (after && !/^[\s.,;:!?)]/.test(after)) ? ' ' : '';
+  box.value = before + padL + token + padR + after;
+  const pos = (before + padL + token).length;
+  box.focus();
+  box.setSelectionRange(pos, pos);
+  box.dispatchEvent(new Event('input'));
+}
+
+function dmRemoveRef(i) {
+  dmRefs.splice(i, 1);
   document.getElementById('dm-file').value = '';
-  document.getElementById('dm-url').value = '';
-  document.getElementById('dm-ref-thumb').style.display = 'none';
-  document.getElementById('dm-ref-clear').style.display = 'none';
-  const s = document.getElementById('dm-ref-status');
-  s.textContent = 'No reference — the clip will be generated from the prompt alone';
-  s.style.color = '#555';
+  dmDrawRefs();
 }
 
 // ── Idea → prompt ──
 
-// Photos Claude reads to write the prompt. Not the same thing as dmRefUrl,
+// Photos Claude reads to write the prompt. Not the same thing as dmRefs,
 // which is the clip's first frame — the same picture can be used for both.
 let dmIdeaPhotos = [];   // [{b64, media_type, thumb}]
 const DM_MAX_IDEA_PHOTOS = 4;
@@ -4919,6 +5092,9 @@ async function dmAddIdeaPhotos(input) {
 
 function dmShowRefine(on) {
   document.getElementById('dm-refine-row').style.display = on ? 'block' : 'none';
+  // Every path that sets the prompt box passes through here, so the @Image
+  // tally follows a written or reused prompt as well as a typed one.
+  dmUpdateRefUsage();
 }
 
 function dmShowVo(text) {
@@ -5047,7 +5223,9 @@ async function dmRefinePrompt() {
         model: dmModel,
         seconds: dmSeconds,
         aspect: dmAspect,
-        has_image: !!dmRefUrl,
+        has_image: !!dmFirstFrameUrl(),
+        references: dmReferenceUrls().length,
+        reference_images: dmReferenceUrls(),
         angle: document.getElementById('dm-angle').value.trim(),
         photos: dmIdeaPhotos.map(p => ({ b64: p.b64, media_type: p.media_type }))
       })
@@ -5075,6 +5253,7 @@ function dmUndoRefine() {
   if (dmPromptBefore === null) return;
   document.getElementById('dm-prompt').value = dmPromptBefore;
   dmPromptBefore = null;
+  dmUpdateRefUsage();
   document.getElementById('dm-undo-btn').style.display = 'none';
   const status = document.getElementById('dm-refine-status');
   status.style.color = '#666';
@@ -5112,7 +5291,9 @@ async function dmWritePrompt() {
         model: dmModel,
         seconds: dmSeconds,
         aspect: dmAspect,
-        has_image: !!dmRefUrl
+        has_image: !!dmFirstFrameUrl(),
+        references: dmReferenceUrls().length,
+        reference_images: dmReferenceUrls()
       })
     });
     const d = await vidJson(r);
@@ -5232,7 +5413,8 @@ async function dmGenerate() {
         aspect: dmAspect,
         audio: document.getElementById('dm-audio').checked,
         container: dmFormat,
-        image_url: dmRefUrl
+        image_url: dmFirstFrameUrl(),
+        reference_images: dmReferenceUrls()
       })
     });
     const d = await vidJson(r);
