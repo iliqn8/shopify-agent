@@ -40,7 +40,7 @@ _last_call = [0.0]
 _token = {}
 
 PAGE_SIZE = 200
-MAX_PAGES = 5
+MAX_PAGES = 25     # 5000 products; measured 50s for all 25 on a free account
 
 # /product/list sorts on two fields only. Price order is applied in the
 # browser, over what was found.
@@ -139,6 +139,10 @@ def _get(path, params):
         _throttle()
         r = requests.get(f"{BASE}{path}", params=params,
                          headers={"CJ-Access-Token": token}, timeout=30)
+        if r.status_code == 429:
+            # Points, not QPS: 50,000 a day, 50 per list page, refilled a little every minute.
+            raise CJError("CJ API points are used up for now — they refill gradually through the day. "
+                          "Try again later or scan fewer pages.")
         body = _json(r)
         if body.get("result") or body.get("code") == 200:
             return body.get("data")
@@ -242,10 +246,18 @@ def search(keyword="", sort=DEFAULT_SORT, price_min=None, price_max=None,
     hi = _num(price_max) if price_max not in (None, "") else None
     pages = max(1, min(MAX_PAGES, int(pages or 1)))
 
-    found, seen, scanned, page = [], set(), 0, 0
+    found, seen, scanned, page, data, stopped = [], set(), 0, 0, {}, ""
     dropped = {"keyword": 0, "price": 0, "video": 0}
     for page in range(1, pages + 1):
-        data = _get("/product/list", {**params, "pageNum": page}) or {}
+        try:
+            data = _get("/product/list", {**params, "pageNum": page}) or {}
+        except (CJError, requests.RequestException) as e:
+            # A 25-page scan can run out of points halfway. Keep what was found.
+            if page == 1:
+                raise
+            stopped = f"stopped at page {page}: {e}"
+            page -= 1
+            break
         batch = data.get("list") or []
         scanned += len(batch)
         for raw in batch:
@@ -269,7 +281,7 @@ def search(keyword="", sort=DEFAULT_SORT, price_min=None, price_max=None,
 
     return {"products": found, "scanned": scanned, "pages_scanned": page,
             "cj_total": _int(data.get("total")), "dropped": dropped,
-            "more": scanned >= page * PAGE_SIZE}
+            "more": scanned >= page * PAGE_SIZE, "stopped": stopped}
 
 
 def product_detail(pid):

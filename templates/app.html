@@ -5858,6 +5858,8 @@ let phScoredTraits = [];      // the trait set phScores was made with
 let phTraits = [];            // traits switched on right now
 let phTaste = {};             // product id → feedback row
 let phPresets = [];
+const PH_PAGE = 300;
+let phShown = PH_PAGE;        // cards drawn at once — 5000 in one go freezes the tab
 
 async function phInit() {
   phLoadTaste();
@@ -5939,7 +5941,8 @@ async function phSearch() {
   btn.disabled = true;
   btn.textContent = 'Searching…';
   st.style.color = '#8ab4f8';
-  st.textContent = `Scanning up to ${s.pages * 200} products on CJ…`;
+  st.textContent = `Scanning up to ${s.pages * 200} products on CJ…` +
+    (s.pages > 3 ? ` this takes about ${s.pages * 2} seconds` : '');   // measured: 25 pages in 50s
   try {
     const d = await vidJson(await fetch('/api/cj-search', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(s)
@@ -5948,15 +5951,17 @@ async function phSearch() {
     phProducts = d.products;
     phScores = {};
     phScoredTraits = [];
+    phShown = PH_PAGE;
     document.getElementById('ph-score-status').textContent = '';
     const why = [];
     if (d.dropped.keyword) why.push(`${d.dropped.keyword} without all your words`);
     if (d.dropped.price) why.push(`${d.dropped.price} outside the cost range`);
     if (d.dropped.video) why.push(`${d.dropped.video} without video`);
-    st.style.color = d.products.length ? '#4ade80' : '#fbbf24';
+    st.style.color = d.products.length && !d.stopped ? '#4ade80' : '#fbbf24';
     st.textContent = `${d.products.length ? '✅' : '⚠️'} ${d.products.length} products from ${d.scanned} scanned` +
       (why.length ? ` (skipped ${why.join(', ')})` : '') +
-      (d.more && d.products.length < 20 ? ' · scan more pages to find more' : '');
+      (d.more && d.products.length < 20 && !d.stopped ? ' · scan more pages to find more' : '') +
+      (d.stopped ? ` · ⚠️ CJ ${d.stopped}` : '');
     phRender();
   } catch (e) {
     st.style.color = '#f87171';
@@ -6045,10 +6050,19 @@ function phRender() {
   const list = phVisible();
   const scored = phProducts.filter(p => phScores[p.id]).length;
   document.getElementById('ph-count').textContent = phProducts.length
-    ? `${list.length} shown · ${scored} scored` : '';
-  box.innerHTML = list.length ? list.map(phCard).join('')
+    ? `${list.length} products · ${scored} scored` + (list.length > phShown ? ` · showing first ${phShown}` : '') : '';
+  const more = list.length > phShown
+    ? `<div style="grid-column:1/-1;text-align:center;padding:10px">
+         <button class="btn-sm" onclick="phShowMore()">Show ${Math.min(PH_PAGE, list.length - phShown)} more (${list.length - phShown} left)</button>
+       </div>` : '';
+  box.innerHTML = list.length ? list.slice(0, phShown).map(phCard).join('') + more
     : `<div style="color:#555;font-size:13px">${phProducts.length ? 'Nothing passes the minimum score.' : 'No products — loosen the filters.'}</div>`;
   phUpdateCost();
+}
+
+function phShowMore() {
+  phShown += PH_PAGE;
+  phRender();
 }
 
 function phToScore() {
