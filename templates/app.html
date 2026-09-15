@@ -112,6 +112,7 @@
   <div class="tab" onclick="switchTab('video', this)">🎬 Video Cloner</div>
   <div class="tab" onclick="switchTab('clips', this)">🎞️ Clip Studio</div>
   <div class="tab" onclick="switchTab('dreamina', this)">🌙 Dreamina Studio</div>
+  <div class="tab" onclick="switchTab('hunter', this)">🔎 Product Hunter</div>
 </div>
 
 <!-- Chat Panel -->
@@ -1141,6 +1142,145 @@
   </div>
 </div>
 
+<div class="panel" id="panel-hunter" style="overflow-y:auto">
+  <style>
+    .ph-in { background:#0d0d14; border:1px solid #2a2a3a; border-radius:8px; color:#ddd; padding:7px 10px; font-size:13px; font-family:inherit; width:100%; }
+    .ph-in:focus { outline:none; border-color:#6366f1; }
+    .ph-label { color:#8b8fb8; font-size:11px; display:block; margin-bottom:4px; letter-spacing:.02em; }
+    .ph-chip { background:#1a1a26; border:1px solid #2a2a3a; color:#999; padding:6px 12px; border-radius:20px; cursor:pointer; font-size:12px; user-select:none; }
+    .ph-chip.on { background:#2a1a10; border-color:#f97316; color:#fdba74; }
+    .ph-card { background:#141418; border:1px solid #26262e; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
+    .ph-card img { width:100%; aspect-ratio:1; object-fit:cover; display:block; background:#1c1c22; cursor:pointer; }
+    .ph-badge { position:absolute; top:8px; left:8px; padding:3px 8px; border-radius:8px; font-size:12px; font-weight:700; color:#111; }
+    .ph-bar { height:4px; background:#23232c; border-radius:2px; overflow:hidden; }
+    .ph-bar > div { height:100%; background:#f97316; }
+    .ph-act { background:#1c1c24; border:1px solid #2a2a36; color:#aaa; border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
+    .ph-act:hover { border-color:#6366f1; color:#fff; }
+    .ph-act.like { background:#12301c; border-color:#22c55e; color:#86efac; }
+    .ph-act.dislike { background:#301212; border-color:#ef4444; color:#fca5a5; }
+  </style>
+  <div style="max-width:1140px;margin:0 auto;padding:24px 20px">
+    <h2 style="color:#fff;font-size:18px;margin:0 0 4px">🔎 Product Hunter</h2>
+    <p style="color:#888;font-size:13px;margin:0 0 8px">Search CJ Dropshipping by keyword, filter by listings, price, age and warehouse, then let Claude score the results on the viral traits you pick. Mark products 👍 / 👎 with a short reason — every future score learns from them.</p>
+    <div id="ph-account" style="font-size:12px;margin:0 0 18px;color:#666"></div>
+
+    <div style="display:grid;gap:16px">
+      <!-- Search -->
+      <div style="background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="ph-keyword" class="ph-in" style="flex:1;min-width:220px" placeholder="Keyword, e.g. pet hair remover — or leave empty to browse">
+          <select id="ph-sort" class="ph-in" style="width:auto"></select>
+          <button class="btn" id="ph-search-btn" onclick="phSearch()">🔎 Search</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px">
+          <div>
+            <label class="ph-label" title="How many CJ users added this product to their store. CJ does not publish order counts — this is the closest signal.">LISTINGS MIN ⓘ</label>
+            <input id="ph-listed-min" class="ph-in" type="number" min="0" placeholder="e.g. 50">
+          </div>
+          <div>
+            <label class="ph-label">LISTINGS MAX</label>
+            <input id="ph-listed-max" class="ph-in" type="number" min="0" placeholder="e.g. 2000">
+          </div>
+          <div>
+            <label class="ph-label">COST MIN ($)</label>
+            <input id="ph-price-min" class="ph-in" type="number" min="0" step="0.5">
+          </div>
+          <div>
+            <label class="ph-label">COST MAX ($)</label>
+            <input id="ph-price-max" class="ph-in" type="number" min="0" step="0.5">
+          </div>
+          <div>
+            <label class="ph-label">ADDED TO CJ WITHIN</label>
+            <select id="ph-days" class="ph-in">
+              <option value="">Any time</option><option value="7">7 days</option><option value="14">14 days</option>
+              <option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option>
+              <option value="180">6 months</option><option value="365">1 year</option>
+            </select>
+          </div>
+          <div>
+            <label class="ph-label">WAREHOUSE</label>
+            <select id="ph-country" class="ph-in"></select>
+          </div>
+          <div>
+            <label class="ph-label" title="Each page is 200 products and about one second on a free CJ account. CJ's keyword search matches ANY word, so only products whose name has ALL your words are kept — a narrow keyword needs more pages.">PAGES TO SCAN ⓘ</label>
+            <select id="ph-pages" class="ph-in"></select>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:10px">
+          <label style="color:#aaa;font-size:12px;cursor:pointer"><input type="checkbox" id="ph-free-ship"> Free shipping</label>
+          <label style="color:#aaa;font-size:12px;cursor:pointer"><input type="checkbox" id="ph-video"> Has product video</label>
+          <span style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <select id="ph-presets" class="ph-in" style="width:auto;max-width:220px" onchange="phUsePreset()">
+              <option value="">📁 Presets…</option>
+            </select>
+            <button class="btn-sm" onclick="phSavePreset()" title="Save these filters, traits and criteria under a name">💾 Save preset</button>
+            <button class="btn-sm" id="ph-del-preset" onclick="phDeletePreset()" style="display:none">🗑</button>
+          </span>
+        </div>
+        <div id="ph-search-status" style="color:#666;font-size:12px;margin-top:8px"></div>
+      </div>
+
+      <!-- Viral traits -->
+      <div style="background:#1a140f;border:1px solid #3a2a1a;border-radius:12px;padding:14px">
+        <label style="color:#fdba74;font-size:12px;display:block;margin-bottom:8px">🔥 VIRAL TRAITS <span style="color:#777">— Claude scores each product 0–10 on the ones you switch on</span></label>
+        <div id="ph-traits" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        <textarea id="ph-custom" rows="2" class="ph-in" style="margin-top:10px;resize:vertical"
+          placeholder="Anything else to look for, in your words — e.g. works for a 25–45 female audience, no electronics, can be shown in a kitchen"></textarea>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px">
+          <button class="btn-sm" id="ph-score-btn" onclick="phScore()" style="border-color:#f97316;color:#fdba74">🔥 Score results with AI</button>
+          <span id="ph-score-cost" style="color:#777;font-size:11px"></span>
+          <span id="ph-score-status" style="color:#666;font-size:12px"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:22px 0 10px">
+      <h2 style="color:#fff;font-size:16px;margin:0">Results</h2>
+      <span id="ph-count" style="color:#777;font-size:12px"></span>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <label class="ph-label" style="margin:0">MIN SCORE</label>
+        <input id="ph-min-score" class="ph-in" type="number" min="0" max="100" style="width:70px" oninput="phRender()">
+        <select id="ph-view" class="ph-in" style="width:auto" onchange="phRender()">
+          <option value="search">Order: as searched</option>
+          <option value="score">Order: viral score</option>
+          <option value="listed">Order: most listings</option>
+          <option value="newest">Order: newest</option>
+          <option value="price">Order: cheapest</option>
+        </select>
+      </span>
+    </div>
+    <div id="ph-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">
+      <div style="color:#555;font-size:13px">Search to see products.</div>
+    </div>
+
+    <!-- Taste -->
+    <div style="margin-top:36px;border-top:1px solid #2a2a2a;padding-top:20px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <h2 style="color:#fff;font-size:16px;margin:0">🧠 Your taste</h2>
+        <span id="ph-taste-count" style="color:#777;font-size:12px"></span>
+        <button class="btn-sm" style="margin-left:auto" onclick="phLoadTaste()">↻ Refresh</button>
+      </div>
+      <p style="color:#777;font-size:12px;margin:0 0 10px">Products you marked. The latest 20 of each go to Claude as examples every time it scores — your notes matter more than the thumbs.</p>
+      <div id="ph-taste" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
+  </div>
+
+  <!-- Details modal -->
+  <div id="ph-modal" hidden onclick="if (event.target === this) phCloseModal()"
+    style="position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:50;overflow-y:auto;padding:30px 16px">
+    <div style="max-width:760px;margin:0 auto;background:#15151b;border:1px solid #2a2a36;border-radius:14px;padding:18px">
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <h3 id="ph-modal-title" style="color:#fff;font-size:16px;margin:0;flex:1"></h3>
+        <button class="btn-sm" onclick="phCloseModal()">✕</button>
+      </div>
+      <div id="ph-modal-body" style="margin-top:12px;color:#ccc;font-size:13px"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 let sending = false;
 let networkUrl = '';
@@ -1231,6 +1371,7 @@ function switchTab(tab, el) {
   if (tab === 'video') vidInit();
   if (tab === 'clips') clipInit();
   if (tab === 'dreamina') dmInit();
+  if (tab === 'hunter') phInit();
 }
 
 async function loadImageGen() {
@@ -5705,6 +5846,418 @@ async function dmDelete(id) {
   if (!confirm('Delete this clip?')) return;
   await fetch('/api/dreamina-history/' + id, { method: 'DELETE' });
   dmLoadHistory();
+}
+
+// ── Product Hunter (CJ Dropshipping) ──────────────────────────────────────
+
+let phOpts = null;
+let phInited = false;
+let phProducts = [];          // current search results, in CJ's order
+let phScores = {};            // product id → {scores, overall, hook, why, risks}
+let phScoredTraits = [];      // the trait set phScores was made with
+let phTraits = [];            // traits switched on right now
+let phTaste = {};             // product id → feedback row
+let phPresets = [];
+
+async function phInit() {
+  phLoadTaste();
+  phLoadPresets();
+  if (phInited) return;
+  phInited = true;
+  document.getElementById('ph-keyword').addEventListener('keydown', e => {
+    if (e.key === 'Enter') phSearch();
+  });
+  document.getElementById('ph-custom').addEventListener('input', phUpdateCost);
+  const acc = document.getElementById('ph-account');
+  try {
+    phOpts = await vidJson(await fetch('/api/cj-options'));
+    acc.textContent = phOpts.account_message || '';
+    acc.style.color = phOpts.account_ok ? '#4ade80' : '#f87171';
+    const fill = (id, list, value) => {
+      const sel = document.getElementById(id);
+      sel.innerHTML = list.map(o => `<option value="${pbEsc(o.key)}">${pbEsc(o.label)}</option>`).join('');
+      if (value !== undefined) sel.value = value;
+    };
+    fill('ph-sort', phOpts.sorts, phOpts.default_sort);
+    fill('ph-country', phOpts.countries, '');
+    const pages = [];
+    for (let i = 1; i <= phOpts.max_pages; i++) pages.push({ key: String(i), label: `${i} (${i * 200} products)` });
+    fill('ph-pages', pages, '1');
+    phTraits = phOpts.default_traits.slice();
+    phDrawTraits();
+  } catch (e) {
+    acc.textContent = 'Could not load options: ' + e.message;
+    acc.style.color = '#f87171';
+  }
+}
+
+function phDrawTraits() {
+  const box = document.getElementById('ph-traits');
+  box.innerHTML = phOpts.traits.map(t =>
+    `<span class="ph-chip ${phTraits.includes(t.key) ? 'on' : ''}" title="${pbEsc(t.hint)}" onclick="phToggleTrait('${t.key}')">${pbEsc(t.label)}</span>`
+  ).join('');
+  phUpdateCost();
+}
+
+function phToggleTrait(key) {
+  if (phTraits.includes(key)) phTraits = phTraits.filter(k => k !== key);
+  else phTraits.push(key);
+  phDrawTraits();
+}
+
+function phVal(id) { return document.getElementById(id).value.trim(); }
+
+function phSettings() {
+  return {
+    keyword: phVal('ph-keyword'), sort: phVal('ph-sort'),
+    listed_min: phVal('ph-listed-min'), listed_max: phVal('ph-listed-max'),
+    price_min: phVal('ph-price-min'), price_max: phVal('ph-price-max'),
+    days: phVal('ph-days'), country: phVal('ph-country'),
+    pages: phVal('ph-pages'),
+    free_shipping: document.getElementById('ph-free-ship').checked,
+    video_only: document.getElementById('ph-video').checked,
+    traits: phTraits.slice(), custom: phVal('ph-custom'),
+  };
+}
+
+function phApplySettings(s) {
+  const set = (id, v) => { if (v !== undefined && v !== null) document.getElementById(id).value = v; };
+  set('ph-keyword', s.keyword); set('ph-sort', s.sort);
+  set('ph-listed-min', s.listed_min); set('ph-listed-max', s.listed_max);
+  set('ph-price-min', s.price_min); set('ph-price-max', s.price_max);
+  set('ph-days', s.days); set('ph-country', s.country);
+  set('ph-pages', s.pages); set('ph-custom', s.custom);
+  document.getElementById('ph-free-ship').checked = !!s.free_shipping;
+  document.getElementById('ph-video').checked = !!s.video_only;
+  if (Array.isArray(s.traits)) { phTraits = s.traits.slice(); phDrawTraits(); }
+}
+
+async function phSearch() {
+  const btn = document.getElementById('ph-search-btn');
+  const st = document.getElementById('ph-search-status');
+  const s = phSettings();
+  btn.disabled = true;
+  btn.textContent = 'Searching…';
+  st.style.color = '#8ab4f8';
+  st.textContent = `Scanning up to ${s.pages * 200} products on CJ…`;
+  try {
+    const d = await vidJson(await fetch('/api/cj-search', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(s)
+    }));
+    if (d.error) throw new Error(d.error);
+    phProducts = d.products;
+    phScores = {};
+    phScoredTraits = [];
+    document.getElementById('ph-score-status').textContent = '';
+    const why = [];
+    if (d.dropped.keyword) why.push(`${d.dropped.keyword} without all your words`);
+    if (d.dropped.price) why.push(`${d.dropped.price} outside the cost range`);
+    if (d.dropped.video) why.push(`${d.dropped.video} without video`);
+    st.style.color = d.products.length ? '#4ade80' : '#fbbf24';
+    st.textContent = `${d.products.length ? '✅' : '⚠️'} ${d.products.length} products from ${d.scanned} scanned` +
+      (why.length ? ` (skipped ${why.join(', ')})` : '') +
+      (d.more && d.products.length < 20 ? ' · scan more pages to find more' : '');
+    phRender();
+  } catch (e) {
+    st.style.color = '#f87171';
+    st.textContent = '❌ ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔎 Search';
+  }
+}
+
+function phAge(ms) {
+  if (!ms) return '';
+  const days = Math.floor((Date.now() - ms) / 86400000);
+  if (days < 1) return 'today';
+  if (days < 60) return days + 'd ago';
+  if (days < 730) return Math.round(days / 30) + 'mo ago';
+  return Math.round(days / 365) + 'y ago';
+}
+
+function phScoreColour(n) {
+  return n >= 75 ? '#4ade80' : n >= 55 ? '#facc15' : n >= 35 ? '#fb923c' : '#9ca3af';
+}
+
+function phVisible() {
+  const min = parseInt(phVal('ph-min-score'), 10);
+  let list = phProducts.slice();
+  if (!isNaN(min)) list = list.filter(p => phScores[p.id] && phScores[p.id].overall >= min);
+  const view = phVal('ph-view');
+  const score = p => phScores[p.id] ? phScores[p.id].overall : -1;
+  if (view === 'score') list.sort((a, b) => score(b) - score(a));
+  if (view === 'listed') list.sort((a, b) => b.listed - a.listed);
+  if (view === 'newest') list.sort((a, b) => b.created_ms - a.created_ms);
+  const price = p => p.price_min == null ? 1e9 : p.price_min;   // unknown price sorts last
+  if (view === 'price') list.sort((a, b) => price(a) - price(b));
+  return list;
+}
+
+function phTraitLabel(key) {
+  const t = phOpts && phOpts.traits.find(x => x.key === key);
+  return t ? t.label : key;
+}
+
+function phCard(p) {
+  const sc = phScores[p.id];
+  const taste = phTaste[p.id];
+  const verdict = taste ? taste.verdict : '';
+  const badge = sc ? `<span class="ph-badge" style="background:${phScoreColour(sc.overall)}">🔥 ${sc.overall}</span>` : '';
+  const video = p.has_video ? '<span class="ph-badge" style="left:auto;right:8px;background:#c7d2fe">▶ video</span>' : '';
+  let scoreBlock = '';
+  if (sc) {
+    const bars = Object.keys(sc.scores).map(k =>
+      `<div style="display:grid;grid-template-columns:1fr 70px 18px;gap:6px;align-items:center;font-size:11px;color:#999">
+         <span>${pbEsc(phTraitLabel(k))}</span><div class="ph-bar"><div style="width:${sc.scores[k] * 10}%"></div></div><span>${sc.scores[k]}</span>
+       </div>`).join('');
+    scoreBlock = `<div style="display:flex;flex-direction:column;gap:3px;margin-top:8px">${bars}</div>
+      <div style="margin-top:8px;font-size:12px;color:#fdba74;font-style:italic">🎬 ${pbEsc(sc.hook)}</div>
+      <div style="margin-top:4px;font-size:12px;color:#bbb">${pbEsc(sc.why)}</div>
+      <div style="margin-top:4px;font-size:11px;color:#f87171">⚠ ${pbEsc(sc.risks)}</div>`;
+  }
+  return `<div class="ph-card">
+    <div style="position:relative">
+      <img src="${pbEsc(p.image)}" loading="lazy" referrerpolicy="no-referrer" onclick="phDetails('${pbEsc(p.id)}')" alt="">
+      ${badge}${video}
+    </div>
+    <div style="padding:10px;display:flex;flex-direction:column;flex:1">
+      <div style="color:#eee;font-size:13px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" title="${pbEsc(p.name)}">${pbEsc(p.name)}</div>
+      <div style="color:#666;font-size:11px;margin-top:3px">${pbEsc(p.category)}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:#aaa">
+        <span>💲${pbEsc(p.price)}</span>
+        <span title="Stores that added it on CJ">📦 ${Number(p.listed).toLocaleString()} listings</span>
+        <span>🗓 ${phAge(p.created_ms)}</span>
+      </div>
+      ${scoreBlock}
+      <div style="display:flex;gap:6px;margin-top:auto;padding-top:10px">
+        <button class="ph-act ${verdict === 'like' ? 'like' : ''}" onclick="phMark('${pbEsc(p.id)}','like')" title="More like this">👍</button>
+        <button class="ph-act ${verdict === 'dislike' ? 'dislike' : ''}" onclick="phMark('${pbEsc(p.id)}','dislike')" title="Less like this">👎</button>
+        <button class="ph-act" onclick="phDetails('${pbEsc(p.id)}')">🔍 Details</button>
+        <a class="ph-act" style="margin-left:auto;text-decoration:none" href="${pbEsc(p.url)}" target="_blank" rel="noopener">CJ ↗</a>
+      </div>
+    </div>
+  </div>`;
+}
+
+function phRender() {
+  const box = document.getElementById('ph-results');
+  const list = phVisible();
+  const scored = phProducts.filter(p => phScores[p.id]).length;
+  document.getElementById('ph-count').textContent = phProducts.length
+    ? `${list.length} shown · ${scored} scored` : '';
+  box.innerHTML = list.length ? list.map(phCard).join('')
+    : `<div style="color:#555;font-size:13px">${phProducts.length ? 'Nothing passes the minimum score.' : 'No products — loosen the filters.'}</div>`;
+  phUpdateCost();
+}
+
+function phToScore() {
+  const sameTraits = phScoredTraits.length === phTraits.length && phTraits.every(t => phScoredTraits.includes(t));
+  const pool = phVisible().filter(p => !sameTraits || !phScores[p.id]);
+  return pool.slice(0, phOpts ? phOpts.max_products : 60);
+}
+
+function phUpdateCost() {
+  const el = document.getElementById('ph-score-cost');
+  if (!phOpts || !phProducts.length) { el.textContent = ''; return; }
+  const n = phToScore().length;
+  el.textContent = n
+    ? `${n} product${n === 1 ? '' : 's'} · about $${(n * phOpts.usd_per_product).toFixed(2)}` +
+      (phVisible().length > phOpts.max_products ? ` (first ${phOpts.max_products} in the current order)` : '')
+    : 'All shown products are scored';
+}
+
+async function phScore() {
+  if (!phProducts.length) { alert('Search first.'); return; }
+  if (!phTraits.length) { alert('Switch on at least one viral trait.'); return; }
+  const sameTraits = phScoredTraits.length === phTraits.length && phTraits.every(t => phScoredTraits.includes(t));
+  if (!sameTraits) phScores = {};
+  const batch = phToScore();
+  if (!batch.length) { alert('Everything shown is already scored with these traits.'); return; }
+
+  const btn = document.getElementById('ph-score-btn');
+  const st = document.getElementById('ph-score-status');
+  btn.disabled = true;
+  st.style.color = '#8ab4f8';
+  st.textContent = 'Starting…';
+  const traits = phTraits.slice();
+  try {
+    const d = await vidJson(await fetch('/api/cj-score-start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ products: batch, traits, custom: phVal('ph-custom') })
+    }));
+    if (d.error) throw new Error(d.error);
+    vidPoll(d.job_id, t => { st.textContent = t; }, ev => {
+      btn.disabled = false;
+      if (ev.error) { st.style.color = '#f87171'; st.textContent = '❌ ' + ev.error; return; }
+      Object.assign(phScores, ev.results);
+      phScoredTraits = traits;
+      document.getElementById('ph-view').value = 'score';
+      st.style.color = ev.warning ? '#fbbf24' : '#4ade80';
+      st.textContent = `✅ Scored ${Object.keys(ev.results).length} · cost $${ev.usd.toFixed(3)}` +
+        (ev.warning ? ' · ' + ev.warning : '');
+      phRender();
+    });
+  } catch (e) {
+    btn.disabled = false;
+    st.style.color = '#f87171';
+    st.textContent = '❌ ' + e.message;
+  }
+}
+
+// ── Taste (👍 / 👎) ──
+
+async function phLoadTaste() {
+  try {
+    const rows = await vidJson(await fetch('/api/cj-feedback'));
+    phTaste = {};
+    rows.forEach(r => { phTaste[r.pid] = r; });
+    phDrawTaste(rows);
+    if (phProducts.length) phRender();
+  } catch (e) { console.error('taste', e); }
+}
+
+function phDrawTaste(rows) {
+  const likes = rows.filter(r => r.verdict === 'like').length;
+  document.getElementById('ph-taste-count').textContent = rows.length
+    ? `${likes} 👍 · ${rows.length - likes} 👎` : '';
+  document.getElementById('ph-taste').innerHTML = rows.length ? rows.map(r =>
+    `<div style="display:flex;gap:10px;align-items:center;background:#141418;border:1px solid #24242c;border-radius:8px;padding:6px 10px">
+       <span>${r.verdict === 'like' ? '👍' : '👎'}</span>
+       <img src="${pbEsc(r.image)}" referrerpolicy="no-referrer" style="width:40px;height:40px;object-fit:cover;border-radius:6px" alt="">
+       <div style="flex:1;min-width:0">
+         <div style="color:#ddd;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${pbEsc(r.name)}</div>
+         <div style="color:#888;font-size:11px">${r.note ? '“' + pbEsc(r.note) + '”' : '<span style="color:#555">no note</span>'}</div>
+       </div>
+       <button class="btn-sm" onclick="phEditNote('${pbEsc(r.pid)}')" title="Edit the reason">✏️</button>
+       <button class="btn-sm" onclick="phUnmark('${pbEsc(r.pid)}')" title="Forget this one">🗑</button>
+     </div>`).join('')
+    : '<div style="color:#555;font-size:13px">Nothing marked yet. Use 👍 / 👎 on a product.</div>';
+}
+
+async function phSaveMark(product, verdict, note) {
+  const d = await vidJson(await fetch('/api/cj-feedback', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ product, verdict, note })
+  }));
+  if (d.error) throw new Error(d.error);
+  await phLoadTaste();
+}
+
+async function phMark(pid, verdict) {
+  const p = phProducts.find(x => x.id === pid);
+  if (!p) return;
+  if (phTaste[pid] && phTaste[pid].verdict === verdict) { phUnmark(pid); return; }
+  const note = prompt(verdict === 'like'
+    ? 'Why is this a good one? (optional — Claude learns from your reason)'
+    : 'Why not? (optional — Claude learns from your reason)', '');
+  if (note === null) return;
+  try { await phSaveMark(p, verdict, note); } catch (e) { alert(e.message); }
+}
+
+async function phEditNote(pid) {
+  const row = phTaste[pid];
+  if (!row) return;
+  const note = prompt('Reason', row.note || '');
+  if (note === null) return;
+  const product = Object.assign({ id: pid, name: row.name, image: row.image, category: row.category,
+                                  price: row.price, listed: row.listed }, row.product || {});
+  try { await phSaveMark(product, row.verdict, note); } catch (e) { alert(e.message); }
+}
+
+async function phUnmark(pid) {
+  await fetch('/api/cj-feedback/' + encodeURIComponent(pid), { method: 'DELETE' });
+  phLoadTaste();
+}
+
+// ── Presets ──
+
+async function phLoadPresets() {
+  try {
+    phPresets = await vidJson(await fetch('/api/cj-presets'));
+    const sel = document.getElementById('ph-presets');
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">📁 Presets…</option>' +
+      phPresets.map(p => `<option value="${p.id}">${pbEsc(p.title)}</option>`).join('');
+    if (phPresets.some(p => String(p.id) === keep)) sel.value = keep;
+    document.getElementById('ph-del-preset').style.display = sel.value ? '' : 'none';
+  } catch (e) { console.error('presets', e); }
+}
+
+function phUsePreset() {
+  const id = phVal('ph-presets');
+  document.getElementById('ph-del-preset').style.display = id ? '' : 'none';
+  const p = phPresets.find(x => String(x.id) === id);
+  if (!p) return;
+  try { phApplySettings(JSON.parse(p.prompt)); } catch (e) { alert('This preset is damaged.'); }
+}
+
+async function phSavePreset() {
+  const current = phPresets.find(x => String(x.id) === phVal('ph-presets'));
+  const title = prompt('Preset name', current ? current.title : '');
+  if (!title || !title.trim()) return;
+  const d = await vidJson(await fetch('/api/cj-presets', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: title.trim(), settings: phSettings() })
+  }));
+  if (d.error) { alert(d.error); return; }
+  await phLoadPresets();
+  document.getElementById('ph-presets').value = String(d.id);
+  document.getElementById('ph-del-preset').style.display = '';
+}
+
+async function phDeletePreset() {
+  const id = phVal('ph-presets');
+  if (!id || !confirm('Delete this preset?')) return;
+  await fetch('/api/cj-presets/' + id, { method: 'DELETE' });
+  document.getElementById('ph-presets').value = '';
+  phLoadPresets();
+}
+
+// ── Details ──
+
+function phCloseModal() { document.getElementById('ph-modal').hidden = true; }
+
+function phPlainText(html) {
+  // CJ descriptions are supplier HTML. Parse without rendering it, keep the words.
+  const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+  return (doc.body.textContent || '').trim();
+}
+
+async function phDetails(pid) {
+  const p = phProducts.find(x => x.id === pid) || {};
+  const modal = document.getElementById('ph-modal');
+  const body = document.getElementById('ph-modal-body');
+  document.getElementById('ph-modal-title').textContent = p.name || 'Product';
+  body.innerHTML = '<div style="color:#8ab4f8">Loading from CJ…</div>';
+  modal.hidden = false;
+  try {
+    const d = await vidJson(await fetch('/api/cj-product/' + encodeURIComponent(pid)));
+    if (d.error) throw new Error(d.error);
+    const imgs = (d.images.length ? d.images : [p.image]).map(u =>
+      `<a href="${pbEsc(u)}" target="_blank" rel="noopener"><img src="${pbEsc(u)}" referrerpolicy="no-referrer" style="width:110px;height:110px;object-fit:cover;border-radius:8px" alt=""></a>`).join('');
+    const variants = d.variants.length ? `<div style="margin-top:12px"><div class="ph-label">VARIANTS (${d.variants.length})</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${d.variants.map(v =>
+        `<span style="background:#1c1c24;border:1px solid #2a2a36;border-radius:6px;padding:3px 8px;font-size:12px">${pbEsc(v.name || v.sku)} · $${pbEsc(v.price)}</span>`).join('')}</div></div>` : '';
+    const sc = phScores[pid];
+    body.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:8px">${imgs}</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;color:#aaa;font-size:12px">
+        <span>💲${pbEsc(d.price || p.price)}</span><span>📦 ${Number(d.listed || p.listed || 0).toLocaleString()} listings</span>
+        <span>⚖ ${pbEsc(d.weight)} g</span><span>${pbEsc(d.category || p.category)}</span>
+        <a href="${pbEsc(d.url)}" target="_blank" rel="noopener" style="color:#a5b4fc">Open on CJ ↗</a>
+      </div>
+      ${sc ? `<div style="margin-top:12px;background:#1a140f;border:1px solid #3a2a1a;border-radius:8px;padding:10px">
+        <b style="color:${phScoreColour(sc.overall)}">🔥 ${sc.overall}/100</b>
+        <div style="color:#fdba74;font-style:italic;margin-top:4px">🎬 ${pbEsc(sc.hook)}</div>
+        <div style="margin-top:4px">${pbEsc(sc.why)}</div>
+        <div style="color:#f87171;margin-top:4px;font-size:12px">⚠ ${pbEsc(sc.risks)}</div></div>` : ''}
+      ${variants}
+      <div style="margin-top:12px"><div class="ph-label">DESCRIPTION</div>
+        <div style="white-space:pre-wrap;color:#bbb;font-size:12px;max-height:320px;overflow-y:auto">${pbEsc(phPlainText(d.description)) || '—'}</div></div>`;
+  } catch (e) {
+    body.innerHTML = `<div style="color:#f87171">❌ ${pbEsc(e.message)}</div>`;
+  }
 }
 
 </script>

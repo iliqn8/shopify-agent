@@ -1,5 +1,6 @@
 .env
 knowledge.db
+cj_token.json
 get_token.py
 uploads/
 generated_images/

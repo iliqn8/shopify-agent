@@ -79,6 +79,20 @@ def init_db():
         filename TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    # Product Hunter: products the user judged 👍/👎. Fed back to Claude as
+    # examples of their taste, which is what "training" means in that tab.
+    conn.execute("""CREATE TABLE IF NOT EXISTS cj_feedback (
+        pid TEXT PRIMARY KEY,
+        verdict TEXT NOT NULL,
+        name TEXT,
+        image TEXT,
+        category TEXT,
+        price TEXT,
+        listed INTEGER,
+        note TEXT,
+        product_json TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     conn.commit()
     for table, col, definition in [
         ("knowledge", "category", "TEXT NOT NULL DEFAULT 'General'"),
@@ -321,6 +335,47 @@ def _video_row(r):
     return {"id": r[0], "title": r[1], "product_name": r[2], "recipe_json": r[3],
             "video_model": r[4], "filename": r[5], "scene_urls": r[6],
             "clips_json": r[7], "status": r[8], "created_at": r[9]}
+
+
+# ── Product Hunter ─────────────────────────────────────────────────────────
+
+def save_cj_feedback(product, verdict, note=""):
+    """Mark a product 👍 or 👎. Marking it again replaces the verdict and note."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""INSERT INTO cj_feedback (pid, verdict, name, image, category, price, listed, note, product_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pid) DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
+                        name = excluded.name, image = excluded.image, category = excluded.category,
+                        price = excluded.price, listed = excluded.listed,
+                        product_json = excluded.product_json, created_at = CURRENT_TIMESTAMP""",
+                 (str(product["id"]), verdict, product.get("name"), product.get("image"),
+                  product.get("category"), str(product.get("price") or ""),
+                  int(product.get("listed") or 0), note or "", json.dumps(product)))
+    conn.commit()
+    conn.close()
+
+
+def list_cj_feedback():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT pid, verdict, name, image, category, price, listed, note, product_json, created_at "
+                        "FROM cj_feedback ORDER BY created_at DESC").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        try:
+            product = json.loads(r[8] or "{}")
+        except ValueError:
+            product = {}
+        out.append({"pid": r[0], "verdict": r[1], "name": r[2], "image": r[3], "category": r[4],
+                    "price": r[5], "listed": r[6], "note": r[7], "product": product, "created_at": r[9]})
+    return out
+
+
+def delete_cj_feedback(pid):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM cj_feedback WHERE pid = ?", (str(pid),))
+    conn.commit()
+    conn.close()
 
 
 # ── Clip Studio ────────────────────────────────────────────────────────────

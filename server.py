@@ -1758,6 +1758,110 @@ def set_local_agent():
     return jsonify({"ok": True})
 
 
+# ── Product Hunter (CJ Dropshipping) ───────────────────────────────────────
+# Search runs synchronously — at most five pages, about a second each on a free
+# CJ account. Scoring is a job on the shared video poller, because Claude on
+# 60 products with photos takes long enough to want progress lines.
+
+@app.route("/api/cj-options")
+def cj_options():
+    import cj_client
+    import viral_scout
+    ok, msg = cj_client.check_account()
+    return jsonify({
+        **viral_scout.options(),
+        "sorts": [{"key": k, "label": v["label"]} for k, v in cj_client.SORTS.items()],
+        "default_sort": cj_client.DEFAULT_SORT,
+        "countries": [{"key": k, "label": v} for k, v in cj_client.COUNTRIES.items()],
+        "max_pages": cj_client.MAX_PAGES,
+        "account_ok": ok, "account_message": msg,
+    })
+
+
+@app.route("/api/cj-search", methods=["POST"])
+def cj_search():
+    import cj_client
+    d = request.json or {}
+    try:
+        return jsonify(cj_client.search(
+            keyword=(d.get("keyword") or "").strip(),
+            sort=d.get("sort") or cj_client.DEFAULT_SORT,
+            price_min=d.get("price_min"), price_max=d.get("price_max"),
+            listed_min=d.get("listed_min"), listed_max=d.get("listed_max"),
+            days=d.get("days") or None,
+            country=d.get("country") or "", free_shipping=bool(d.get("free_shipping")),
+            video_only=bool(d.get("video_only")), pages=d.get("pages") or 1,
+        ))
+    except cj_client.CJError as e:
+        return jsonify({"error": str(e)}), 400
+    except _req.RequestException as e:
+        return jsonify({"error": f"Could not reach CJ: {type(e).__name__}"}), 502
+
+
+@app.route("/api/cj-product/<pid>")
+def cj_product(pid):
+    import cj_client
+    try:
+        return jsonify(cj_client.product_detail(pid))
+    except cj_client.CJError as e:
+        return jsonify({"error": str(e)}), 400
+    except _req.RequestException as e:
+        return jsonify({"error": f"Could not reach CJ: {type(e).__name__}"}), 502
+
+
+@app.route("/api/cj-score-start", methods=["POST"])
+def cj_score_start():
+    import uuid as _uuid_cj
+    import viral_scout
+    d = request.json or {}
+    products = d.get("products") or []
+    if not products:
+        return jsonify({"error": "Search first — there is nothing to score."}), 400
+    job_id = str(_uuid_cj.uuid4())
+    feedback = kb.list_cj_feedback()
+    _run_video_job(job_id, lambda: viral_scout.score_stream(
+        products, d.get("traits") or [], d.get("custom") or "", feedback))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/cj-feedback", methods=["GET", "POST"])
+def cj_feedback():
+    if request.method == "GET":
+        return jsonify(kb.list_cj_feedback())
+    d = request.json or {}
+    product = d.get("product") or {}
+    verdict = d.get("verdict")
+    if not product.get("id") or verdict not in ("like", "dislike"):
+        return jsonify({"error": "Need a product and a verdict."}), 400
+    kb.save_cj_feedback(product, verdict, (d.get("note") or "").strip())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cj-feedback/<pid>", methods=["DELETE"])
+def delete_cj_feedback(pid):
+    kb.delete_cj_feedback(pid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/cj-presets", methods=["GET", "POST"])
+def cj_presets():
+    """Saved search + trait setups. Stored as JSON in saved_prompts, kind 'cj_preset'."""
+    if request.method == "GET":
+        return jsonify(kb.list_prompts("cj_preset"))
+    d = request.json or {}
+    title = (d.get("title") or "").strip()
+    if not title or not isinstance(d.get("settings"), dict):
+        return jsonify({"error": "Name the preset."}), 400
+    pid = kb.save_prompt(title, json.dumps(d["settings"]), kind="cj_preset")
+    return jsonify({"ok": True, "id": pid})
+
+
+@app.route("/api/cj-presets/<int:pid>", methods=["DELETE"])
+def delete_cj_preset(pid):
+    kb.delete_prompt(pid)
+    return jsonify({"ok": True})
+
+
 # ── Image Generator Proxy ──────────────────────────────────────────────────
 
 IMG_GEN = "http://localhost:5001"
