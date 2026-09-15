@@ -1169,7 +1169,7 @@
       <div style="background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px">
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <input id="ph-keyword" class="ph-in" style="flex:1;min-width:220px" placeholder="Keyword, e.g. pet hair remover — or leave empty to browse">
-          <select id="ph-sort" class="ph-in" style="width:auto"></select>
+          <select id="ph-sort" class="ph-in" style="width:auto" onchange="phSortChanged()"></select>
           <button class="btn" id="ph-search-btn" onclick="phSearch()">🔎 Search</button>
         </div>
 
@@ -1247,6 +1247,7 @@
           <option value="search">Order: as searched</option>
           <option value="score">Order: viral score</option>
           <option value="listed">Order: most listings</option>
+          <option value="listed_asc">Order: fewest listings</option>
           <option value="newest">Order: newest</option>
           <option value="price">Order: cheapest</option>
         </select>
@@ -5952,9 +5953,11 @@ async function phSearch() {
     phScores = {};
     phScoredTraits = [];
     phShown = PH_PAGE;
+    document.getElementById('ph-view').value = 'search';   // a leftover "viral score" order hides CJ's order
     document.getElementById('ph-score-status').textContent = '';
     const why = [];
     if (d.dropped.keyword) why.push(`${d.dropped.keyword} without all your words`);
+    if (d.dropped.listed) why.push(`${d.dropped.listed} above your max listings`);
     if (d.dropped.price) why.push(`${d.dropped.price} outside the cost range`);
     if (d.dropped.video) why.push(`${d.dropped.video} without video`);
     st.style.color = d.products.length && !d.stopped ? '#4ade80' : '#fbbf24';
@@ -5993,6 +5996,7 @@ function phVisible() {
   const score = p => phScores[p.id] ? phScores[p.id].overall : -1;
   if (view === 'score') list.sort((a, b) => score(b) - score(a));
   if (view === 'listed') list.sort((a, b) => b.listed - a.listed);
+  if (view === 'listed_asc') list.sort((a, b) => a.listed - b.listed);
   if (view === 'newest') list.sort((a, b) => b.created_ms - a.created_ms);
   const price = p => p.price_min == null ? 1e9 : p.price_min;   // unknown price sorts last
   if (view === 'price') list.sort((a, b) => price(a) - price(b));
@@ -6058,6 +6062,18 @@ function phRender() {
   box.innerHTML = list.length ? list.slice(0, phShown).map(phCard).join('') + more
     : `<div style="color:#555;font-size:13px">${phProducts.length ? 'Nothing passes the minimum score.' : 'No products — loosen the filters.'}</div>`;
   phUpdateCost();
+}
+
+// The search sort decides WHICH products CJ hands over; changing it after a
+// search should still visibly reorder what is already on screen.
+function phSortChanged() {
+  if (!phProducts.length) return;
+  document.getElementById('ph-view').value = phVal('ph-sort');
+  phShown = PH_PAGE;
+  phRender();
+  const st = document.getElementById('ph-search-status');
+  st.style.color = '#8ab4f8';
+  st.textContent = 'Reordered what is on screen — press Search to fetch this order from CJ.';
 }
 
 function phShowMore() {

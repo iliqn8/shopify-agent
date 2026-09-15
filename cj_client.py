@@ -229,10 +229,12 @@ def search(keyword="", sort=DEFAULT_SORT, price_min=None, price_max=None,
     words = _words(keyword)
     if keyword.strip():
         params["productNameEn"] = keyword.strip()
+    # minListedNum works on the server. maxListedNum does NOT — measured, CJ
+    # treats it as another minimum (max 150 returned 198 of 200 above 150), so
+    # it is never sent and the ceiling is applied below instead.
     if listed_min not in (None, ""):
         params["minListedNum"] = _int(listed_min)
-    if listed_max not in (None, ""):
-        params["maxListedNum"] = _int(listed_max)
+    listed_hi = _int(listed_max) if listed_max not in (None, "") else None
     if days:
         fmt = "%Y-%m-%d %H:%M:%S"
         params["createTimeFrom"] = time.strftime(fmt, time.gmtime(time.time() - int(days) * 86400))
@@ -247,7 +249,7 @@ def search(keyword="", sort=DEFAULT_SORT, price_min=None, price_max=None,
     pages = max(1, min(MAX_PAGES, int(pages or 1)))
 
     found, seen, scanned, page, data, stopped = [], set(), 0, 0, {}, ""
-    dropped = {"keyword": 0, "price": 0, "video": 0}
+    dropped = {"keyword": 0, "listed": 0, "price": 0, "video": 0}
     for page in range(1, pages + 1):
         try:
             data = _get("/product/list", {**params, "pageNum": page}) or {}
@@ -267,6 +269,9 @@ def search(keyword="", sort=DEFAULT_SORT, price_min=None, price_max=None,
             seen.add(p["id"])
             if words and not matches(p["name"], words):
                 dropped["keyword"] += 1
+                continue
+            if listed_hi is not None and p["listed"] > listed_hi:
+                dropped["listed"] += 1
                 continue
             if (lo is not None or hi is not None) and p["price_min"] is not None:
                 if (lo is not None and p["price_min"] < lo) or (hi is not None and p["price_min"] > hi):
