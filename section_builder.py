@@ -83,7 +83,12 @@ types correctly and is the only reliable way to render a Shopify-hosted video. A
 absolutely-positioned mute/unmute toggle button matching the reference — this requires a single
 minimal inline `onclick` that toggles the adjacent `<video>` element's `.muted` property (this is a
 basic UI control, not an "animation", so it's fine to use a tiny inline handler here even though
-animations themselves must stay pure CSS). Give the block an `image_picker` fallback ONLY if the
+animations themselves must stay pure CSS). The button MUST contain TWO icons — a muted speaker
+(`class="...-sound-off"`) and an unmuted speaker with sound waves (`class="...-sound-on"`) — and the
+onclick MUST toggle an `is-unmuted` class on the button from the video's real state
+(`this.classList.toggle('is-unmuted', !v.muted)`), with CSS hiding `-sound-on` by default and
+swapping the two under `.is-unmuted`. A single icon with a toggled class and no CSS for it leaves
+the icon stuck on "muted" while the sound actually plays. Give the block an `image_picker` fallback ONLY if the
 reference clearly shows a static photo card (no play/mute icon) — never guess; when unsure between
 image and video, prefer `video` if ANY play/mute affordance is visible.
 
