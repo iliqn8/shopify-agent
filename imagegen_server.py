@@ -40,6 +40,15 @@ def serve_generated(filename):
     return send_from_directory(GENERATED_FOLDER, filename)
 
 
+def _dictionary_accent(color):
+    """True when `color` is the Accent of a row in the vibe palette dictionary."""
+    table = build_brand_dna_prompt("", "", "")
+    accents = {cells[4].strip().upper()
+               for cells in (line.split("|") for line in table.splitlines())
+               if len(cells) == 8 and cells[4].strip().startswith("#")}
+    return (color or "").strip().upper() in accents
+
+
 @app.route("/build-brand-dna", methods=["POST"])
 def build_brand_dna():
     product_title = request.form.get("product_title", "")
@@ -78,13 +87,34 @@ def build_brand_dna():
     })
 
     try:
+        messages = [{"role": "user", "content": content}]
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": content}],
+            messages=messages,
             response_format={"type": "json_object"},
             max_tokens=2500,
         )
-        brand_dna = json.loads(response.choices[0].message.content)
+        raw = response.choices[0].message.content
+        brand_dna = json.loads(raw)
+
+        # The prompt says the user's colors win, but the model has copied a
+        # dictionary row anyway. A dictionary accent means it did; ask once more.
+        if color_preferences and _dictionary_accent(brand_dna.get("ACCENT_COLOR")):
+            messages += [
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content":
+                    f"ACCENT_COLOR {brand_dna.get('ACCENT_COLOR')} is copied from the palette "
+                    f"dictionary, but the user asked for: {color_preferences}. Return the same "
+                    "JSON with all five colors rebuilt from that preference."},
+            ]
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=2500,
+            )
+            brand_dna = json.loads(response.choices[0].message.content)
+
         brand_dna["product_image_path"] = image_path
         brand_dna["product_title"] = product_title
         brand_dna["domain_name"] = domain_name
