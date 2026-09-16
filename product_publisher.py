@@ -202,9 +202,11 @@ def parse_output(product_name, text):
     result['guarantee_text'] = ' '.join(_block(text, r'30\s*-?\s*Day Guarantee', 'the guarantee'))
 
     # FAQ
-    m = re.search(r'\bFAQ\b[^\n]*\n+(.*?)$', text, re.IGNORECASE | re.DOTALL)
-    if m:
-        faq_lines = [l.strip() for l in m.group(1).split('\n') if l.strip()]
+    # Stops at the next heading like every other block. It used to run to the
+    # end of the response, so whatever came after it (palettes, checks) was
+    # read as the last answer.
+    faq_lines = _block(text, r'\bFAQ\b', 'the FAQ')
+    if faq_lines:
         i = 0
         while i < len(faq_lines) and len(result['faq_items']) < 4:
             q = faq_lines[i]
