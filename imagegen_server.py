@@ -49,6 +49,120 @@ def _dictionary_accent(color):
     return (color or "").strip().upper() in accents
 
 
+# What a designer means by each colour word, as hue ranges in degrees. The web's
+# named colours are not always that: "purple" is #800080, which reads as magenta.
+_HUES = [
+    (("purple", "violet", "lilac", "lavender", "лилав"), "purple", 250, 292),
+    (("magenta", "fuchsia", "pink", "розов"), "pink", 292, 345),
+    (("red", "червен"), "red", 345, 15),
+    (("orange", "оранжев"), "orange", 15, 40),
+    (("yellow", "gold", "жълт"), "yellow", 40, 65),
+    (("green", "зелен"), "green", 65, 160),
+    (("teal", "cyan", "turquoise", "тюркоаз"), "teal", 160, 200),
+    (("blue", "navy", "син"), "blue", 200, 250),
+]
+_FROM_IMAGE = ("image", "product", "photo", "picture", "снимк", "продукт")
+
+
+def _hsv(color):
+    import colorsys
+    c = (color or "").strip().lstrip("#")
+    if len(c) != 6:
+        return None
+    try:
+        r, g, b = (int(c[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return None
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    return h * 360, s, v
+
+
+def _in_range(hue, lo, hi):
+    return lo <= hue < hi if lo < hi else hue >= lo or hue < hi
+
+
+def _family(color):
+    hsv = _hsv(color)
+    if not hsv or hsv[1] < 0.25 or hsv[2] < 0.15:
+        return None
+    return next((name for _, name, lo, hi in _HUES if _in_range(hsv[0], lo, hi)), None)
+
+
+def _image_colors(path, limit=5):
+    """The colours actually in the photo, one per hue family, most common first.
+
+    Pixels are read one by one: averaging regions first turns a bright purple
+    glow on a black box into a near-black purple no one would pick as an accent.
+    """
+    import colorsys
+    try:
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((200, 200))
+        groups = {}
+        for r, g, b in img.getdata():
+            h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            if sat < 0.35 or val < 0.3:
+                continue
+            name = next((n for _, n, lo, hi in _HUES if _in_range(h * 360, lo, hi)), None)
+            if name:
+                groups.setdefault(name, []).append((r, g, b))
+        total = img.width * img.height
+        found = []
+        for name, pixels in groups.items():
+            if len(pixels) < total * 0.002:
+                continue
+            # A real pixel from the brighter part of the group: the colour as
+            # it shows, not as it fades into the shadows around it.
+            pixels.sort(key=lambda p: max(p))
+            rgb = pixels[len(pixels) * 3 // 4]
+            found.append((len(pixels), "#%02X%02X%02X" % rgb, name,
+                          max(1, round(100 * len(pixels) / total))))
+        found.sort(reverse=True)
+        return [(c, fam, share) for _, c, fam, share in found[:limit]]
+    except Exception:
+        return []
+
+
+def _color_target(preference, image_colors):
+    """The hue family asked for, and the photo's own shades of it if it has any."""
+    text = (preference or "").lower()
+    rule = next((r for r in _HUES if any(w in text for w in r[0])), None)
+    from_image = any(w in text for w in _FROM_IMAGE)
+    if not rule:
+        # "as on the product" with no colour word: the photo's main colour.
+        if from_image and image_colors:
+            name = image_colors[0][1]
+            rule = next(r for r in _HUES if r[1] == name)
+        else:
+            return None
+    _, name, lo, hi = rule
+    shades = [c for c, fam, _ in image_colors if fam == name]
+    return {"name": name, "lo": lo, "hi": hi, "shades": shades}
+
+
+def _color_facts(target, image_colors):
+    lines = []
+    if image_colors:
+        lines.append("Colors measured in the attached product photo (hex, hue family, share of photo): "
+                     + ", ".join("%s %s %d%%" % c for c in image_colors) + ".")
+    if target:
+        lines.append("The requested color is %s: hue %d-%d degrees." % (target["name"], target["lo"], target["hi"]))
+        if target["shades"]:
+            lines.append("The product's own %s is %s. Build ACCENT_COLOR and DARK_ACCENT_COLOR "
+                         "from it (keep its hue, adjust lightness)." % (target["name"], ", ".join(target["shades"])))
+        lines.append("Check the hue of every hex you return for it, not just its name: a standard "
+                     "web color can sit outside that range (web \"purple\" #800080 is 300 degrees and looks pink).")
+    return "\n".join(lines)
+
+
+def _off_hue(brand_dna, target):
+    """The accent fields whose hue is not the colour that was asked for."""
+    if not target:
+        return []
+    return [key for key in ("ACCENT_COLOR", "DARK_ACCENT_COLOR")
+            if _family(brand_dna.get(key)) != target["name"]]
+
+
 @app.route("/build-brand-dna", methods=["POST"])
 def build_brand_dna():
     product_title = request.form.get("product_title", "")
@@ -73,6 +187,9 @@ def build_brand_dna():
             with open(filepath, "rb") as f:
                 image_base64 = base64.b64encode(f.read()).decode("utf-8")
 
+    image_colors = _image_colors(filepath) if image_base64 else []
+    target = _color_target(color_preferences, image_colors) if color_preferences else None
+
     content = []
     if image_base64:
         content.append({
@@ -82,7 +199,8 @@ def build_brand_dna():
     content.append({
         "type": "text",
         "text": build_brand_dna_prompt(
-            product_title, domain_name, competitor, color_preferences, additional_notes
+            product_title, domain_name, competitor, color_preferences, additional_notes,
+            color_facts=_color_facts(target, image_colors) if color_preferences else "",
         ),
     })
 
@@ -98,14 +216,26 @@ def build_brand_dna():
         brand_dna = json.loads(raw)
 
         # The prompt says the user's colors win, but the model has copied a
-        # dictionary row anyway. A dictionary accent means it did; ask once more.
+        # dictionary row, or picked a hex by its name whose hue is another color
+        # ("purple" #800080 reads pink). Either way, ask once more with the reason.
+        complaints = []
         if color_preferences and _dictionary_accent(brand_dna.get("ACCENT_COLOR")):
+            complaints.append(f"ACCENT_COLOR {brand_dna.get('ACCENT_COLOR')} is copied from the "
+                              "palette dictionary.")
+        for key in _off_hue(brand_dna, target):
+            hsv = _hsv(brand_dna.get(key))
+            seen = "%d degrees" % hsv[0] if hsv else "not a valid hex"
+            complaints.append(f"{key} {brand_dna.get(key)} is {seen}, which reads as "
+                              f"{_family(brand_dna.get(key)) or 'grey'}, not {target['name']} "
+                              f"({target['lo']}-{target['hi']} degrees).")
+        if complaints:
             messages += [
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content":
-                    f"ACCENT_COLOR {brand_dna.get('ACCENT_COLOR')} is copied from the palette "
-                    f"dictionary, but the user asked for: {color_preferences}. Return the same "
-                    "JSON with all five colors rebuilt from that preference."},
+                    " ".join(complaints) + f" The user asked for: {color_preferences}. "
+                    + (f"The product's own {target['name']}: {', '.join(target['shades'])}. "
+                       if target and target["shades"] else "")
+                    + "Return the same JSON with all five colors rebuilt from that preference."},
             ]
             response = client.chat.completions.create(
                 model="gpt-4o",

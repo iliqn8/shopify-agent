@@ -11,7 +11,8 @@ IMAGE_TYPES = [
 ]
 
 
-def build_brand_dna_prompt(product_title, domain_name, competitor, color_preferences="", additional_notes=""):
+def build_brand_dna_prompt(product_title, domain_name, competitor, color_preferences="", additional_notes="",
+                           color_facts=""):
     if color_preferences:
         # A single line here used to lose to "pick the single best row" below:
         # "purple" came back as the Masculine row's red and black, copied whole.
@@ -19,7 +20,8 @@ def build_brand_dna_prompt(product_title, domain_name, competitor, color_prefere
 All five colors (PRIMARY_BG_COLOR, SECONDARY_BG_COLOR, HEADLINE_COLOR, ACCENT_COLOR, DARK_ACCENT_COLOR) must be built from this preference, not copied from a dictionary row. Use the dictionary row only for the vibe, the fonts and the light/dark feel.
 - If the preference refers to the product or its image, sample the actual hues from the attached image.
 - ACCENT_COLOR and DARK_ACCENT_COLOR must clearly be the requested color (a lighter and a deeper shade of it). Backgrounds are tinted toward it or a neutral that suits it. HEADLINE_COLOR must stay readable on PRIMARY_BG_COLOR.
-- Never return red, gold, blue or green accents when the user asked for another color."""
+- Never return red, gold, blue or green accents when the user asked for another color.
+{color_facts}"""
     else:
         color_note = "Auto-select colors from the vibe palette below."
     notes_note = f"Additional notes: {additional_notes}" if additional_notes else ""
