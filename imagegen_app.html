@@ -472,7 +472,7 @@ async function buildBrandDNA() {
   }
 
   try {
-    const res = await fetch('/build-brand-dna', { method: 'POST', body: formData });
+    const res = await fetch('build-brand-dna', { method: 'POST', body: formData });
     const data = await res.json();
 
     if (data.error) {
@@ -591,7 +591,7 @@ async function startGeneration() {
   statusBar.classList.add('active');
 
   try {
-    const response = await fetch('/generate-images', {
+    const response = await fetch('generate-images', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(brandDNA),
@@ -754,7 +754,7 @@ async function regenerateImage(index) {
   `;
 
   try {
-    const res = await fetch('/regenerate-image', {
+    const res = await fetch('regenerate-image', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ index, brand_dna: brandDNA, feedback, reference_image_b64 }),

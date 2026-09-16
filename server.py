@@ -1874,7 +1874,7 @@ def _proxy(path, method, stream=False):
             r = _req.post(url, data=request.form, files={
                 k: (v.filename, v.stream, v.content_type)
                 for k, v in request.files.items()
-            }, timeout=30)
+            }, timeout=180)
         elif request.is_json:
             r = _req.post(url, json=request.get_json(), stream=True, timeout=300)
         else:
