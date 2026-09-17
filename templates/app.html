@@ -1031,15 +1031,21 @@
           <div style="font-size:13px;font-weight:600;color:#ddd">👤 AI character <span style="color:#666;font-weight:400;font-size:11px">— BytePlus Seedream 5.0 lite</span></div>
           <div style="color:#777;font-size:11px;margin:3px 0 8px">
             People made here pass Seedance's real-person check: BytePlus trusts its own Seedream photos from this account for 30 days.
-            Text only — an uploaded photo cannot be the base. Uses the aspect ratio picked below.
+            Uses the aspect ratio picked below. Photos you add are read by Claude and turned into a written description —
+            Seedream only gets the text, because a photo-based image loses the trust. The face comes out similar, not identical.
           </div>
           <textarea id="dm-portrait-prompt" rows="3"
             placeholder="e.g. Candid iPhone photo. A cheerful overweight man in an ugly red Christmas sweater and Santa hat at a warehouse store checkout; a red-haired cashier with glasses laughing behind the counter."
             style="width:100%;box-sizing:border-box;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:8px 10px;font-size:12px;resize:vertical"></textarea>
           <div style="display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
             <button class="btn-sm" id="dm-portrait-btn" onclick="dmMakePortrait()">✨ Generate photo · $0.035</button>
+            <button class="btn-sm" onclick="document.getElementById('dm-portrait-files').click()"
+              title="Claude reads these and describes the person, outfit or scene in the prompt">📷 Add photos</button>
+            <input type="file" id="dm-portrait-files" accept="image/*" multiple style="display:none"
+              onchange="dmAddPortraitPhotos(this)">
             <span id="dm-portrait-status" style="color:#666;font-size:11px"></span>
           </div>
+          <div id="dm-portrait-thumbs" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"></div>
           <div id="dm-portraits" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px"></div>
         </div>
       </div>
@@ -5264,25 +5270,69 @@ async function dmMakePortrait() {
   const btn = document.getElementById('dm-portrait-btn');
   const st = document.getElementById('dm-portrait-status');
   const prompt = box.value.trim();
-  if (!prompt) { alert('Describe the character and the scene first.'); return; }
+  if (!prompt && !dmPortraitPhotos.length) { alert('Describe the character and the scene, or add a photo.'); return; }
   btn.disabled = true;
   st.style.color = '#888';
-  st.textContent = '⏳ Generating ' + dmAspect + ' on Seedream… (10–40 s)';
+  st.textContent = dmPortraitPhotos.length
+    ? '⏳ Claude is reading ' + dmPortraitPhotos.length + ' photo(s), then Seedream draws ' + dmAspect + '… (1–2 min)'
+    : '⏳ Generating ' + dmAspect + ' on Seedream… (10–40 s)';
   try {
     const r = await fetch('/api/dreamina-portrait', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, aspect: dmAspect })
+      body: JSON.stringify({ prompt, aspect: dmAspect,
+        photos: dmPortraitPhotos.map(p => ({ b64: p.b64, media_type: p.media_type })) })
     });
     const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
     st.style.color = '#4ade80';
-    st.textContent = '✅ ' + d.size + ' · $' + d.usd.toFixed(3) + ' — click "+ Use" to add it';
+    st.textContent = '✅ ' + d.size + ' · $' + d.usd.toFixed(3) + ' — click "+ Use" to add it'
+      + (d.photos_read ? ' · hover the photo to see the prompt Claude wrote' : '');
     await dmLoadPortraits();
   } catch (e) {
     st.style.color = '#f87171';
     st.textContent = '❌ ' + e.message;
   }
   btn.disabled = false;
+}
+
+let dmPortraitPhotos = [];   // [{b64, media_type, thumb}] — read by Claude, never sent to Seedream
+
+function dmDrawPortraitPhotos() {
+  document.getElementById('dm-portrait-thumbs').innerHTML = dmPortraitPhotos.map((p, i) => `
+    <div style="position:relative">
+      <img src="${p.thumb}" style="height:58px;border-radius:6px;display:block;border:1px solid #2a2a3a">
+      <button onclick="dmPortraitPhotos.splice(${i}, 1); dmDrawPortraitPhotos()" title="Remove"
+        style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
+    </div>`).join('');
+}
+
+async function dmAddPortraitPhotos(input) {
+  const files = Array.from(input.files || []);
+  input.value = '';
+  const st = document.getElementById('dm-portrait-status');
+  const room = DM_MAX_IDEA_PHOTOS - dmPortraitPhotos.length;
+  if (!files.length) return;
+  if (room <= 0) { st.style.color = '#fbbf24'; st.textContent = DM_MAX_IDEA_PHOTOS + ' photos max'; return; }
+  st.style.color = '#8ab4f8';
+  st.textContent = 'Reading…';
+  for (const f of files.slice(0, room)) {
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const d = await vidJson(await fetch('/api/dreamina-idea-image', { method: 'POST', body: fd }));
+      if (d.error) throw new Error(d.error);
+      dmPortraitPhotos.push(d);
+    } catch (e) {
+      st.style.color = '#f87171';
+      st.textContent = '❌ ' + e.message;
+      dmDrawPortraitPhotos();
+      return;
+    }
+  }
+  dmDrawPortraitPhotos();
+  st.style.color = '#4ade80';
+  st.textContent = dmPortraitPhotos.length + ' photo(s) — Claude will read them'
+    + (files.length > room ? ' (' + DM_MAX_IDEA_PHOTOS + ' max)' : '');
 }
 
 function dmUsePortrait(id) {

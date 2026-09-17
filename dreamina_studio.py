@@ -958,11 +958,67 @@ PORTRAIT_SIZES = {
 }
 
 
-def generate_portrait(prompt, aspect="9:16"):
-    """Make one Seedream photo and keep the original bytes. Returns a dict."""
+# Photos cannot go to Seedream: tested 17.09.2026, any image-to-image output —
+# even from a clothing-only photo — is refused by Seedance as a real person.
+# Only text-to-image is trusted. So Claude reads the photos and the photos
+# become words; Seedream never sees them.
+PORTRAIT_WRITER_SYSTEM = """You write prompts for Seedream 5.0 lite, a photorealistic TEXT-TO-IMAGE model. \
+The image you describe will become a reusable character for AI video, so the person must be fully visible, \
+sharp, well lit and unobstructed.
+
+The user gives an instruction and reference photos. The model will NOT see the photos — your words are all it gets. \
+So transfer from the photos, in concrete physical detail, whatever the instruction asks to keep \
+(if it does not say, keep the person's look and outfit):
+- apparent age, gender presentation, ethnicity/skin tone, build and height impression
+- face: shape, eyes (shape, colour), eyebrows, nose, lips, jaw, facial hair, freckles, makeup, glasses
+- hair: colour, length, texture, parting, style
+- clothing and accessories: garment types, colours, materials, fit, patterns, logos described generically
+- the setting, light and camera style only if the instruction wants them kept
+
+The user's instruction wins over the photos wherever they differ. Never name a real person, celebrity or brand. \
+Write one dense paragraph in English, 80-180 words, starting with the kind of photo (e.g. "Candid iPhone photo."). \
+No lists, no quotation marks, no negative instructions."""
+
+PORTRAIT_WRITER_SCHEMA = {
+    "type": "object",
+    "properties": {"prompt": {"type": "string"}},
+    "required": ["prompt"],
+    "additionalProperties": False,
+}
+
+
+def write_portrait_prompt(instruction, photos):
+    """Turn an instruction plus reference photos into a text-only Seedream prompt."""
+    photos = [p for p in (photos or []) if p and p.get("b64")][:MAX_PORTRAIT_PHOTOS]
+    content = clip_studio._photo_blocks(photos, label="REFERENCE PHOTO")
+    content.append({"type": "text", "text": "INSTRUCTION:\n" + (
+        instruction or "Recreate the main person from the photos as a new photo.")})
+    for kind, payload in clip_studio._drain(clip_studio._ask_claude(
+            PORTRAIT_WRITER_SYSTEM, content, PORTRAIT_WRITER_SCHEMA, "a prompt")):
+        if kind == "error":
+            raise DreaminaError(payload)
+        if kind == "data":
+            text = (payload.get("prompt") or "").strip()
+            if not text:
+                raise DreaminaError("Claude returned an empty prompt. Try again.")
+            return text
+    raise DreaminaError("Claude produced no prompt. Try again.")
+
+
+MAX_PORTRAIT_PHOTOS = 4
+
+
+def generate_portrait(prompt, aspect="9:16", photos=None):
+    """Make one Seedream photo and keep the original bytes. Returns a dict.
+
+    With photos, Claude first rewrites the prompt from them; the returned
+    "prompt" is what Seedream actually got."""
     prompt = (prompt or "").strip()
-    if not prompt:
-        raise DreaminaError("Describe the character and the scene first.")
+    photos = [p for p in (photos or []) if p and p.get("b64")]
+    if not prompt and not photos:
+        raise DreaminaError("Describe the character and the scene, or add a photo.")
+    if photos:
+        prompt = write_portrait_prompt(prompt, photos)
     if aspect not in PORTRAIT_SIZES:
         aspect = "9:16"
     w, h = PORTRAIT_SIZES[aspect]
@@ -990,7 +1046,7 @@ def generate_portrait(prompt, aspect="9:16"):
     # has expired, and any re-encode would break the trust check.
     with open(os.path.join(PORTRAIT_DIR, name), "wb") as f:
         f.write(raw)
-    return {"remote_url": url, "filename": name, "aspect": aspect,
+    return {"remote_url": url, "filename": name, "aspect": aspect, "prompt": prompt,
             "size": item.get("size") or "%dx%d" % (w, h), "usd": SEEDREAM_USD}
 
 

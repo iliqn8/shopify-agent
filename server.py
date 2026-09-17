@@ -1734,10 +1734,13 @@ def dreamina_portrait():
     d = request.json or {}
     try:
         started = _t.time()
-        made = dreamina_studio.generate_portrait(d.get("prompt"), d.get("aspect") or "9:16")
-        pid = kb.save_dreamina_portrait((d.get("prompt") or "").strip(), made["aspect"],
+        photos = d.get("photos") or []
+        made = dreamina_studio.generate_portrait(d.get("prompt"), d.get("aspect") or "9:16",
+                                                 photos=photos)
+        pid = kb.save_dreamina_portrait(made["prompt"], made["aspect"],
                                         made["size"], made["remote_url"], made["filename"], started)
-        return jsonify({"id": pid, "usd": made["usd"], "size": made["size"]})
+        return jsonify({"id": pid, "usd": made["usd"], "size": made["size"],
+                        "prompt": made["prompt"], "photos_read": len(photos)})
     except (dreamina_studio.DreaminaError, byteplus_client.ArkError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
