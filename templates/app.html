@@ -1002,14 +1002,17 @@
           </div>
           <div id="dm-mode-ref" onclick="dmSetRefMode('reference')"
                style="cursor:pointer;flex:1;min-width:230px;padding:9px 12px;border-radius:9px;border:2px solid #2a2a2a;background:#141414">
-            <div style="font-size:13px;font-weight:600">🖼️ References <span style="color:#666;font-weight:400">@Image1…</span></div>
-            <div style="color:#666;font-size:11px;margin-top:2px">Up to 30 photos the model reads. Name them in the prompt to say what each is for.</div>
+            <div style="font-size:13px;font-weight:600">🖼️ References <span style="color:#666;font-weight:400">@Image1… @Video1…</span></div>
+            <div style="color:#666;font-size:11px;margin-top:2px">Up to 30 photos and 10 videos (30s total) the model reads. Name them in the prompt to say what each is for.</div>
           </div>
         </div>
 
         <input type="file" id="dm-file" accept="image/*" multiple style="display:none" onchange="dmHandleFile(this)">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
           <button class="btn-sm" id="dm-add-btn" onclick="document.getElementById('dm-file').click()">📷 Upload photo</button>
+          <button class="btn-sm" onclick="document.getElementById('dm-video-file').click()"
+            title="Seedance reads the motion, camera movement and pacing — name it @Video1 in the prompt">🎞️ Add video</button>
+          <input type="file" id="dm-video-file" accept="video/mp4,video/quicktime,video/*" multiple style="display:none" onchange="dmHandleVideo(this)">
           <input id="dm-url" type="text" placeholder="https://…/product.jpg"
             style="flex:1;min-width:220px;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:7px 10px;font-size:12px">
           <button class="btn-sm" onclick="dmUseUrl()">Use URL</button>
@@ -1022,8 +1025,8 @@
         <div id="dm-ref-usage" style="display:none;font-size:11px;margin-top:7px;padding:8px 10px;border-radius:8px"></div>
 
         <div style="color:#666;font-size:11px;margin-top:6px">
-          Seedance 2.5 refuses photos with a realistic face — even AI-made ones (ChatGPT etc.).
-          For people, make the character below.
+          Seedance 2.5 refuses photos and videos with a realistic face — even AI-made ones (ChatGPT etc.).
+          For people, make the character below. Reference videos: 2–30s each, 30s total, and the input seconds are billed too.
         </div>
 
         <!-- AI characters: Seedream outputs are the one face photo Seedance trusts -->
@@ -4976,7 +4979,16 @@ function dmUpdateCost() {
   const m = dmSpec();
   const r = m.resolutions.find(x => x.key === dmResolution) || m.resolutions[0];
   const per = r ? (r.usd_per_second[dmAspect] || 0) : 0;
-  document.getElementById('dm-cost').textContent = '≈ $' + (per * dmSeconds).toFixed(2);
+  let usd = per * dmSeconds;
+  const vs = dmVideoSeconds(), vi = dmOpts.video_input;
+  if (vs && vi && r) {
+    // Video in the input: cheaper per token, but its seconds count too (floor 1.8x the output).
+    const [w, h] = (r.dimensions[dmAspect] || '0x0').split('x').map(Number);
+    const tokens = Math.max(vs + dmSeconds, vi.min_factor * dmSeconds) * w * h * vi.fps / 1024;
+    usd = tokens * (vi.usd_per_token[dmResolution] || 0);
+  }
+  document.getElementById('dm-cost').textContent = '≈ $' + usd.toFixed(2)
+    + (vs ? ' (incl. ' + vs.toFixed(1) + 's of reference video)' : '');
   const audio = document.getElementById('dm-audio').checked;
   document.getElementById('dm-summary').textContent =
     [m.label, dmSeconds + 's', dmResolution + ' ' + dmAspect,
@@ -5042,9 +5054,68 @@ function dmReferenceUrls() {
   return dmRefMode === 'reference' ? dmRefs.filter(r => r.url).map(r => r.url) : [];
 }
 
+// Reference videos (@Video1…). Always omni references, never a starting frame.
+// Uploaded to the server, which converts them and hands BytePlus a public link.
+let dmRefVideos = [];     // [{name, filename, seconds, thumb, error}]
+
+function dmReferenceVideos() {
+  return dmRefMode === 'reference'
+    ? dmRefVideos.filter(v => v.filename).map(v => ({ filename: v.filename, seconds: v.seconds }))
+    : [];
+}
+
+function dmVideoSeconds() {
+  return dmReferenceVideos().reduce((a, v) => a + (v.seconds || 0), 0);
+}
+
+async function dmHandleVideo(input) {
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (!files.length) return;
+  const vi = (dmOpts && dmOpts.video_input) || { max_videos: 10, max_total_seconds: 30 };
+  if (dmRefMode !== 'reference') dmSetRefMode('reference', true);
+  if (dmRefMode !== 'reference') return;
+  for (const f of files) {
+    if (dmRefVideos.length >= vi.max_videos) {
+      alert('Seedance 2.5 takes at most ' + vi.max_videos + ' reference videos.');
+      break;
+    }
+    const entry = { name: f.name, filename: null, seconds: 0, thumb: null, error: null };
+    dmRefVideos.push(entry);
+    dmDrawRefs();
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const d = await vidJson(await fetch('/api/dreamina-reference-video', { method: 'POST', body: fd }));
+      if (d.error) throw new Error(d.error);
+      const total = dmRefVideos.reduce((a, v) => a + (v.seconds || 0), 0) + d.seconds;
+      if (total > vi.max_total_seconds + 0.5) {
+        throw new Error('Reference videos can add up to ' + vi.max_total_seconds + 's — this one ('
+          + d.seconds.toFixed(1) + 's) would make ' + total.toFixed(1) + 's. Trim it first.');
+      }
+      Object.assign(entry, d);
+    } catch (e) {
+      entry.error = e.message;
+    }
+    dmDrawRefs();
+    dmUpdateCost();
+  }
+}
+
+function dmRemoveVideo(i) {
+  dmRefVideos.splice(i, 1);
+  dmDrawRefs();
+  dmUpdateCost();
+}
+
 function dmSetRefMode(mode, quiet) {
   if (mode === dmRefMode) return;
   // Going back to a single starting frame cannot carry a pile of photos with it.
+  if (mode === 'first_frame' && dmRefVideos.length) {
+    if (!confirm('A starting frame cannot be combined with reference videos. Remove the '
+                 + dmRefVideos.length + ' video' + (dmRefVideos.length === 1 ? '' : 's') + '?')) return;
+    dmRefVideos = [];
+  }
   if (mode === 'first_frame' && dmRefs.length > 1) {
     if (!confirm('A starting frame is one photo. Keep the first and drop the other '
                  + (dmRefs.length - 1) + '?')) return;
@@ -5058,6 +5129,7 @@ function dmSetRefMode(mode, quiet) {
   dmDrawRefs();
   dmRefs.forEach(dmPrepareRef);
   if (!quiet) dmUpdateRefUsage();
+  dmUpdateCost();
 }
 
 function dmDrawRefMode() {
@@ -5160,6 +5232,22 @@ function dmDrawRefs() {
       <button onclick="dmRemoveRef(${i})" title="Remove"
         style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
     </div>`;
+  }).join('') + dmRefVideos.map((v, i) => {
+    const tag = '@Video' + (i + 1);
+    const esc = t => String(t || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const inner = v.error
+      ? `<div style="height:64px;width:64px;border-radius:7px;background:#2a1414;border:1px solid #7f1d1d;display:flex;align-items:center;justify-content:center;color:#f87171;font-size:18px" title="${esc(v.error)}">!</div>`
+      : v.filename
+        ? `<div style="position:relative"><img src="${v.thumb}" title="${esc(v.name)} · ${v.seconds}s" style="height:64px;border-radius:7px;display:block;border:1px solid #0e7490">
+             <span style="position:absolute;bottom:3px;left:3px;background:rgba(0,0,0,.7);color:#fff;font-size:9px;padding:1px 4px;border-radius:4px">🎞️ ${Number(v.seconds).toFixed(1)}s</span></div>`
+        : `<div style="height:64px;width:64px;border-radius:7px;background:#141414;border:1px solid #2a2a3a;display:flex;align-items:center;justify-content:center;color:#555;font-size:10px;text-align:center">🎞️<br>converting…</div>`;
+    return `<div style="position:relative">
+      ${inner}
+      <div onclick="dmInsertRefToken(${i + 1}, 'Video')" title="Insert ${tag} into the prompt"
+           style="cursor:pointer;text-align:center;margin-top:3px;font-size:10px;color:#67e8f9">${tag}</div>
+      <button onclick="dmRemoveVideo(${i})" title="Remove"
+        style="position:absolute;top:-6px;right:-6px;background:#f87171;border:none;color:#fff;cursor:pointer;font-size:11px;width:17px;height:17px;border-radius:50%;line-height:1;padding:0">✕</button>
+    </div>`;
   }).join('');
   dmDrawRefStatus();
   dmUpdateRefUsage();
@@ -5167,23 +5255,27 @@ function dmDrawRefs() {
 
 function dmDrawRefStatus() {
   const s = document.getElementById('dm-ref-status');
-  const pending = dmRefs.filter(r => !r.url && !r.error).length;
-  const bad = dmRefs.filter(r => r.error).length;
-  if (!dmRefs.length) {
+  const pending = dmRefs.filter(r => !r.url && !r.error).length
+                + dmRefVideos.filter(v => !v.filename && !v.error).length;
+  const bad = dmRefs.filter(r => r.error).length + dmRefVideos.filter(v => v.error).length;
+  const vids = dmRefVideos.filter(v => v.filename).length;
+  if (!dmRefs.length && !dmRefVideos.length) {
     s.textContent = 'No reference — the clip will be generated from the prompt alone';
     s.style.color = '#555';
   } else if (pending) {
-    s.textContent = 'Preparing ' + pending + ' photo' + (pending === 1 ? '' : 's') + '…';
+    s.textContent = 'Preparing ' + pending + ' reference' + (pending === 1 ? '' : 's') + '…';
     s.style.color = '#8ab4f8';
   } else if (bad) {
-    s.textContent = '❌ ' + (dmRefs.find(r => r.error) || {}).error;
+    s.textContent = '❌ ' + ((dmRefs.find(r => r.error) || dmRefVideos.find(v => v.error)) || {}).error;
     s.style.color = '#f87171';
   } else if (dmRefMode === 'first_frame') {
     s.textContent = 'Starting frame ready — cropped to ' + dmAspect + ', and the clip takes that shape';
     s.style.color = '#4ade80';
   } else {
-    s.textContent = dmRefs.length + ' reference image' + (dmRefs.length === 1 ? '' : 's')
-      + ' ready — uncropped, and the clip uses the ' + dmAspect + ' you picked above';
+    s.textContent = [dmRefs.length ? dmRefs.length + ' reference image' + (dmRefs.length === 1 ? '' : 's') : '',
+                     vids ? vids + ' video' + (vids === 1 ? '' : 's') + ' (' + dmVideoSeconds().toFixed(1) + 's)' : '']
+      .filter(Boolean).join(' + ')
+      + ' ready — the clip uses the ' + dmAspect + ' you picked above';
     s.style.color = '#4ade80';
   }
 }
@@ -5194,11 +5286,12 @@ function dmDrawRefStatus() {
 // something will be ignored; it is about who chooses what each photo is for.
 function dmUpdateRefUsage() {
   const box = document.getElementById('dm-ref-usage');
-  if (dmRefMode !== 'reference' || !dmRefs.length) { box.style.display = 'none'; return; }
+  if (dmRefMode !== 'reference' || (!dmRefs.length && !dmRefVideos.length)) { box.style.display = 'none'; return; }
   const prompt = document.getElementById('dm-prompt').value || '';
-  const named = new Set((prompt.match(/@\s*[Ii]mage\s*\d+/g) || [])
-                        .map(m => parseInt(m.replace(/\D/g, ''), 10)));
-  const missing = dmRefs.map((_, i) => i + 1).filter(n => !named.has(n));
+  const namedOf = re => new Set((prompt.match(re) || []).map(m => parseInt(m.replace(/\D/g, ''), 10)));
+  const named = namedOf(/@\s*[Ii]mage\s*\d+/g), namedV = namedOf(/@\s*[Vv]ideo\s*\d+/g);
+  const missing = dmRefs.map((_, i) => i + 1).filter(n => !named.has(n)).map(n => '@Image' + n)
+    .concat(dmRefVideos.map((_, i) => i + 1).filter(n => !namedV.has(n)).map(n => '@Video' + n));
   box.style.display = 'block';
   if (!missing.length) {
     box.style.background = '#132a1b';
@@ -5209,7 +5302,7 @@ function dmUpdateRefUsage() {
     box.style.background = '#141c2a';
     box.style.border = '1px solid #1e3a5f';
     box.style.color = '#93c5fd';
-    box.innerHTML = 'ℹ️ ' + missing.map(n => '@Image' + n).join(', ')
+    box.innerHTML = 'ℹ️ ' + missing.join(', ')
       + (missing.length === 1 ? ' is' : ' are') + ' not named in the prompt. Seedance still reads '
       + (missing.length === 1 ? 'it' : 'them') + ', but decides what for — name a photo to say '
       + 'whether it is the product, the setting or just the mood. Click the label under one to '
@@ -5217,9 +5310,9 @@ function dmUpdateRefUsage() {
   }
 }
 
-function dmInsertRefToken(n) {
+function dmInsertRefToken(n, kind) {
   const box = document.getElementById('dm-prompt');
-  const token = '@Image' + n;
+  const token = '@' + (kind || 'Image') + n;
   const at = box.selectionStart === null ? box.value.length : box.selectionStart;
   const before = box.value.slice(0, at), after = box.value.slice(box.selectionEnd || at);
   // Space on whichever side does not already have one. Dropping @Image2 into
@@ -5560,6 +5653,7 @@ async function dmRefinePrompt() {
         has_image: !!dmFirstFrameUrl(),
         references: dmReferenceUrls().length,
         reference_images: dmReferenceUrls(),
+        videos: dmReferenceVideos().length,
         angle: document.getElementById('dm-angle').value.trim(),
         photos: dmIdeaPhotos.map(p => ({ b64: p.b64, media_type: p.media_type }))
       })
@@ -5627,7 +5721,8 @@ async function dmWritePrompt() {
         aspect: dmAspect,
         has_image: !!dmFirstFrameUrl(),
         references: dmReferenceUrls().length,
-        reference_images: dmReferenceUrls()
+        reference_images: dmReferenceUrls(),
+        videos: dmReferenceVideos().length
       })
     });
     const d = await vidJson(r);
@@ -5908,6 +6003,9 @@ async function dmApplyEdit() {
 async function dmGenerate() {
   const prompt = document.getElementById('dm-prompt').value.trim();
   if (!prompt) { alert('Write a prompt first.'); return; }
+  if (dmRefMode === 'reference' && dmRefVideos.some(v => !v.filename && !v.error)) {
+    alert('A reference video is still converting — wait a moment.'); return;
+  }
 
   const btn = document.getElementById('dm-generate-btn');
   const log = document.getElementById('dm-log');
@@ -5929,7 +6027,9 @@ async function dmGenerate() {
         audio: document.getElementById('dm-audio').checked,
         container: dmFormat,
         image_url: dmFirstFrameUrl(),
-        reference_images: dmReferenceUrls()
+        reference_images: dmReferenceUrls(),
+        reference_videos: dmReferenceVideos(),
+        origin: location.origin
       })
     });
     const d = await vidJson(r);

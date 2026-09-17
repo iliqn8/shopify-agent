@@ -1475,6 +1475,21 @@ def dreamina_reference():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/api/dreamina-reference-video", methods=["POST"])
+def dreamina_reference_video():
+    """Convert and keep an uploaded clip for use as @Video1…"""
+    import dreamina_studio
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No video"}), 400
+    try:
+        return jsonify(dreamina_studio.prepare_reference_video(f.read()))
+    except dreamina_studio.DreaminaError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/api/dreamina-idea-image", methods=["POST"])
 def dreamina_idea_image():
     """Prepare a photo for the prompt writer to look at."""
@@ -1523,6 +1538,7 @@ def dreamina_write_prompt():
         angle=d.get("angle") or "",
         references=int(d.get("references") or len(refs)),
         references_shown=shown,
+        videos=int(d.get("videos") or 0),
     ))
     return jsonify({"job_id": job_id})
 
@@ -1573,6 +1589,7 @@ def dreamina_refine_prompt():
         angle=d.get("angle") or "",
         references=int(d.get("references") or len(refs)),
         references_shown=shown,
+        videos=int(d.get("videos") or 0),
     ))
     return jsonify({"job_id": job_id})
 
@@ -1598,6 +1615,21 @@ def dreamina_generate_start():
         "image_url": d.get("image_url") or None,
         "reference_images": d.get("reference_images") or [],
     }
+
+    videos = []
+    for v in d.get("reference_videos") or []:
+        name = (v or {}).get("filename") or ""
+        if not dreamina_studio.reference_video_path(name):
+            return jsonify({"error": "A reference video is gone from the server "
+                                     "(they are kept %d days). Upload it again."
+                                     % dreamina_studio.REF_VIDEO_KEEP_DAYS}), 400
+        url, problem = _public_video_url(name, d.get("origin") or "")
+        if problem:
+            return jsonify({"error": problem.replace("Editing", "A reference video")
+                                            .replace("edit a clip", "use reference videos")
+                                            .replace("editing", "reference videos")}), 400
+        videos.append({"url": url, "seconds": v.get("seconds")})
+    settings["reference_videos"] = videos
 
     job_id = str(_uuid_dg.uuid4())
 

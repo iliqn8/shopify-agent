@@ -152,6 +152,19 @@ PROMO = {
 }
 
 
+# With ANY video in the input the rate per token is lower, but the input video's
+# seconds are counted as well as the output's (BytePlus pricing page, read
+# 17.09.2026):
+#
+#     tokens = (input video seconds + output seconds) x w x h x 24 / 1024
+#
+# at the OUTPUT's w x h, with a floor. Their 5s 16:9 examples bottom out at the
+# price of a 4s input ("lowest price corresponds to 2-4 seconds input"), i.e.
+# 1.8x the output's own tokens — 480p $0.553, 720p $1.244, both exact at $6.40/M.
+USD_PER_TOKEN_WITH_VIDEO = {"480p": 6.40e-6, "720p": 6.40e-6, "1080p": 7.0e-6}
+VIDEO_INPUT_MIN_FACTOR = 1.8
+
+
 def promo_active(now=None):
     return (now or time.time()) < PROMO["until"]
 
@@ -186,14 +199,31 @@ def estimate_cost(seconds, resolution="720p", aspect="16:9",
                  * clamp_seconds(seconds, model), 4)
 
 
-def cost_of_tokens(tokens, resolution="720p", now=None):
+def video_input_tokens(output_seconds, input_seconds, resolution="720p", aspect="16:9"):
+    """Billed tokens for a task that has video in its input. See USD_PER_TOKEN_WITH_VIDEO."""
+    w, h = dimensions(resolution, aspect)
+    per_second = w * h * FPS / 1024.0
+    return max(input_seconds + output_seconds,
+               VIDEO_INPUT_MIN_FACTOR * output_seconds) * per_second
+
+
+def estimate_video_input_cost(output_seconds, input_seconds, resolution="720p",
+                              aspect="16:9", now=None):
+    return cost_of_tokens(video_input_tokens(output_seconds, input_seconds, resolution, aspect),
+                          resolution, now, video_input=True)
+
+
+def cost_of_tokens(tokens, resolution="720p", now=None, video_input=False):
     """The real bill, from the token count BytePlus returns on a finished task.
 
     This is the number that was actually charged. The estimate above is the
     published formula, and the two differ by about a frame's worth because the
     model renders duration x 24 + 1 frames — a 12s clip came back as 289.
+    `video_input` switches to the cheaper per-token rate BytePlus uses when the
+    task read a video (edits, video references).
     """
-    rate = USD_PER_TOKEN.get(resolution, USD_PER_TOKEN["720p"])
+    table = USD_PER_TOKEN_WITH_VIDEO if video_input else USD_PER_TOKEN
+    rate = table.get(resolution, table["720p"])
     if resolution in PROMO["resolutions"] and promo_active(now):
         rate *= PROMO["multiplier"]
     return round((tokens or 0) * rate, 4)
@@ -252,6 +282,14 @@ def options():
         "min_seconds": MIN_SECONDS,
         "max_seconds": MAX_SECONDS,
         "promo": PROMO["label"] if promo_active() else None,
+        "video_input": {
+            "usd_per_token": {r: cost_of_tokens(1e6, r, video_input=True) / 1e6
+                              for r in USD_PER_TOKEN_WITH_VIDEO},
+            "min_factor": VIDEO_INPUT_MIN_FACTOR,
+            "fps": FPS,
+            "max_videos": MAX_REFERENCE_VIDEOS,
+            "max_total_seconds": MAX_REFERENCE_VIDEO_SECONDS,
+        },
     }
 
 
@@ -427,6 +465,128 @@ MAX_IDEA_IMAGES = clip_studio.MAX_IDEA_IMAGES
 
 # ── Output ─────────────────────────────────────────────────────────────────
 
+# ── Reference videos ───────────────────────────────────────────────────────
+# @Video1… in the prompt: motion, camera work, pacing, anything the model can
+# read off a clip. BytePlus limits (Seedance 2.5 tutorial, 2607688): mp4/mov,
+# H.264/H.265, 480p or 720p, 24-60 fps, each 2-30 s, at most 10 and 30 s in
+# total, ratio [0.4, 2.5], pixels [407,696, 8,295,044], 200 MB.
+#
+# There is no inline form for video: ARK downloads it. So an upload is re-encoded
+# into something inside every one of those limits, kept on the volume, and sent
+# as this app's own public URL. Real faces are refused here just as in photos.
+MAX_REFERENCE_VIDEOS = 10
+MAX_REFERENCE_VIDEO_SECONDS = 30
+REF_VIDEO_MIN_SECONDS = 2
+REF_VIDEO_SUBDIR = "refvideos"
+REF_VIDEO_DIR = os.path.join(video_assembler.OUTPUT_DIR, REF_VIDEO_SUBDIR)
+REF_VIDEO_KEEP_DAYS = 14
+REF_VIDEO_MIN_PIXELS = 407696
+
+
+def _ref_video_geometry(w, h):
+    """Output size: short edge 720 (480 would sit right on the pixel floor),
+    never upscaled past that, both even."""
+    ratio = w / float(h)
+    if not (ARK_MIN_RATIO <= ratio <= ARK_MAX_RATIO):
+        raise DreaminaError(
+            "That video is too narrow or too wide for Seedance (%dx%d). Its width/height "
+            "must be between 0.4 and 2.5." % (w, h))
+    short = min(w, h)
+    scale = 720.0 / short
+    nw, nh = int(round(w * scale / 2)) * 2, int(round(h * scale / 2)) * 2
+    if nw * nh < REF_VIDEO_MIN_PIXELS:
+        raise DreaminaError("That video is too small to use as a reference.")
+    return nw, nh
+
+
+def _cleanup_ref_videos(now=None):
+    now = now or time.time()
+    try:
+        for name in os.listdir(REF_VIDEO_DIR):
+            path = os.path.join(REF_VIDEO_DIR, name)
+            if now - os.path.getmtime(path) > REF_VIDEO_KEEP_DAYS * 86400:
+                os.remove(path)
+    except OSError:
+        pass
+
+
+def prepare_reference_video(raw):
+    """Re-encode an uploaded clip to something Seedance accepts and keep it.
+
+    Returns {"filename": "refvideos/…mp4", "seconds", "width", "height", "thumb"}.
+    """
+    import base64
+    import tempfile
+
+    if not raw:
+        raise DreaminaError("That video is empty.")
+    if len(raw) > 500 * 1024 * 1024:
+        raise DreaminaError("That video is over 500 MB. Trim it first.")
+
+    os.makedirs(REF_VIDEO_DIR, exist_ok=True)
+    _cleanup_ref_videos()
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "src")
+        with open(src, "wb") as f:
+            f.write(raw)
+
+        _, info = video_assembler._run(["-i", src], timeout=60)
+        m = re.search(r"Stream #\d+:\d+.*?: Video:.*?(\d{2,5})x(\d{2,5})", info)
+        seconds = video_assembler._probe_duration(src)
+        if not m or not seconds:
+            raise DreaminaError("That file could not be read as a video. Use MP4 or MOV.")
+        w, h = int(m.group(1)), int(m.group(2))
+        # Phones store portrait video as landscape pixels plus a rotation flag;
+        # ffmpeg applies it on decode, so the output must be sized the turned way.
+        rot = re.search(r"rotate\s*:\s*(-?\d+)|rotation of (-?[\d.]+)", info)
+        if rot and abs(int(float(rot.group(1) or rot.group(2)))) % 180 == 90:
+            w, h = h, w
+        if seconds < REF_VIDEO_MIN_SECONDS:
+            raise DreaminaError("A reference video must be at least %d seconds; this one is %.1fs."
+                                % (REF_VIDEO_MIN_SECONDS, seconds))
+        if seconds > MAX_REFERENCE_VIDEO_SECONDS + 0.5:
+            raise DreaminaError("A reference video can be at most %d seconds; this one is %.1fs. "
+                                "Trim it first." % (MAX_REFERENCE_VIDEO_SECONDS, seconds))
+        nw, nh = _ref_video_geometry(w, h)
+
+        fps = re.search(r"(\d+(?:\.\d+)?) fps", info)
+        fps = float(fps.group(1)) if fps else 30.0
+        rate = [] if 24 <= fps <= 60 else ["-r", "30"]
+
+        name = "ref_%d.mp4" % int(time.time() * 1000)
+        dest = os.path.join(REF_VIDEO_DIR, name)
+        code, err = video_assembler._run(
+            ["-y", "-i", src, "-t", str(MAX_REFERENCE_VIDEO_SECONDS),
+             "-vf", "scale=%d:%d" % (nw, nh), *rate,
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dest],
+            timeout=600)
+        if code != 0 or not os.path.exists(dest):
+            raise DreaminaError("Could not convert that video: %s" % err.strip()[-300:])
+        seconds = round(min(video_assembler._probe_duration(dest) or seconds,
+                            MAX_REFERENCE_VIDEO_SECONDS), 2)
+
+        thumb = ""
+        shot = os.path.join(tmp, "thumb.jpg")
+        video_assembler._run(["-y", "-ss", str(min(1.0, seconds / 2)), "-i", dest,
+                              "-frames:v", "1", "-vf", "scale=-2:160", shot], timeout=60)
+        if os.path.exists(shot):
+            with open(shot, "rb") as f:
+                thumb = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+
+    return {"filename": "%s/%s" % (REF_VIDEO_SUBDIR, name), "seconds": seconds,
+            "width": nw, "height": nh, "thumb": thumb}
+
+
+def reference_video_path(filename):
+    """The local file for a `refvideos/…` name, or None if it is not one of ours."""
+    name = os.path.basename(filename or "")
+    if not re.fullmatch(r"ref_\d+\.mp4", name) or filename != "%s/%s" % (REF_VIDEO_SUBDIR, name):
+        return None
+    path = os.path.join(REF_VIDEO_DIR, name)
+    return path if os.path.exists(path) else None
+
+
 def save_output(video_url, prompt, container="mp4", output_dir=None):
     """Download the finished clip.
 
@@ -485,6 +645,24 @@ def photos_from_references(reference_images, limit=None):
         except Exception:
             break        # a reference the writer cannot see is not worth failing over
     return out
+
+
+def _video_rules(count):
+    """Writer rules for @Video1… The writer never sees the videos themselves."""
+    if not count:
+        return ""
+    names = ", ".join("@Video%d" % i for i in range(1, count + 1))
+    return "\n".join([
+        "",
+        "THE USER HAS ATTACHED %d REFERENCE VIDEO%s: %s (numbered separately from any images)."
+        % (count, "" if count == 1 else "S", names),
+        "- You are NOT shown these videos. Do not describe what is in them; refer to them by number.",
+        "- A reference video is for what a photo cannot carry: motion, choreography, camera "
+        "movement, pacing, transitions, effects. Say exactly what to take — \"follow the camera "
+        "movement of @Video1\", \"the same dance moves as @Video1\", \"the pacing and cuts of "
+        "@Video2\" — and use the user's idea to decide which.",
+        "- Name EVERY video at least once, in the sentence where it matters.",
+    ])
 
 
 def _reference_rules(count, shown=0):
@@ -554,21 +732,23 @@ def _spec_for_writer(model=DEFAULT_MODEL):
 
 def write_prompt_stream(idea, model=DEFAULT_MODEL, seconds=8, aspect="16:9",
                         has_image=False, photos=None, angle="", references=0,
-                        references_shown=0):
+                        references_shown=0, videos=0):
     return clip_studio.write_prompt_stream(
         idea, model=model, seconds=seconds, aspect=aspect, has_image=has_image,
         photos=photos, angle=angle, spec=_spec_for_writer(model),
-        extra=PROMPT_CONVENTIONS + _reference_rules(references, references_shown))
+        extra=PROMPT_CONVENTIONS + _reference_rules(references, references_shown)
+        + _video_rules(videos))
 
 
 def refine_prompt_stream(current, instructions, model=DEFAULT_MODEL, seconds=8,
                          aspect="16:9", has_image=False, photos=None, angle="",
-                         references=0, references_shown=0):
+                         references=0, references_shown=0, videos=0):
     return clip_studio.refine_prompt_stream(
         current, instructions, model=model, seconds=seconds, aspect=aspect,
         has_image=has_image, photos=photos, angle=angle,
         spec=_spec_for_writer(model),
-        extra=PROMPT_CONVENTIONS + _reference_rules(references, references_shown))
+        extra=PROMPT_CONVENTIONS + _reference_rules(references, references_shown)
+        + _video_rules(videos))
 
 
 # Finding a marketing angle is about the product, not the video model.
@@ -578,7 +758,7 @@ generate_angles_stream = clip_studio.generate_angles_stream
 # ── Generation ─────────────────────────────────────────────────────────────
 
 def build_payload(spec, prompt, seconds, resolution, aspect, audio, container,
-                  image_url=None, reference_images=None):
+                  image_url=None, reference_images=None, reference_videos=None):
     """The ARK request body. Kept apart so it can be tested unpaid.
 
     There are two mutually exclusive ways to give this model a photo, and mixing
@@ -607,10 +787,14 @@ def build_payload(spec, prompt, seconds, resolution, aspect, audio, container,
     what it does not understand.
     """
     refs = [u for u in (reference_images or []) if u]
-    if refs and image_url:
+    videos = [u for u in (reference_videos or []) if u]
+    if (refs or videos) and image_url:
         raise DreaminaError(
-            "A starting frame and reference images cannot be combined — Seedance "
+            "A starting frame and references cannot be combined — Seedance "
             "treats them as different kinds of task. Pick one.")
+    if len(videos) > MAX_REFERENCE_VIDEOS:
+        raise DreaminaError("Seedance 2.5 takes at most %d reference videos; %d were sent."
+                            % (MAX_REFERENCE_VIDEOS, len(videos)))
     if len(refs) > MAX_REFERENCE_IMAGES:
         raise DreaminaError(
             "Seedance 2.5 takes at most %d reference images; %d were sent."
@@ -629,6 +813,13 @@ def build_payload(spec, prompt, seconds, resolution, aspect, audio, container,
             "image_url": {"url": url},
             "role": "reference_image",
         })
+    # @Video1… are numbered among videos only, in this order.
+    for url in videos:
+        content.append({
+            "type": "video_url",
+            "video_url": {"url": url},
+            "role": "reference_video",
+        })
 
     payload = {
         "model": spec["id"],
@@ -640,7 +831,7 @@ def build_payload(spec, prompt, seconds, resolution, aspect, audio, container,
         "output_format": container,
         "watermark": False,
     }
-    if refs:
+    if refs or videos:
         payload["omni_reference_task_type"] = "reference"
     return payload
 
@@ -661,6 +852,12 @@ def unaddressed_references(prompt, count):
     return [i for i in range(1, count + 1) if i not in named]
 
 
+def unaddressed_videos(prompt, count):
+    """Same as `unaddressed_references`, for @Video1…"""
+    named = {int(n) for n in re.findall(r"@\s*[Vv]ideo\s*(\d+)", prompt or "")}
+    return [i for i in range(1, count + 1) if i not in named]
+
+
 # ── Editing a finished clip ────────────────────────────────────────────────
 # Seedance's third task type. It re-generates the clip with a change applied,
 # rather than patching pixels, so the result is a NEW video of roughly the same
@@ -673,11 +870,12 @@ def unaddressed_references(prompt, count):
 EDIT_MIN_SECONDS = 4
 EDIT_MAX_SECONDS = 30
 
-# An edit is billed at roughly TWICE a generation of the same shape and length —
-# the source video is read as well as the result written. Measured, not guessed:
+# An edit is billed at roughly TWICE the tokens of a generation of the same shape
+# and length — the source video is read as well as the result written. Measured:
 # a 7.04s 480p 9:16 edit billed 134,905 tokens where the published formula gives
-# 67,636 for that output. Quoting one of those and charging the other is the kind
-# of surprise this app exists to avoid.
+# 67,636 for that output. Those tokens are priced at the cheaper video-input
+# rate, though (USD_PER_TOKEN_WITH_VIDEO), so the dollars are about 1.2x, not 2x.
+# Before 17.09.2026 this was quoted at the no-video rate, ~67% too high.
 EDIT_BILLING_MULTIPLIER = 2.0
 
 # BytePlus's own list, plus the obvious synonyms a person actually types.
@@ -688,8 +886,8 @@ EDIT_TRIGGERS = ("edit", "add", "insert", "remove", "delete", "modify",
 def estimate_edit_cost(seconds, resolution="720p", aspect="16:9",
                        model=DEFAULT_MODEL):
     """What an edit of a clip this long will cost. See EDIT_BILLING_MULTIPLIER."""
-    return round(estimate_cost(seconds, resolution, aspect, model)
-                 * EDIT_BILLING_MULTIPLIER, 4)
+    return estimate_video_input_cost(clamp_seconds(seconds, model), seconds,
+                                     resolution, aspect)
 
 
 def has_edit_trigger(text):
@@ -820,7 +1018,7 @@ def edit_stream(video_url, instructions, reference_images=None,
         made_seconds = task.get("duration") or source_seconds
         made_resolution = task.get("resolution") or resolution
         tokens = (task.get("usage") or {}).get("completion_tokens") or 0
-        actual = cost_of_tokens(tokens, made_resolution) if tokens else cost
+        actual = cost_of_tokens(tokens, made_resolution, video_input=True) if tokens else cost
 
         yield {"type": "status", "text": f"⬇️ Downloading the {container.upper()}…"}
         filename = save_output(url, prompt, container)
@@ -849,20 +1047,34 @@ def edit_stream(video_url, instructions, reference_images=None,
 
 def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
                     audio=True, container="mp4", image_url=None,
-                    reference_images=None, model=DEFAULT_MODEL):
-    """Make one clip on BytePlus. Yields {"type": "status"|"done"} events."""
+                    reference_images=None, model=DEFAULT_MODEL, reference_videos=None):
+    """Make one clip on BytePlus. Yields {"type": "status"|"done"} events.
+
+    `reference_videos` is [{"url", "seconds"}] — public URLs ARK can download."""
     prompt = (prompt or "").strip()
     if not prompt:
         yield {"type": "done", "error": "Write a prompt first — it is the whole instruction."}
         return
     reference_images = [u for u in (reference_images or []) if u]
+    reference_videos = [v for v in (reference_videos or []) if v and v.get("url")]
+    video_seconds = sum(float(v.get("seconds") or 0) for v in reference_videos)
+    if len(reference_videos) > MAX_REFERENCE_VIDEOS:
+        yield {"type": "done", "error": "Seedance 2.5 takes at most %d reference videos."
+               % MAX_REFERENCE_VIDEOS}
+        return
+    if video_seconds > MAX_REFERENCE_VIDEO_SECONDS + 0.5:
+        yield {"type": "done", "error": (
+            "Reference videos can add up to %d seconds; these are %.1fs. Remove or trim one."
+            % (MAX_REFERENCE_VIDEO_SECONDS, video_seconds))}
+        return
 
     s = normalise(model=model, resolution=resolution, aspect=aspect, audio=audio,
                   container=container, seconds=seconds, has_image=bool(image_url))
     spec = s["spec"]
     seconds, resolution, aspect = s["seconds"], s["resolution"], s["aspect"]
     audio, container = s["audio"], s["container"]
-    cost = estimate_cost(seconds, resolution, aspect, s["model"], audio)
+    cost = (estimate_video_input_cost(seconds, video_seconds, resolution, aspect)
+            if reference_videos else estimate_cost(seconds, resolution, aspect, s["model"], audio))
 
     try:
         pending = []
@@ -887,16 +1099,29 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
                     "decides what %s for."
                     % (", ".join("@Image%d" % i for i in missed),
                        "it is used" if len(missed) == 1 else "they are used"))}
+        if reference_videos:
+            yield {"type": "status", "text": (
+                "🎞️ %d reference video%s (%.1fs) — billed at the video-input rate, input seconds included"
+                % (len(reference_videos), "" if len(reference_videos) == 1 else "s", video_seconds))}
+            vmissed = unaddressed_videos(prompt, len(reference_videos))
+            if vmissed:
+                yield {"type": "status", "text": (
+                    "ℹ️ %s not named in the prompt — say what to take from it, e.g. "
+                    "\"copy the camera movement of @Video1\"."
+                    % ", ".join("@Video%d" % i for i in vmissed))}
 
         payload = build_payload(spec, prompt, seconds, resolution, aspect, audio,
-                                container, image_url, reference_images)
+                                container, image_url, reference_images,
+                                [v["url"] for v in reference_videos])
         yield {"type": "status", "text": (
             "🖼️ Animating your reference image — the clip takes its shape from that frame…"
             if image_url else
             "🖼️ Generating with %d reference image%s — @Image1%s…"
             % (len(reference_images), "" if len(reference_images) == 1 else "s",
                "–@Image%d" % len(reference_images) if len(reference_images) > 1 else "")
-            if reference_images else "✨ Generating from the prompt alone…")}
+            if reference_images else
+            "🎞️ Generating from the reference video%s…" % ("" if len(reference_videos) == 1 else "s")
+            if reference_videos else "✨ Generating from the prompt alone…")}
 
         task = byteplus_client.run(payload, on_status=status, timeout=1800)
         yield from drain()
@@ -913,7 +1138,8 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
         made_seconds = task.get("duration") or seconds
         made_resolution = task.get("resolution") or resolution
         tokens = (task.get("usage") or {}).get("completion_tokens") or 0
-        actual = cost_of_tokens(tokens, made_resolution) if tokens else cost
+        actual = (cost_of_tokens(tokens, made_resolution, video_input=bool(reference_videos))
+                  if tokens else cost)
 
         yield {"type": "status", "text": f"⬇️ Downloading the {container.upper()}…"}
         filename = save_output(url, prompt, container)
