@@ -934,3 +934,81 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
         yield {"type": "done", "error": str(e)}
     except Exception as e:
         yield {"type": "done", "error": f"{type(e).__name__}: {e}"}
+
+
+# ── AI characters (Seedream) ───────────────────────────────────────────────
+# Seedance refuses any input photo that looks like a real person, AI-made or
+# not ("InputImageSensitiveContentDetected.PrivacyInformation"). BytePlus trusts
+# one kind of face photo: an ORIGINAL output of their own Seedream 5.0 lite
+# text-to-image, made on this same account within the last 30 days. So the
+# character is generated here and handed to Seedance untouched — never cropped,
+# never re-encoded — because an edited or recompressed copy loses that trust.
+
+SEEDREAM_MODEL = "seedream-5-0-lite-260128"
+SEEDREAM_USD = 0.035               # per image, input images free
+PORTRAIT_TRUST_DAYS = 30
+PORTRAIT_URL_HOURS = 23            # BytePlus link lives 24h; leave a margin
+PORTRAIT_DIR = os.path.join(video_assembler.OUTPUT_DIR, "portraits")
+
+# Seedream 5.0 lite wants 3.69-16.7 MP. These are the smallest sizes at each
+# ratio above the floor, all inside Seedance's own [300, 6000] / [0.4, 2.5].
+PORTRAIT_SIZES = {
+    "16:9": (2560, 1440), "9:16": (1440, 2560), "1:1": (2048, 2048),
+    "4:3": (2304, 1728), "3:4": (1728, 2304), "21:9": (3024, 1296),
+}
+
+
+def generate_portrait(prompt, aspect="9:16"):
+    """Make one Seedream photo and keep the original bytes. Returns a dict."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise DreaminaError("Describe the character and the scene first.")
+    if aspect not in PORTRAIT_SIZES:
+        aspect = "9:16"
+    w, h = PORTRAIT_SIZES[aspect]
+    body = byteplus_client.generate_image({
+        "model": SEEDREAM_MODEL,
+        "prompt": prompt,
+        "size": "%dx%d" % (w, h),
+        "response_format": "url",
+        "sequential_image_generation": "disabled",
+        "watermark": False,
+    })
+    item = (body.get("data") or [{}])[0]
+    if item.get("error"):
+        raise DreaminaError("Seedream refused this image: %s"
+                            % (item["error"].get("message") or item["error"]))
+    url = item.get("url")
+    if not url:
+        raise DreaminaError("Seedream returned no image: %s" % str(body)[:300])
+
+    raw = byteplus_client.download(url, timeout=120)
+    os.makedirs(PORTRAIT_DIR, exist_ok=True)
+    ext = ".png" if raw[:4] == b"\x89PNG" else ".jpeg"
+    name = "portrait_%d%s" % (int(time.time() * 1000), ext)
+    # Written byte for byte: this copy is what goes to Seedance once the link
+    # has expired, and any re-encode would break the trust check.
+    with open(os.path.join(PORTRAIT_DIR, name), "wb") as f:
+        f.write(raw)
+    return {"remote_url": url, "filename": name, "aspect": aspect,
+            "size": item.get("size") or "%dx%d" % (w, h), "usd": SEEDREAM_USD}
+
+
+def portrait_input(row, now=None):
+    """What to send Seedance for a stored portrait: the original link while it
+    lives, afterwards the saved original bytes inline. Returns (url, note)."""
+    now = now or time.time()
+    age_h = (now - row["created_ts"]) / 3600.0
+    if age_h > PORTRAIT_TRUST_DAYS * 24:
+        raise DreaminaError(
+            "This character is older than %d days — BytePlus no longer trusts it. "
+            "Generate it again." % PORTRAIT_TRUST_DAYS)
+    if row.get("remote_url") and age_h < PORTRAIT_URL_HOURS:
+        return row["remote_url"], "original link"
+    path = os.path.join(PORTRAIT_DIR, row["filename"] or "")
+    if not row.get("filename") or not os.path.exists(path):
+        raise DreaminaError("The saved copy of this character is gone. Generate it again.")
+    with open(path, "rb") as f:
+        raw = f.read()
+    ctype = "image/png" if raw[:4] == b"\x89PNG" else "image/jpeg"
+    return byteplus_client.to_data_uri(raw, ctype), "saved original"

@@ -1022,7 +1022,25 @@
         <div id="dm-ref-usage" style="display:none;font-size:11px;margin-top:7px;padding:8px 10px;border-radius:8px"></div>
 
         <div style="color:#666;font-size:11px;margin-top:6px">
-          Seedance 2.5 will not take a reference photo of a real person's face.
+          Seedance 2.5 refuses photos with a realistic face — even AI-made ones (ChatGPT etc.).
+          For people, make the character below.
+        </div>
+
+        <!-- AI characters: Seedream outputs are the one face photo Seedance trusts -->
+        <div style="margin-top:12px;background:#141420;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px">
+          <div style="font-size:13px;font-weight:600;color:#ddd">👤 AI character <span style="color:#666;font-weight:400;font-size:11px">— BytePlus Seedream 5.0 lite</span></div>
+          <div style="color:#777;font-size:11px;margin:3px 0 8px">
+            People made here pass Seedance's real-person check: BytePlus trusts its own Seedream photos from this account for 30 days.
+            Text only — an uploaded photo cannot be the base. Uses the aspect ratio picked below.
+          </div>
+          <textarea id="dm-portrait-prompt" rows="3"
+            placeholder="e.g. Candid iPhone photo. A cheerful overweight man in an ugly red Christmas sweater and Santa hat at a warehouse store checkout; a red-haired cashier with glasses laughing behind the counter."
+            style="width:100%;box-sizing:border-box;background:#111;border:1px solid #2a2a2a;border-radius:8px;color:#ddd;padding:8px 10px;font-size:12px;resize:vertical"></textarea>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
+            <button class="btn-sm" id="dm-portrait-btn" onclick="dmMakePortrait()">✨ Generate photo · $0.035</button>
+            <span id="dm-portrait-status" style="color:#666;font-size:11px"></span>
+          </div>
+          <div id="dm-portraits" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px"></div>
         </div>
       </div>
 
@@ -4799,7 +4817,8 @@ let dmSeconds = 8;
 // or the mode changes. On Seedance 2.5 re-cropping is not a nicety: with a first
 // frame the API refuses any ratio but "adaptive" and copies the shape of that
 // frame, so cropping is the only way the chosen ratio reaches the output.
-let dmRefs = [];          // [{source:{kind,file|url}, url, error}]
+let dmRefs = [];          // [{source:{kind,file|url|id}, url, thumb, error}]
+let dmPortraits = [];
 let dmRefMode = 'first_frame';
 const DM_MAX_REFS = 30;
 
@@ -4968,6 +4987,7 @@ async function dmInit() {
   dmShowRefine(!!promptBox.value.trim());
   dmDrawRefMode();
   dmDrawRefs();
+  dmLoadPortraits();
   if (dmInited) { dmLoadHistory(); return; }
   dmInited = true;
   try {
@@ -5081,6 +5101,21 @@ function dmUseUrl() {
 async function dmPrepareRef(entry) {
   entry.error = null;
   dmDrawRefStatus();
+  if (entry.source.kind === 'portrait') {
+    // Never cropped or re-encoded in either mode — an altered copy loses the
+    // trust that lets the face through. The server hands back the original.
+    try {
+      const r = await fetch('/api/dreamina-portraits/' + entry.source.id + '/input');
+      const d = await vidJson(r);
+      if (d.error) throw new Error(d.error);
+      entry.url = d.url;
+      entry.thumb = d.thumb;
+    } catch (e) {
+      entry.error = e.message;
+    }
+    dmDrawRefs();
+    return;
+  }
   const fd = new FormData();
   fd.append('aspect', dmAspect);
   fd.append('mode', dmRefMode);
@@ -5106,7 +5141,7 @@ function dmDrawRefs() {
     const inner = r.error
       ? `<div style="height:64px;width:64px;border-radius:7px;background:#2a1414;border:1px solid #7f1d1d;display:flex;align-items:center;justify-content:center;color:#f87171;font-size:18px" title="${r.error.replace(/"/g, '&quot;')}">!</div>`
       : r.url
-        ? `<img src="${r.url}" style="height:64px;border-radius:7px;display:block;border:1px solid #2a2a3a">`
+        ? `<img src="${r.thumb || r.url}" style="height:64px;border-radius:7px;display:block;border:1px solid ${r.thumb ? '#4f46e5' : '#2a2a3a'}">`
         : `<div style="height:64px;width:64px;border-radius:7px;background:#141414;border:1px solid #2a2a3a;display:flex;align-items:center;justify-content:center;color:#555;font-size:11px">…</div>`;
     // Clicking the label drops "@ImageN" into the prompt at the cursor — the
     // point of the numbers is that they get written into the sentence.
@@ -5190,6 +5225,84 @@ function dmInsertRefToken(n) {
   box.focus();
   box.setSelectionRange(pos, pos);
   box.dispatchEvent(new Event('input'));
+}
+
+// ── AI characters (Seedream) ──
+
+async function dmLoadPortraits() {
+  try {
+    const d = await vidJson(await fetch('/api/dreamina-portraits'));
+    dmPortraits = d.portraits || [];
+  } catch (e) { dmPortraits = []; }
+  dmDrawPortraits();
+}
+
+function dmDrawPortraits() {
+  const wrap = document.getElementById('dm-portraits');
+  wrap.innerHTML = dmPortraits.map(p => {
+    const days = Math.floor(p.age_days);
+    const age = p.trusted
+      ? (days < 1 ? 'today' : days + 'd old') + ' · ' + Math.max(0, 30 - days) + 'd left'
+      : 'expired';
+    const title = (p.prompt || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    return `<div style="width:92px">
+      <a href="${p.thumb}" target="_blank"><img src="${p.thumb}" title="${title}"
+        style="width:92px;height:92px;object-fit:cover;border-radius:7px;display:block;border:1px solid #2a2a3a;${p.trusted ? '' : 'opacity:.4'}"></a>
+      <div style="font-size:10px;color:${p.trusted ? '#777' : '#f87171'};margin-top:3px">${p.aspect} · ${age}</div>
+      <div style="display:flex;gap:4px;margin-top:3px">
+        <button class="btn-sm" style="flex:1;padding:3px 0;font-size:11px" ${p.trusted ? '' : 'disabled'}
+          onclick="dmUsePortrait(${p.id})">+ Use</button>
+        <button class="btn-sm" style="padding:3px 6px;font-size:11px;color:#f87171" title="Delete"
+          onclick="dmDeletePortrait(${p.id})">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function dmMakePortrait() {
+  const box = document.getElementById('dm-portrait-prompt');
+  const btn = document.getElementById('dm-portrait-btn');
+  const st = document.getElementById('dm-portrait-status');
+  const prompt = box.value.trim();
+  if (!prompt) { alert('Describe the character and the scene first.'); return; }
+  btn.disabled = true;
+  st.style.color = '#888';
+  st.textContent = '⏳ Generating ' + dmAspect + ' on Seedream… (10–40 s)';
+  try {
+    const r = await fetch('/api/dreamina-portrait', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, aspect: dmAspect })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+    st.style.color = '#4ade80';
+    st.textContent = '✅ ' + d.size + ' · $' + d.usd.toFixed(3) + ' — click "+ Use" to add it';
+    await dmLoadPortraits();
+  } catch (e) {
+    st.style.color = '#f87171';
+    st.textContent = '❌ ' + e.message;
+  }
+  btn.disabled = false;
+}
+
+function dmUsePortrait(id) {
+  const p = dmPortraits.find(x => x.id === id);
+  const st = document.getElementById('dm-portrait-status');
+  if (p && dmRefMode === 'first_frame' && !dmRefs.length && p.aspect !== dmAspect) {
+    // Not cropped (that would break the trust), so the clip takes the photo's shape.
+    st.style.color = '#fbbf24';
+    st.textContent = '⚠️ As a starting frame the clip will be ' + p.aspect
+      + " (the photo's shape), not " + dmAspect + '.';
+  }
+  dmAddRef({ kind: 'portrait', id });
+}
+
+async function dmDeletePortrait(id) {
+  if (!confirm('Delete this character? BytePlus only trusts the original, so it cannot be recovered.')) return;
+  await fetch('/api/dreamina-portraits/' + id, { method: 'DELETE' });
+  dmRefs = dmRefs.filter(r => !(r.source.kind === 'portrait' && r.source.id === id));
+  dmDrawRefs();
+  dmLoadPortraits();
 }
 
 function dmRemoveRef(i) {

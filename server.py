@@ -1709,6 +1709,77 @@ def dreamina_edit_start():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/dreamina-portraits", methods=["GET"])
+def dreamina_portraits():
+    import time as _t
+    import dreamina_studio
+    now = _t.time()
+    out = []
+    for row in kb.list_dreamina_portraits():
+        age_days = (now - row["created_ts"]) / 86400.0
+        out.append({k: row[k] for k in ("id", "prompt", "aspect", "size", "created_ts")} | {
+            "thumb": "/dreamina-portraits/%s" % row["filename"],
+            "age_days": round(age_days, 2),
+            "trusted": age_days < dreamina_studio.PORTRAIT_TRUST_DAYS,
+        })
+    return jsonify({"portraits": out, "usd": dreamina_studio.SEEDREAM_USD})
+
+
+@app.route("/api/dreamina-portrait", methods=["POST"])
+def dreamina_portrait():
+    """Generate one AI character on Seedream. Synchronous, 10-40 s."""
+    import time as _t
+    import byteplus_client
+    import dreamina_studio
+    d = request.json or {}
+    try:
+        started = _t.time()
+        made = dreamina_studio.generate_portrait(d.get("prompt"), d.get("aspect") or "9:16")
+        pid = kb.save_dreamina_portrait((d.get("prompt") or "").strip(), made["aspect"],
+                                        made["size"], made["remote_url"], made["filename"], started)
+        return jsonify({"id": pid, "usd": made["usd"], "size": made["size"]})
+    except (dreamina_studio.DreaminaError, byteplus_client.ArkError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/dreamina-portraits/<int:pid>/input", methods=["GET"])
+def dreamina_portrait_input(pid):
+    """The exact thing Seedance should receive for this character."""
+    import dreamina_studio
+    row = kb.get_dreamina_portrait(pid)
+    if not row:
+        return jsonify({"error": "That character no longer exists."}), 404
+    try:
+        url, how = dreamina_studio.portrait_input(row)
+        return jsonify({"url": url, "how": how, "aspect": row["aspect"],
+                        "thumb": "/dreamina-portraits/%s" % row["filename"]})
+    except dreamina_studio.DreaminaError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/dreamina-portraits/<int:pid>", methods=["DELETE"])
+def delete_dreamina_portrait(pid):
+    import dreamina_studio
+    row = kb.get_dreamina_portrait(pid)
+    if row and row.get("filename"):
+        path = os.path.join(dreamina_studio.PORTRAIT_DIR, row["filename"])
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    kb.delete_dreamina_portrait(pid)
+    return jsonify({"ok": True})
+
+
+@app.route("/dreamina-portraits/<path:filename>")
+def serve_dreamina_portrait(filename):
+    import dreamina_studio
+    return send_from_directory(dreamina_studio.PORTRAIT_DIR, filename)
+
+
 @app.route("/api/dreamina-history", methods=["GET"])
 def dreamina_history():
     return jsonify(kb.list_studio_clips("byteplus"))

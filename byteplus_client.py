@@ -124,6 +124,23 @@ def list_tasks(page_size=10):
     return r.json()
 
 
+# ── Images (Seedream) ──────────────────────────────────────────────────────
+
+IMAGES = BASE + "/images/generations"
+
+
+def generate_image(payload, timeout=300):
+    """One synchronous Seedream call. Returns the response body.
+
+    Unlike video there is no task queue: the request blocks until the image
+    exists, typically 10-40 seconds. `data[0].url` lives 24 hours.
+    """
+    r = requests.post(IMAGES, headers=_headers(), json=payload, timeout=timeout)
+    if r.status_code >= 400:
+        _fail("image generation", r)
+    return r.json()
+
+
 # ── File input ─────────────────────────────────────────────────────────────
 
 def to_data_uri(data, content_type="image/jpeg"):

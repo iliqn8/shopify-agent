@@ -72,6 +72,18 @@ def init_db():
         kind TEXT NOT NULL DEFAULT 'prompt',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    # Dreamina Studio: AI characters made on Seedream so Seedance accepts the
+    # face. `created_ts` is epoch seconds — trust expires after 30 days and the
+    # BytePlus link after 24h, so age has to be exact, not a SQLite string.
+    conn.execute("""CREATE TABLE IF NOT EXISTS dreamina_portraits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prompt TEXT NOT NULL,
+        aspect TEXT,
+        size TEXT,
+        remote_url TEXT,
+        filename TEXT,
+        created_ts INTEGER NOT NULL
+    )""")
     conn.execute("""CREATE TABLE IF NOT EXISTS studio_clips (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         prompt TEXT NOT NULL,
@@ -530,5 +542,44 @@ def get_history(limit=50):
 def clear_history():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM chat_history")
+    conn.commit()
+    conn.close()
+
+
+def save_dreamina_portrait(prompt, aspect, size, remote_url, filename, created_ts):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO dreamina_portraits (prompt, aspect, size, remote_url, filename, created_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?)", (prompt, aspect, size, remote_url, filename, int(created_ts)))
+    conn.commit()
+    pid = cur.lastrowid
+    conn.close()
+    return pid
+
+
+def _portrait_row(r):
+    return {"id": r[0], "prompt": r[1], "aspect": r[2], "size": r[3],
+            "remote_url": r[4], "filename": r[5], "created_ts": r[6]}
+
+
+def list_dreamina_portraits():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT id, prompt, aspect, size, remote_url, filename, created_ts "
+                        "FROM dreamina_portraits ORDER BY created_ts DESC, id DESC").fetchall()
+    conn.close()
+    return [_portrait_row(r) for r in rows]
+
+
+def get_dreamina_portrait(pid):
+    conn = sqlite3.connect(DB_PATH)
+    r = conn.execute("SELECT id, prompt, aspect, size, remote_url, filename, created_ts "
+                     "FROM dreamina_portraits WHERE id = ?", (pid,)).fetchone()
+    conn.close()
+    return _portrait_row(r) if r else None
+
+
+def delete_dreamina_portrait(pid):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM dreamina_portraits WHERE id = ?", (pid,))
     conn.commit()
     conn.close()
