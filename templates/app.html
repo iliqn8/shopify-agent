@@ -219,7 +219,19 @@
       <div id="pb-spend" style="display:none;color:#666;font-size:11.5px;text-align:right;margin-bottom:5px"></div>
       <textarea id="pb-output" rows="14" oninput="pbResetPreview()" placeholder="Nothing generated yet. Write a prompt above, fill in the product, then press Generate." style="width:100%;background:#111;border:1px solid #222;border-radius:10px;padding:16px;color:#e0e0e0;font-size:12.5px;line-height:1.65;box-sizing:border-box;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace"></textarea>
 
-      <button id="pb-publish-btn" onclick="pbPublish()" style="margin-top:16px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
+      <div style="margin-top:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <label style="color:#aaa;font-size:12px">TEMPLATE TO COPY</label>
+          <button onclick="pbRefreshTemplates(this)" title="Re-read the templates from the theme"
+            style="background:none;border:1px solid #333;color:#888;font-size:11px;padding:3px 9px;border-radius:6px;cursor:pointer">&#8635; Refresh</button>
+        </div>
+        <select id="pb-base" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:13.5px;box-sizing:border-box">
+          <option value="">Loading&hellip;</option>
+        </select>
+        <div id="pb-base-note" style="color:#666;font-size:12px;margin-top:6px"></div>
+      </div>
+
+      <button id="pb-publish-btn" onclick="pbPublish()" style="margin-top:14px;width:100%;background:#16a34a;color:#fff;border:none;padding:14px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">
         🛍️ Create in Shopify
       </button>
       <div id="pb-publish-status" style="display:none;margin-top:10px;font-size:13px;text-align:center"></div>
@@ -1854,14 +1866,17 @@ async function pbPublish() {
     const res = await fetch('/api/product-publish', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({product_name: productName, generated_text: generatedText})
+      body: JSON.stringify({product_name: productName, generated_text: generatedText,
+                            base_template: (document.getElementById('pb-base') || {}).value || ''})
     });
     const data = await res.json();
     if (data.ok) {
       btn.textContent = '✅ Created!';
       btn.style.background = '#166534';
       statusEl.style.color = '#4ade80';
-      const tmpl = data.template_suffix ? ` | Template: product.${data.template_suffix}` : '';
+      const copiedFrom = (data.base_template || '').replace('templates/', '').replace('.json', '');
+      const tmpl = data.template_suffix
+        ? ` | Template: product.${data.template_suffix}${copiedFrom ? ` (copied from ${copiedFrom})` : ''}` : '';
       // A guessed price is the one thing here worth interrupting for — say where
       // it came from rather than letting it pass as read off the page.
       const guessed = /guess|default/.test(data.price_source || '');
@@ -2020,13 +2035,16 @@ let pbPreviewData = null;
 
 async function pbLoadTemplates(preferKey) {
   const sel = document.getElementById('pb-tpl');
+  const base = document.getElementById('pb-base');
   const previous = sel.value;
+  const previousBase = base ? base.value : '';
   try {
     const list = await (await fetch('/api/theme-templates')).json();
     if (list.error) throw new Error(list.error);
-    sel.innerHTML = list.map(t =>
+    const options = list.map(t =>
       `<option value="${pbEsc(t.key)}" data-grid="${t.has_grid}" data-table="${t.has_table}">${pbEsc(t.label)} — ${t.sections} sections</option>`
     ).join('');
+    sel.innerHTML = options;
     // A template asked for by name wins; otherwise keep whatever was already
     // chosen, so a refresh never quietly moves the selection somewhere else.
     const has = k => k && list.some(t => t.key === k);
@@ -2038,9 +2056,38 @@ async function pbLoadTemplates(preferKey) {
     }
     pbTplNote();
     sel.onchange = () => { pbTplNote(); pbResetPreview(); };
+    // The template Create copies from. preferKey is the page just published,
+    // which belongs in the list above and not here — this one keeps whatever
+    // was chosen, so publishing twice in a row copies the same base twice.
+    if (base) {
+      base.innerHTML = options;
+      if (has(previousBase)) base.value = previousBase;
+      else {
+        const gummies = list.find(t => t.key.includes('gummies'));
+        base.value = gummies ? gummies.key : (list[0] ? list[0].key : '');
+      }
+      pbBaseNote();
+      base.onchange = pbBaseNote;
+    }
   } catch(e) {
     sel.innerHTML = '<option value="">Could not load templates</option>';
+    if (base) base.innerHTML = '<option value="">Could not load templates</option>';
   }
+}
+
+function pbBaseNote() {
+  const sel = document.getElementById('pb-base');
+  const note = document.getElementById('pb-base-note');
+  if (!sel || !note) return;
+  const o = sel.options[sel.selectedIndex];
+  if (!o || !o.value) { note.textContent = ''; return; }
+  const g = +o.dataset.grid, t = +o.dataset.table;
+  const extras = [];
+  if (!g) extras.push('no features grid');
+  if (!t) extras.push('no comparison table');
+  note.textContent = 'The new page is a copy of this template, with the copy above written into it'
+    + (extras.length ? ' — it has ' + extras.join(' and ') + '.' : '.');
+  note.style.color = extras.length ? '#c08552' : '#666';
 }
 
 async function pbRefreshTemplates(btn) {

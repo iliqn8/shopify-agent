@@ -6,9 +6,21 @@ import shopify_client as sc
 # The page copy fills blocks that exist in both product templates, but only the
 # gummies one carries the features grid and the comparison table. Copying from
 # the bare product.json produced a page with nowhere to put two of the sections
-# the prompt writes.
+# the prompt writes, so it is the default rather than the only choice: the
+# builder can name any product template in the theme to copy instead.
 BASE_TEMPLATE = 'templates/product.gummies.json'
 FALLBACK_TEMPLATE = 'templates/product.json'
+
+
+def _base_key(requested):
+    """The template to copy. Anything that is not a product template in the
+    theme's own templates folder is ignored rather than trusted — this value
+    comes off the page and is read straight out of the theme."""
+    key = (requested or '').strip()
+    if (key.startswith('templates/product') and key.endswith('.json')
+            and '..' not in key):
+        return key
+    return BASE_TEMPLATE
 
 
 def _bold(text):
@@ -517,7 +529,8 @@ class ParseProblem(Exception):
         super().__init__("The generated output did not parse cleanly.")
 
 
-def publish(product_name, generated_text):
+def publish(product_name, generated_text, base_template=None):
+    base_key = _base_key(base_template)
     parsed = parse_output(product_name, generated_text)
     problems = check_parsed(parsed)
     if problems:
@@ -544,8 +557,11 @@ def publish(product_name, generated_text):
         if theme:
             tid = theme['id']
             try:
-                default = sc.get_theme_file(tid, BASE_TEMPLATE)
+                default = sc.get_theme_file(tid, base_key)
             except Exception:
+                # The chosen template was renamed or deleted between the
+                # dropdown being filled and Create being pressed.
+                base_key = FALLBACK_TEMPLATE
                 default = sc.get_theme_file(tid, FALLBACK_TEMPLATE)
             base_json = default.get('value') or default.get('attachment') or '{}'
             filled_json, written = fill_template(base_json, parsed)
@@ -579,7 +595,7 @@ def publish(product_name, generated_text):
         'title': parsed['title'],
         'price': parsed['price'],
         'price_source': parsed.get('price_source', ''),
-        'base_template': BASE_TEMPLATE,
+        'base_template': base_key,
         # Blocks that ran on and were cut back. The page is right, but the
         # output was not, and that is worth seeing rather than swallowing.
         'trimmed': parsed.get('trimmed', []),

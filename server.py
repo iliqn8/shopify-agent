@@ -429,7 +429,8 @@ def product_publish():
         return jsonify({"error": "Missing fields"}), 400
     try:
         try:
-            result = pub.publish(product_name, generated_text)
+            result = pub.publish(product_name, generated_text,
+                                 base_template=data.get("base_template"))
         except pub.ParseProblem as bad:
             # Nothing was created. Say what is wrong with the output rather
             # than publishing a page that has to be repaired by hand.
