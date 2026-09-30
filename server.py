@@ -347,7 +347,8 @@ def product_build_start():
             import product_builder
             for event in product_builder.build_stream(
                 product_name, competitor_url, product_cost, shipping_cost, images,
-                prompt_override=data.get("prompt", "")
+                prompt_override=data.get("prompt", ""),
+                angle=(data.get("angle") or "").strip()
             ):
                 _build_jobs[job_id]["events"].append(event)
                 if event.get("type") == "done":
@@ -404,6 +405,7 @@ def palettes_more_start():
                 images=data.get("images", []),
                 prompt_override=data.get("prompt", ""),
                 base_color=base_color or None,
+                angle=(data.get("angle") or "").strip(),
                 existing=existing,
                 taken_letters=list(existing.keys()),
             ):

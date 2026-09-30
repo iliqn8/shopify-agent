@@ -147,8 +147,39 @@ SELF-CHECK BEFORE YOU SEND: Verify — ONE title only, paragraphs 1-2 sentences,
 """
 
 
+def _angle_text(angle, prompt):
+    """The operator's own notes on the product, as a block of their own.
+
+    Optional. When the prompt has a [MARKETING_ANGLE] placeholder it was already
+    substituted in place and nothing is appended. Otherwise it goes after the
+    cached prefix, framed as an instruction: it is what the operator knows about
+    the product and how they want it sold, so it steers the copy, not the format.
+    """
+    if not angle or "[MARKETING_ANGLE]" in prompt:
+        return ""
+    return ("———\n"
+            "The operator's notes on this product and the marketing angle to "
+            "sell it on:\n\n%s\n\n"
+            "Build the page around this. The title, headlines, benefits, "
+            "reviews, FAQ and the palettes should all serve this angle, and "
+            "anything it states about the product is fact to use, not to "
+            "second-guess. Where it conflicts with a default in the prompt about "
+            "what to say, the notes win. The output format, the section order "
+            "and the strict rules (pricing ladder, profit floor, field names) "
+            "still apply exactly as written." % angle)
+
+
+def _fill(base, product_name, competitor_url, product_cost, shipping_cost, angle):
+    return (base
+            .replace("[PRODUCT_NAME]", product_name)
+            .replace("[COMPETITOR_URL]", competitor_url or "no competitor URL provided")
+            .replace("[PRODUCT_COST]", str(product_cost))
+            .replace("[SHIPPING_COST]", str(shipping_cost))
+            .replace("[MARKETING_ANGLE]", angle or "none given"))
+
+
 def build_stream(product_name, competitor_url, product_cost, shipping_cost, images=None,
-                 prompt_override=None):
+                 prompt_override=None, angle=None):
     """Generator yielding {type: status/done} events.
 
     `prompt_override` is whatever the operator typed in the prompt box. When it
@@ -160,11 +191,8 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
     its own words.
     """
     base = (prompt_override or "").strip() or PROMPT_TEMPLATE
-    prompt = (base
-              .replace("[PRODUCT_NAME]", product_name)
-              .replace("[COMPETITOR_URL]", competitor_url or "no competitor URL provided")
-              .replace("[PRODUCT_COST]", str(product_cost))
-              .replace("[SHIPPING_COST]", str(shipping_cost)))
+    prompt = _fill(base, product_name, competitor_url, product_cost, shipping_cost, angle)
+    angle_text = _angle_text(angle, base)
     volatile = ""
     if prompt_override and "[PRODUCT_NAME]" not in prompt_override:
         # A custom prompt that never names the product still needs to know it.
@@ -195,6 +223,8 @@ def build_stream(product_name, competitor_url, product_cost, shipping_cost, imag
             "source": {"type": "base64", "media_type": img["media_type"],
                        "data": img["b64"]},
         })
+    if angle_text:
+        content.append({"type": "text", "text": angle_text})
     if volatile:
         content.append({"type": "text", "text": volatile})
 
@@ -326,7 +356,7 @@ def _more_instruction(product_name, competitor_url, product_cost, shipping_cost,
 
 def more_palettes(product_name, competitor_url, product_cost, shipping_cost,
                   images=None, prompt_override=None, base_color=None,
-                  existing=None, taken_letters=None):
+                  existing=None, taken_letters=None, angle=None):
     """Generator yielding {type: status/done}. `reply` is palette text only.
 
     `existing` is {letter: {ROLE: hex}} of what was already shown, so the model
@@ -334,11 +364,8 @@ def more_palettes(product_name, competitor_url, product_cost, shipping_cost,
     from colliding with them.
     """
     base = (prompt_override or "").strip() or PROMPT_TEMPLATE
-    prompt = (base
-              .replace("[PRODUCT_NAME]", product_name)
-              .replace("[COMPETITOR_URL]", competitor_url or "no competitor URL provided")
-              .replace("[PRODUCT_COST]", str(product_cost))
-              .replace("[SHIPPING_COST]", str(shipping_cost)))
+    prompt = _fill(base, product_name, competitor_url, product_cost, shipping_cost, angle)
+    angle_text = _angle_text(angle, base)
 
     letters = next_letters(taken_letters or (existing or {}).keys())
     if not letters:
@@ -355,6 +382,8 @@ def more_palettes(product_name, competitor_url, product_cost, shipping_cost,
             "source": {"type": "base64", "media_type": img["media_type"],
                        "data": img["b64"]},
         })
+    if angle_text:
+        content.append({"type": "text", "text": angle_text})
     content.append({"type": "text",
                     "text": _more_instruction(product_name, competitor_url,
                                               product_cost, shipping_cost,

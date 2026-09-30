@@ -184,6 +184,10 @@
         <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">COMPETITOR URL <span style="color:#555">(optional)</span></label>
         <input id="pb-url" type="text" placeholder="TikTok Shop, Shopify or any competitor URL" style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;box-sizing:border-box">
       </div>
+      <div>
+        <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT NOTES / MARKETING ANGLE <span style="color:#555">(optional)</span></label>
+        <textarea id="pb-angle" rows="4" placeholder="What the product is, who it is for, and the angle to sell it on. The whole page is built around this. e.g. A gag gift for cat owners — sell the laugh and the photo, not the costume." style="width:100%;background:#1e1e1e;border:1px solid #333;color:#fff;padding:10px 12px;border-radius:8px;font-size:14px;line-height:1.5;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div>
           <label style="color:#aaa;font-size:12px;display:block;margin-bottom:6px">PRODUCT COST ($) *</label>
@@ -1786,6 +1790,7 @@ async function pbGenerate() {
         product_cost: productCost,
         shipping_cost: shippingCost,
         prompt: document.getElementById('pb-prompt').value,
+        angle: document.getElementById('pb-angle').value.trim(),
         images: pbImages.map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type}))
       })
     });
@@ -2490,6 +2495,7 @@ async function pbMorePalettes() {
         shipping_cost: document.getElementById('pb-scost').value || '0',
         prompt: document.getElementById('pb-prompt').value,
         text: outputEl.value || '',
+        angle: document.getElementById('pb-angle').value.trim(),
         base_color: pbBaseColor,
         images: pbImages.map(i => ({b64: i.b64, filename: i.filename, media_type: i.media_type}))
       })
