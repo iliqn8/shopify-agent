@@ -1126,8 +1126,10 @@
           <button class="btn" id="dm-generate-btn" onclick="dmGenerate()">🌙 Generate clip</button>
           <span id="dm-cost" style="color:#fbbf24;font-size:14px;font-weight:600"></span>
           <span id="dm-summary" style="color:#666;font-size:12px"></span>
+          <span id="dm-running" style="color:#a5b4fc;font-size:12px;font-weight:600"></span>
         </div>
-        <pre id="dm-log" style="display:none;margin-top:12px;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:12px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:260px;overflow-y:auto;white-space:pre-wrap"></pre>
+        <!-- One card per clip or edit. They run side by side; the button never locks. -->
+        <div id="dm-queue" style="display:flex;flex-direction:column;gap:8px;margin-top:12px"></div>
       </div>
 
       <!-- Result -->
@@ -1165,7 +1167,6 @@
             the same length</span> — the model reads the original as well as writing the result. It can
             come back a fraction of a second shorter.
           </div>
-          <pre id="dm-edit-log" style="display:none;margin-top:10px;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:10px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap"></pre>
         </div>
       </div>
 
@@ -5068,6 +5069,7 @@ async function dmInit() {
   dmLoadPortraits();
   if (dmInited) { dmLoadHistory(); return; }
   dmInited = true;
+  dmRestoreJobs();      // clips still running before a reload; needs nothing from the options
   try {
     const r = await fetch('/api/dreamina-options');
     dmOpts = await r.json();
@@ -6014,14 +6016,14 @@ async function dmApplyEdit() {
 
   const btn = document.getElementById('dm-edit-btn');
   const status = document.getElementById('dm-edit-status');
-  const log = document.getElementById('dm-edit-log');
+  // Locked only while the request is in flight, so a double click cannot send it twice.
   btn.disabled = true;
-  btn.textContent = 'Editing…';
+  btn.textContent = 'Sending…';
   status.textContent = '';
-  log.style.display = 'block';
-  log.textContent = '✏️ Sending the clip to Seedance…';
-
-  const finish = () => { btn.disabled = false; btn.textContent = '✏️ Apply edit'; };
+  const src = dmLastClip;
+  const meta = ['Edit', src.model_label, (src.seconds || '') + 's',
+                (src.resolution ? src.resolution + ' ' : '') + (src.aspect || ''),
+                document.getElementById('dm-edit-cost').textContent].filter(Boolean).join(' · ');
 
   try {
     const r = await fetch('/api/dreamina-edit-start', {
@@ -6042,21 +6044,18 @@ async function dmApplyEdit() {
     });
     const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
-
-    vidPoll(d.job_id,
-      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
-      ev => {
-        finish();
-        if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
-        // The edit replaces what the box acts on, so a second edit builds on
-        // the first rather than silently re-editing the original.
-        dmShowClip(ev);
-        dmLoadHistory();
-        document.getElementById('dm-result').scrollIntoView({ behavior: 'smooth', block: 'center' });
-      });
+    dmTrackJob(d.job_id, 'edit', instructions, meta);
+    // The box is free for the next edit right away; progress lives in the queue.
+    document.getElementById('dm-edit').value = '';
+    dmEditPhotos = [];
+    dmDrawEditPhotos();
+    status.textContent = '✓ Sent — progress is in the queue above';
   } catch (e) {
-    finish();
-    log.textContent += '\n❌ ' + e.message;
+    dmAddFailedJob('edit', instructions, meta, e.message);
+    status.textContent = '❌ ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '✏️ Apply edit';
   }
 }
 
@@ -6068,12 +6067,11 @@ async function dmGenerate() {
   }
 
   const btn = document.getElementById('dm-generate-btn');
-  const log = document.getElementById('dm-log');
+  // Locked only while the request is in flight, so a double click cannot send it twice.
   btn.disabled = true;
-  btn.textContent = 'Generating…';
-  log.style.display = 'block';
-  log.textContent = 'Starting…';
-  document.getElementById('dm-result').style.display = 'none';
+  btn.textContent = 'Sending…';
+  const meta = [document.getElementById('dm-summary').textContent,
+                document.getElementById('dm-cost').textContent].filter(Boolean).join(' · ');
 
   try {
     const r = await fetch('/api/dreamina-generate-start', {
@@ -6094,21 +6092,222 @@ async function dmGenerate() {
     });
     const d = await vidJson(r);
     if (d.error) throw new Error(d.error);
-
-    vidPoll(d.job_id,
-      t => { log.textContent += '\n' + t; log.scrollTop = log.scrollHeight; },
-      ev => {
-        btn.disabled = false;
-        btn.textContent = '🌙 Generate clip';
-        if (ev.error) { log.textContent += '\n❌ ' + ev.error; return; }
-        dmShowClip(ev);
-        dmLoadHistory();
-      });
+    dmTrackJob(d.job_id, 'clip', prompt, meta);
   } catch (e) {
+    dmAddFailedJob('clip', prompt, meta, e.message);
+  } finally {
     btn.disabled = false;
     btn.textContent = '🌙 Generate clip';
-    log.textContent += '\n❌ ' + e.message;
   }
+}
+
+// ── Queue ──
+//
+// Every Generate / Apply edit becomes its own card. BytePlus run tasks side by
+// side and the server gives each its own job, so nothing waits for anything
+// else. Running jobs are remembered in this browser, so a page reload picks
+// them up again (the server keeps them until it restarts).
+
+let dmJobs = [];            // newest first
+let dmQueueTicker = null;
+const DM_JOBS_KEY = 'dmRunningJobs';
+
+function dmEsc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function dmSaveJobs() {
+  try {
+    localStorage.setItem(DM_JOBS_KEY, JSON.stringify(dmJobs.filter(j => j.state === 'running')
+      .map(j => ({ id: j.id, kind: j.kind, prompt: j.prompt, meta: j.meta, started: j.started }))));
+  } catch (e) {}
+}
+
+function dmRestoreJobs() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(DM_JOBS_KEY) || '[]'); } catch (e) {}
+  // Saved newest first; adding each to the top, so walk oldest first.
+  saved.slice().reverse().forEach(j => {
+    if (j && j.id && !dmJobs.some(x => x.id === j.id))
+      dmTrackJob(j.id, j.kind, j.prompt, j.meta, j.started, true);
+  });
+}
+
+function dmNewJob(id, kind, prompt, meta, started) {
+  const job = { id, kind, prompt, meta, started: started || Date.now(), lines: [],
+                state: 'running', ev: null, error: null, since: 0, open: false, timer: null };
+  dmJobs.unshift(job);
+  return job;
+}
+
+function dmTrackJob(id, kind, prompt, meta, started, resumed) {
+  const job = dmNewJob(id, kind, prompt, meta, started);
+  if (resumed) job.lines.push('↻ Picked up again after the page reloaded');
+  dmSaveJobs();
+  dmRenderJob(job);
+  dmPollJob(job);
+  if (!dmQueueTicker) dmQueueTicker = setInterval(dmTickQueue, 1000);
+}
+
+// A request that failed before a job existed still gets a card, so the
+// message sits next to the clip it belongs to.
+function dmAddFailedJob(kind, prompt, meta, message) {
+  const job = dmNewJob('local-' + Date.now(), kind, prompt, meta);
+  job.state = 'error';
+  job.error = message;
+  dmRenderJob(job);
+}
+
+function dmPollJob(job) {
+  let busy = false;
+  job.timer = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const r = await fetch('/api/video-poll/' + job.id + '?since=' + job.since);
+      if (r.status === 404) {
+        // The server no longer has it: a deploy restarted it, or the clip
+        // finished a while ago. A finished clip is already in the history.
+        clearInterval(job.timer);
+        job.state = 'lost';
+        job.error = 'The server lost track of this job (it restarted, or the clip finished a while ago). If it finished, it is in Clips below.';
+        dmSaveJobs();
+        dmRenderJob(job);
+        dmLoadHistory();
+        return;
+      }
+      const d = await r.json();
+      job.since += d.events.length;
+      for (const ev of d.events) {
+        if (ev.type === 'status') job.lines.push(ev.text);
+        if (ev.type === 'done') { clearInterval(job.timer); dmJobDone(job, ev); return; }
+      }
+      if (d.events.length) dmRenderJob(job);
+    } catch (e) {
+      // A network blip: try again on the next tick.
+    } finally {
+      busy = false;
+    }
+  }, 2000);
+}
+
+function dmJobDone(job, ev) {
+  if (ev.error) {
+    job.state = 'error';
+    job.error = ev.error;
+  } else {
+    job.state = 'done';
+    job.ev = ev;
+    // Take over the big player only when that disturbs nothing: no clip there
+    // yet, or it is paused and no edit is being written for it.
+    const player = document.getElementById('dm-player');
+    const editing = document.getElementById('dm-edit').value.trim() || dmEditPhotos.length;
+    if (!dmLastClip || (player.paused && !editing)) dmShowClip(ev);
+    dmLoadHistory();
+  }
+  dmSaveJobs();
+  dmRenderJob(job);
+}
+
+function dmElapsed(job) {
+  const s = Math.max(0, Math.round(((job.finished || Date.now()) - job.started) / 1000));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function dmJobHtml(job) {
+  const icon = { running: '⏳', done: '✅', error: '❌', lost: '⚠️' }[job.state];
+  const kind = job.kind === 'edit' ? '✏️ Edit' : '🌙 Clip';
+  const url = job.ev && job.ev.filename ? '/generated-videos/' + job.ev.filename : null;
+  const billed = job.ev && job.ev.cost ? ' · $' + Number(job.ev.cost).toFixed(2) + ' billed' : '';
+  return `<div style="display:flex;gap:10px;align-items:flex-start">
+      <div style="font-size:16px;line-height:1.2">${icon}</div>
+      <div style="flex:1;min-width:0">
+        <div style="color:#ddd;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${dmEsc(job.prompt)}">
+          <span style="color:#a5b4fc">${kind}</span> · ${dmEsc(job.prompt)}</div>
+        <div style="color:#555;font-size:11px;margin-top:2px">${dmEsc(job.meta)}${billed} · <span class="dmj-time">${dmElapsed(job)}</span></div>
+        ${job.state === 'running' ? `<div class="dmj-last" style="color:#8ab4f8;font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>` : ''}
+        ${job.error ? `<div style="color:${job.state === 'lost' ? '#fbbf24' : '#f87171'};font-size:12px;margin-top:4px;white-space:pre-wrap">${dmEsc(job.error)}</div>` : ''}
+        ${url ? `<video controls preload="metadata" src="${url}" style="max-width:220px;max-height:180px;margin-top:8px;border-radius:8px;background:#000;display:block"></video>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        ${url ? `<button class="btn-sm" onclick="dmShowJob('${job.id}')" title="Open in the player above, where it can be edited">▶ Open</button>` : ''}
+        ${url ? `<a class="btn-sm" href="${url}" download style="text-decoration:none" title="Download">⬇️</a>` : ''}
+        ${job.lines.length ? `<button class="btn-sm" onclick="dmToggleJobLog('${job.id}')" title="Show the full log">Log</button>` : ''}
+        ${job.state !== 'running' ? `<button class="btn-sm" onclick="dmDismissJob('${job.id}')" title="Remove from the queue (the clip stays in Clips)">✕</button>` : ''}
+      </div>
+    </div>
+    <pre class="dmj-log" style="display:none;margin:8px 0 0;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:10px;color:#8ab4f8;font-size:11px;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap"></pre>`;
+}
+
+// Cards are rebuilt only when their state changes; the live parts (last line,
+// log, timer) are patched in place, so a playing video is never reset.
+function dmRenderJob(job) {
+  const q = document.getElementById('dm-queue');
+  let el = document.getElementById('dmjob-' + job.id);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'dmjob-' + job.id;
+    el.style.cssText = 'background:#141420;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px';
+    q.insertBefore(el, q.firstChild);
+  }
+  if (job.state !== 'running' && !job.finished) job.finished = Date.now();
+  const hasLog = job.lines.length ? '1' : '0';
+  if (el.dataset.state !== job.state || el.dataset.hasLog !== hasLog) {
+    el.dataset.state = job.state;
+    el.dataset.hasLog = hasLog;
+    el.innerHTML = dmJobHtml(job);
+    el.style.borderColor = { running: '#3b3b6b', done: '#1f4d2e', error: '#7f1d1d', lost: '#6b5a1f' }[job.state];
+  }
+  const last = el.querySelector('.dmj-last');
+  if (last) last.textContent = job.lines.length ? job.lines[job.lines.length - 1].trim() : 'Starting…';
+  const log = el.querySelector('.dmj-log');
+  if (log) {
+    log.textContent = job.lines.join('\n');
+    log.style.display = job.open ? 'block' : 'none';
+    log.scrollTop = log.scrollHeight;
+  }
+  dmDrawRunning();
+}
+
+function dmDrawRunning() {
+  const n = dmJobs.filter(j => j.state === 'running').length;
+  document.getElementById('dm-running').textContent = n ? '⏳ ' + n + ' running' : '';
+}
+
+function dmTickQueue() {
+  let running = 0;
+  dmJobs.forEach(job => {
+    if (job.state !== 'running') return;
+    running++;
+    const t = document.querySelector('#dmjob-' + job.id + ' .dmj-time');
+    if (t) t.textContent = dmElapsed(job);
+  });
+  if (!running) { clearInterval(dmQueueTicker); dmQueueTicker = null; }
+}
+
+function dmFindJob(id) { return dmJobs.find(j => j.id === id); }
+
+function dmShowJob(id) {
+  const job = dmFindJob(id);
+  if (!job || !job.ev) return;
+  dmShowClip(job.ev);
+  document.getElementById('dm-result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function dmToggleJobLog(id) {
+  const job = dmFindJob(id);
+  if (!job) return;
+  job.open = !job.open;
+  dmRenderJob(job);
+}
+
+function dmDismissJob(id) {
+  const job = dmFindJob(id);
+  if (!job || job.state === 'running') return;
+  dmJobs = dmJobs.filter(j => j !== job);
+  const el = document.getElementById('dmjob-' + id);
+  if (el) el.remove();
 }
 
 // ── History ──
