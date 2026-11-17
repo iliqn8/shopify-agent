@@ -1448,7 +1448,7 @@ def motion_video():
     if not f:
         return jsonify({"error": "Choose a video."}), 400
     try:
-        return jsonify(motion_studio.prepare_video(f.read()))
+        return jsonify(motion_studio.prepare_video(f.read(), request.form.get("mode") or "motion"))
     except motion_studio.MotionError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1491,6 +1491,65 @@ def motion_generate_start():
                         {k: event.get(k) for k in
                          ("model", "model_label", "seconds", "orientation", "face",
                           "keep_sound", "cost")},
+                        provider="kling-motion")),
+                        event["filename"])
+                except Exception:
+                    pass
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/motion-video-from-clip", methods=["POST"])
+def motion_video_from_clip():
+    """Reuse a finished clip (from this tab's history) as the video to edit."""
+    import motion_studio
+    import video_assembler
+    name = ((request.json or {}).get("filename") or "").replace("\\", "/")
+    root = os.path.realpath(video_assembler.OUTPUT_DIR)
+    path = os.path.realpath(os.path.join(root, name))
+    if not name or not path.startswith(root + os.sep) or not os.path.isfile(path):
+        return jsonify({"error": "That clip is no longer on the server."}), 404
+    try:
+        with open(path, "rb") as fh:
+            return jsonify(motion_studio.prepare_video(fh.read(), "swap"))
+    except motion_studio.MotionError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/motion-swap-start", methods=["POST"])
+def motion_swap_start():
+    import uuid as _uuid_s
+    import json as _json_s
+    import motion_studio
+
+    d = request.json or {}
+    settings = {
+        "video_url": d.get("video_url"),
+        "seconds": float(d.get("seconds") or 0),
+        "swaps": d.get("swaps") or [],
+        "extra": (d.get("extra") or "").strip(),
+        "keep_sound": bool(d.get("keep_sound", True)),
+    }
+    if not settings["video_url"]:
+        return jsonify({"error": "Add the video first."}), 400
+    try:
+        motion_studio.clean_swaps(settings["swaps"])
+    except motion_studio.MotionError as e:
+        return jsonify({"error": str(e)}), 400
+
+    job_id = str(_uuid_s.uuid4())
+
+    def factory():
+        for event in motion_studio.swap_stream(**settings):
+            if event.get("type") == "done" and event.get("filename"):
+                try:
+                    kb.save_studio_clip(settings["extra"], _json_s.dumps(dict(
+                        {k: event.get(k) for k in
+                         ("mode", "model_label", "seconds", "swaps", "keep_sound", "cost")},
                         provider="kling-motion")),
                         event["filename"])
                 except Exception:

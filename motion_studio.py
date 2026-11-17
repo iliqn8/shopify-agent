@@ -47,6 +47,7 @@ DEFAULT_MODEL = "pro"
 # direction of the photo, follows camera moves better, 10s max.
 ORIENTATIONS = {"video": 30, "image": 10}
 MIN_SECONDS = 3
+MIN_PAD_FROM = 2.5          # 2.5–3 s videos are padded to 3 s instead of refused
 
 IMG_MIN_EDGE = 300          # fal rejects smaller images — at generation time, not upload
 IMG_MAX_EDGE = 3000
@@ -56,6 +57,18 @@ VIDEO_SUBDIR = "motionrefs"
 VIDEO_DIR = os.path.join(video_assembler.OUTPUT_DIR, VIDEO_SUBDIR)
 VIDEO_MAX_EDGE = 1920
 
+# ── Objects swap: Kling O3 Edit ─────────────────────────────────────────────
+# Keeps the video (motion, camera, timing) and replaces named things in it with
+# the things in the photos — a product, a prop, a person, several at once.
+# Schema: video 3–15 s, mp4/mov, 720–3840 px; `elements` → @Element1..N;
+# elements + image_urls ≤ 4 in total. Price checked 17.11.2026 on
+# api.fal.ai/v1/models/pricing: Pro and Standard are both $0.14/s, so only Pro.
+SWAP_MODEL = {"id": "fal-ai/kling-video/o3/pro/video-to-video/edit",
+              "label": "Kling O3 Pro Edit", "usd_per_second": 0.14}
+SWAP_MAX_SECONDS = 15
+SWAP_MIN_SHORT_EDGE = 720
+SWAP_MAX_ITEMS = 4
+
 
 def options():
     return {
@@ -64,6 +77,8 @@ def options():
         "default_model": DEFAULT_MODEL,
         "orientations": ORIENTATIONS,
         "min_seconds": MIN_SECONDS,
+        "swap": {"label": SWAP_MODEL["label"], "usd_per_second": SWAP_MODEL["usd_per_second"],
+                 "max_seconds": SWAP_MAX_SECONDS, "max_items": SWAP_MAX_ITEMS},
     }
 
 
@@ -134,8 +149,11 @@ def _cleanup_videos(max_age=3 * 24 * 3600):
         pass
 
 
-def prepare_video(raw):
+def prepare_video(raw, mode="motion"):
     """Re-encode the reference to H.264/AAC mp4 (≤1920 long edge), upload it to fal.
+
+    mode "swap" applies the O3 Edit limits instead: 3–15 s and a short edge of
+    at least 720 px (smaller clips are upscaled — fal rejects them otherwise).
 
     Returns {"url", "seconds", "width", "height", "thumb", "filename"}."""
     if not raw:
@@ -145,7 +163,8 @@ def prepare_video(raw):
 
     os.makedirs(VIDEO_DIR, exist_ok=True)
     _cleanup_videos()
-    max_s = max(ORIENTATIONS.values())
+    max_s = SWAP_MAX_SECONDS if mode == "swap" else max(ORIENTATIONS.values())
+    min_short = SWAP_MIN_SHORT_EDGE if mode == "swap" else 0
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "src")
         with open(src, "wb") as f:
@@ -155,7 +174,10 @@ def prepare_video(raw):
         seconds = video_assembler._probe_duration(src)
         if not m or not seconds:
             raise MotionError("That file could not be read as a video. Use MP4 or MOV.")
-        if seconds < MIN_SECONDS:
+        # Kling's own clips come out at 88 frames (2.93 s) — just under the 3 s
+        # minimum. Anything that close gets its last frame held to reach it.
+        pad = MIN_SECONDS + 0.1 - seconds if MIN_PAD_FROM <= seconds < MIN_SECONDS else 0
+        if seconds < MIN_SECONDS and not pad:
             raise MotionError("The reference video must be at least %d seconds; this one is %.1fs."
                               % (MIN_SECONDS, seconds))
         if seconds > max_s + 0.5:
@@ -168,9 +190,18 @@ def prepare_video(raw):
         # -2 keeps both sides even; the min() keeps small clips at their own size.
         scale = ("scale='if(gt(iw,ih),min(%d,iw),-2)':'if(gt(iw,ih),-2,min(%d,ih))'"
                  % (VIDEO_MAX_EDGE, VIDEO_MAX_EDGE))
-        args = ["-y", "-i", src, "-t", str(max_s), "-vf", scale,
+        sw, sh = int(m.group(1)), int(m.group(2))
+        if min_short and min(sw, sh) < min_short:
+            # Upscale so the short edge reaches the minimum.
+            scale = ("scale='if(gt(iw,ih),-2,%d)':'if(gt(iw,ih),%d,-2)'"
+                     % (min_short, min_short))
+        if pad:
+            scale += ",tpad=stop_mode=clone:stop_duration=%.2f" % (pad + 0.1)
+        args = ["-y", "-i", src, "-t", str(max_s if not pad else MIN_SECONDS + 0.1),
+                "-vf", scale,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
-        args += ["-c:a", "aac", "-b:a", "128k"] if has_audio else ["-an"]
+        args += ((["-af", "apad"] if pad else []) + ["-c:a", "aac", "-b:a", "128k"]
+                 if has_audio else ["-an"])
         args += ["-movflags", "+faststart", dest]
         code, err = video_assembler._run(args, timeout=600)
         if code != 0 or not os.path.exists(dest):
@@ -281,6 +312,108 @@ def generate_stream(image_url, video_url, seconds, model=DEFAULT_MODEL, orientat
                "seconds": seconds, "model": model, "model_label": spec["label"],
                "orientation": orientation, "face": bool(face_url),
                "keep_sound": bool(keep_sound), "prompt": payload.get("prompt", "")}
+    except fal_client.FalError as e:
+        yield {"type": "done", "error": str(e)}
+    except Exception as e:
+        yield {"type": "done", "error": "%s: %s" % (type(e).__name__, e)}
+
+
+# ── Objects swap ───────────────────────────────────────────────────────────
+
+def estimate_swap_cost(seconds):
+    return round(max(float(seconds or 0), MIN_SECONDS) * SWAP_MODEL["usd_per_second"], 2)
+
+
+def clean_swaps(swaps):
+    """[{what, url, extras}] → validated list, or MotionError."""
+    out = []
+    for i, sw in enumerate(swaps or []):
+        what = re.sub(r"\s+", " ", str((sw or {}).get("what") or "")).strip().rstrip(".")
+        url = (sw or {}).get("url")
+        if not what and not url:
+            continue
+        if not url:
+            raise MotionError("Swap %d: add a photo of the new thing." % (i + 1))
+        if not what:
+            raise MotionError("Swap %d: say what in the video it replaces." % (i + 1))
+        extras = [u for u in ((sw or {}).get("extras") or []) if u][:MAX_FACE_EXTRAS]
+        out.append({"what": what[:200], "url": url, "extras": extras})
+    if not out:
+        raise MotionError("Add at least one swap: what to replace + a photo of the new thing.")
+    if len(out) > SWAP_MAX_ITEMS:
+        raise MotionError("At most %d swaps in one clip." % SWAP_MAX_ITEMS)
+    return out
+
+
+def build_swap_prompt(swaps, extra=""):
+    lines = ["Edit @Video1."]
+    for i, sw in enumerate(swaps, 1):
+        lines.append("Replace %s with @Element%d, matching the reference photos exactly."
+                     % (sw["what"], i))
+    lines.append("Keep everything else exactly as in @Video1: the motion, timing, camera, "
+                 "framing, background, lighting and all other people and objects.")
+    extra = (extra or "").strip()
+    if extra:
+        lines.append(extra)
+    return " ".join(lines)
+
+
+def build_swap_payload(video_url, swaps, extra="", keep_sound=True):
+    return {"video_url": video_url,
+            "prompt": build_swap_prompt(swaps, extra),
+            "keep_audio": bool(keep_sound),
+            "elements": [{"frontal_image_url": sw["url"],
+                          "reference_image_urls": sw["extras"] or [sw["url"]]}
+                         for sw in swaps]}
+
+
+def swap_stream(video_url, seconds, swaps, extra="", keep_sound=True):
+    """Make one objects-swap clip. Yields {"type": "status"|"done"} events."""
+    if not video_url:
+        yield {"type": "done", "error": "Add the video first."}
+        return
+    try:
+        swaps = clean_swaps(swaps)
+        if float(seconds or 0) > SWAP_MAX_SECONDS + 0.5:
+            raise MotionError("Objects swap allows at most %ds of video." % SWAP_MAX_SECONDS)
+    except MotionError as e:
+        yield {"type": "done", "error": str(e)}
+        return
+
+    cost = estimate_swap_cost(seconds)
+    payload = build_swap_payload(video_url, swaps, extra, keep_sound)
+    try:
+        pending = []
+
+        def status(text):
+            pending.append(text)
+
+        def drain():
+            while pending:
+                yield {"type": "status", "text": "   " + pending.pop(0)}
+
+        yield {"type": "status", "text": "🔁 %s · %.1fs · %d swap%s · ≈$%.2f" % (
+            SWAP_MODEL["label"], float(seconds or 0), len(swaps),
+            "" if len(swaps) == 1 else "s", cost)}
+        yield {"type": "status", "text": "📝 " + payload["prompt"]}
+        yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes…"}
+
+        out = fal_client.run(SWAP_MODEL["id"], payload, on_status=status, timeout=2400)
+        yield from drain()
+
+        video = out.get("video") or {}
+        url = video.get("url") if isinstance(video, dict) else None
+        if not url:
+            yield {"type": "done", "error": "The model returned no video: %s" % str(out)[:300]}
+            return
+
+        yield {"type": "status", "text": "⬇️ Downloading…"}
+        filename = clip_studio.save_output(url, "swap " + swaps[0]["what"], "mp4")
+        yield {"type": "status", "text": "✅ Done"}
+        yield {"type": "done", "filename": filename, "video_url": url, "cost": cost,
+               "seconds": seconds, "mode": "swap", "model_label": SWAP_MODEL["label"],
+               "swaps": [sw["what"] for sw in swaps], "keep_sound": bool(keep_sound),
+               "prompt": payload["prompt"]}
     except fal_client.FalError as e:
         yield {"type": "done", "error": str(e)}
     except Exception as e:
