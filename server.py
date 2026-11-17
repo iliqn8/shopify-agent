@@ -1414,6 +1414,104 @@ def delete_clip_history(cid):
     return jsonify({"ok": True})
 
 
+# ── Motion Studio (Kling Motion Control on fal) ────────────────────────────
+# A person from a photo performs the moves of a reference video. Same job
+# queue and poller; history rows live in studio_clips with provider
+# "kling-motion" so they never show up in the other two studios.
+
+@app.route("/api/motion-options")
+def motion_options():
+    import motion_studio
+    import fal_client
+    ok, msg = fal_client.check_account()
+    return jsonify({**motion_studio.options(), "account_ok": ok, "account_message": msg})
+
+
+@app.route("/api/motion-image", methods=["POST"])
+def motion_image():
+    import motion_studio
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "Choose an image."}), 400
+    try:
+        return jsonify(motion_studio.prepare_image(f.read()))
+    except motion_studio.MotionError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/motion-video", methods=["POST"])
+def motion_video():
+    import motion_studio
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "Choose a video."}), 400
+    try:
+        return jsonify(motion_studio.prepare_video(f.read()))
+    except motion_studio.MotionError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/api/motion-generate-start", methods=["POST"])
+def motion_generate_start():
+    import uuid as _uuid_m
+    import json as _json_m
+    import motion_studio
+
+    d = request.json or {}
+    settings = {
+        "image_url": d.get("image_url"),
+        "video_url": d.get("video_url"),
+        "seconds": float(d.get("seconds") or 0),
+        "model": d.get("model") or motion_studio.DEFAULT_MODEL,
+        "orientation": d.get("orientation") or "video",
+        "prompt": (d.get("prompt") or "").strip(),
+        "keep_sound": bool(d.get("keep_sound", True)),
+        "face_url": d.get("face_url") or None,
+        "face_extras": [u for u in (d.get("face_extras") or []) if u],
+    }
+    if not settings["image_url"] or not settings["video_url"]:
+        return jsonify({"error": "Add the reference video and the character photo first."}), 400
+    try:
+        motion_studio.normalise(settings["model"], settings["orientation"],
+                                settings["seconds"], settings["face_url"])
+    except motion_studio.MotionError as e:
+        return jsonify({"error": str(e)}), 400
+
+    job_id = str(_uuid_m.uuid4())
+
+    def factory():
+        for event in motion_studio.generate_stream(**settings):
+            if event.get("type") == "done" and event.get("filename"):
+                try:
+                    kb.save_studio_clip(settings["prompt"], _json_m.dumps(dict(
+                        {k: event.get(k) for k in
+                         ("model", "model_label", "seconds", "orientation", "face",
+                          "keep_sound", "cost")},
+                        provider="kling-motion")),
+                        event["filename"])
+                except Exception:
+                    pass
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/motion-history", methods=["GET"])
+def motion_history():
+    return jsonify(kb.list_studio_clips("kling-motion"))
+
+
+@app.route("/api/motion-history/<int:cid>", methods=["DELETE"])
+def delete_motion_history(cid):
+    kb.delete_studio_clip(cid)
+    return jsonify({"ok": True})
+
+
 # ── Dreamina Studio (BytePlus ModelArk) ────────────────────────────────────
 # Clip Studio's twin on a different provider. Same job queue, same poller, and
 # deliberately the same saved-prompt library — a prompt is a prompt, and having
