@@ -1290,7 +1290,7 @@
     <div id="mt-swap-wrap" style="display:none;grid-template-columns:minmax(0,1fr);gap:20px">
       <div style="background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px">
         <label style="color:#a5b4fc;font-size:12px;display:block;margin-bottom:8px">
-          1 · 🎞️ VIDEO TO EDIT * <span style="color:#666">— 3–15 s · the motion, camera and timing stay the same · or press 🔁 on a finished clip below</span>
+          1 · 🎞️ VIDEO TO EDIT * <span style="color:#666">— 3–30 s · the motion, camera and timing stay the same · videos with cuts are edited shot by shot · or press 🔁 on a finished clip below</span>
         </label>
         <input type="file" id="mt-sw-video-file" accept="video/*" style="display:none" onchange="mtSwUploadVideo(this)">
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
@@ -1317,6 +1317,10 @@
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
           <input type="checkbox" id="mt-sw-sound" checked style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
           <span style="color:#ddd;font-size:13px">Keep the sound of the video</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
+          <input type="checkbox" id="mt-sw-notext" checked style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
+          <span style="color:#ddd;font-size:13px">Remove on-screen text <span style="color:#777">— captions, subtitles, emojis from the original video</span></span>
         </label>
       </div>
 
@@ -5244,7 +5248,10 @@ async function mtLoadHistory() {
       try { s = JSON.parse(c.settings_json || '{}'); } catch (e) {}
       const meta = (s.mode === 'swap'
         ? [s.model_label, s.seconds ? s.seconds + 's' : null,
-           '🔁 ' + (s.swaps || []).join(', '), s.cost ? '$' + Number(s.cost).toFixed(2) : null]
+           '🔁 ' + (s.swaps || []).join(', '), s.shots > 1 ? s.shots + ' shots' : null,
+           s.remove_text ? 'text removed' : null,
+           (s.warnings || []).length ? '⚠️ ' + s.warnings.length + ' shot(s) failed the check' : null,
+           s.cost ? '$' + Number(s.cost).toFixed(2) : null]
         : [s.model_label, s.seconds ? s.seconds + 's' : null,
            s.orientation === 'image' ? 'follow photo' : 'follow video',
            s.face ? 'face locked' : null, s.cost ? '$' + Number(s.cost).toFixed(2) : null])
@@ -5308,8 +5315,11 @@ function mtSwUpdateCost() {
   const el = document.getElementById('mt-sw-cost');
   if (!mtSwVideo) { el.textContent = ''; return; }
   const o = mtSwOpts();
-  const s = Math.max(mtSwVideo.seconds, (mtOpts && mtOpts.min_seconds) || 3);
-  el.textContent = `≈ $${(s * o.usd_per_second).toFixed(2)} · ${mtSwVideo.seconds}s · ${o.label}`;
+  const n = (mtSwVideo.shots || []).length || 1;
+  const cost = mtSwVideo.cost != null ? mtSwVideo.cost
+    : Math.max(mtSwVideo.seconds, (mtOpts && mtOpts.min_seconds) || 3) * o.usd_per_second;
+  el.textContent = `≈ $${cost.toFixed(2)} · ${mtSwVideo.seconds}s · ${n} shot${n === 1 ? '' : 's'} · ${o.label}`;
+  el.title = n > 1 ? 'Each shot is edited on its own (min 3 s billed per shot) so the swap holds after every cut. A shot that fails the automatic check is redone once — that adds its cost.' : '';
 }
 
 function mtSwDraw() {
@@ -5398,7 +5408,9 @@ function mtSwSetVideo(d, label, previewSrc) {
   const st = document.getElementById('mt-sw-video-status');
   const pv = document.getElementById('mt-sw-video-preview');
   st.style.color = '#4ade80';
-  st.textContent = `✅ ${label} · ${d.seconds}s · ${d.width}×${d.height}`;
+  const n = (d.shots || []).length;
+  st.textContent = `✅ ${label} · ${d.seconds}s · ${d.width}×${d.height}` +
+    (n > 1 ? ` · ${n} shots (cuts at ${d.shots.slice(1).map(s => s[0].toFixed(1) + 's').join(', ')})` : '');
   pv.src = previewSrc;
   pv.style.display = 'block';
   mtSwUpdateCost();
@@ -5457,10 +5469,11 @@ async function mtSwGenerate() {
     if (!swaps[i].what.trim()) { alert(`Swap ${i + 1}: write what in the video it replaces.`); return; }
   }
   const body = {
-    video_url: mtSwVideo.url, seconds: mtSwVideo.seconds,
+    video_file: mtSwVideo.filename, seconds: mtSwVideo.seconds, shots: mtSwVideo.shots || null,
     swaps: swaps.map(s => ({ what: s.what.trim(), url: s.main.url, extras: s.extras.map(x => x.url) })),
     extra: document.getElementById('mt-sw-extra').value.trim(),
-    keep_sound: document.getElementById('mt-sw-sound').checked
+    keep_sound: document.getElementById('mt-sw-sound').checked,
+    remove_text: document.getElementById('mt-sw-notext').checked
   };
   const o = mtSwOpts();
 

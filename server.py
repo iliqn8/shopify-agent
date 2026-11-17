@@ -1528,13 +1528,15 @@ def motion_swap_start():
 
     d = request.json or {}
     settings = {
-        "video_url": d.get("video_url"),
+        "video_file": d.get("video_file"),
         "seconds": float(d.get("seconds") or 0),
+        "shots": d.get("shots") or None,
         "swaps": d.get("swaps") or [],
         "extra": (d.get("extra") or "").strip(),
         "keep_sound": bool(d.get("keep_sound", True)),
+        "remove_text": bool(d.get("remove_text", False)),
     }
-    if not settings["video_url"]:
+    if not settings["video_file"]:
         return jsonify({"error": "Add the video first."}), 400
     try:
         motion_studio.clean_swaps(settings["swaps"])
@@ -1549,7 +1551,8 @@ def motion_swap_start():
                 try:
                     kb.save_studio_clip(settings["extra"], _json_s.dumps(dict(
                         {k: event.get(k) for k in
-                         ("mode", "model_label", "seconds", "swaps", "keep_sound", "cost")},
+                         ("mode", "model_label", "seconds", "swaps", "keep_sound", "cost",
+                          "shots", "remove_text", "warnings")},
                         provider="kling-motion")),
                         event["filename"])
                 except Exception:

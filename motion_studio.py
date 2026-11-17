@@ -65,7 +65,8 @@ VIDEO_MAX_EDGE = 1920
 # api.fal.ai/v1/models/pricing: Pro and Standard are both $0.14/s, so only Pro.
 SWAP_MODEL = {"id": "fal-ai/kling-video/o3/pro/video-to-video/edit",
               "label": "Kling O3 Pro Edit", "usd_per_second": 0.14}
-SWAP_MAX_SECONDS = 15
+SWAP_MAX_SECONDS = 15        # per call — longer videos are edited shot by shot
+SWAP_MAX_TOTAL = 30
 SWAP_MIN_SHORT_EDGE = 720
 SWAP_MAX_ITEMS = 4
 
@@ -78,7 +79,7 @@ def options():
         "orientations": ORIENTATIONS,
         "min_seconds": MIN_SECONDS,
         "swap": {"label": SWAP_MODEL["label"], "usd_per_second": SWAP_MODEL["usd_per_second"],
-                 "max_seconds": SWAP_MAX_SECONDS, "max_items": SWAP_MAX_ITEMS},
+                 "max_seconds": SWAP_MAX_TOTAL, "max_items": SWAP_MAX_ITEMS},
     }
 
 
@@ -152,8 +153,9 @@ def _cleanup_videos(max_age=3 * 24 * 3600):
 def prepare_video(raw, mode="motion"):
     """Re-encode the reference to H.264/AAC mp4 (≤1920 long edge), upload it to fal.
 
-    mode "swap" applies the O3 Edit limits instead: 3–15 s and a short edge of
-    at least 720 px (smaller clips are upscaled — fal rejects them otherwise).
+    mode "swap" applies the O3 Edit limits instead: up to 30 s (it is edited
+    shot by shot, ≤15 s each), a short edge of at least 720 px (smaller clips are
+    upscaled — fal rejects them otherwise), and returns the detected "shots".
 
     Returns {"url", "seconds", "width", "height", "thumb", "filename"}."""
     if not raw:
@@ -163,7 +165,7 @@ def prepare_video(raw, mode="motion"):
 
     os.makedirs(VIDEO_DIR, exist_ok=True)
     _cleanup_videos()
-    max_s = SWAP_MAX_SECONDS if mode == "swap" else max(ORIENTATIONS.values())
+    max_s = SWAP_MAX_TOTAL if mode == "swap" else max(ORIENTATIONS.values())
     min_short = SWAP_MIN_SHORT_EDGE if mode == "swap" else 0
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "src")
@@ -219,6 +221,13 @@ def prepare_video(raw, mode="motion"):
             with open(shot, "rb") as f:
                 thumb = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
 
+    if mode == "swap":
+        # The shots are uploaded one by one at generation time.
+        shots = detect_shots(dest, seconds)
+        return {"url": None, "seconds": seconds, "width": w, "height": h, "thumb": thumb,
+                "filename": "%s/%s" % (VIDEO_SUBDIR, name), "has_audio": has_audio,
+                "shots": shots, "billed_seconds": round(billed_seconds(shots), 2),
+                "cost": estimate_swap_cost(shots)}
     with open(dest, "rb") as f:
         url = _upload(f.read(), name, "video/mp4")
     return {"url": url, "seconds": seconds, "width": w, "height": h, "thumb": thumb,
@@ -319,9 +328,51 @@ def generate_stream(image_url, video_url, seconds, model=DEFAULT_MODEL, orientat
 
 
 # ── Objects swap ───────────────────────────────────────────────────────────
+#
+# Kling O3 Edit loses track of what it is replacing at a hard cut: on a 4-shot
+# ad (17.11.2026) it swapped the person in shots 1–2 and left the original man
+# in shots 3–4. So the video is split at its cuts and every shot is edited on
+# its own (in parallel), checked by Claude, retried once if the swap did not
+# take, trimmed back and glued together under the original sound.
 
-def estimate_swap_cost(seconds):
-    return round(max(float(seconds or 0), MIN_SECONDS) * SWAP_MODEL["usd_per_second"], 2)
+SHOT_SCENE_THRESHOLD = 0.3   # ffmpeg scene score; 0.2–0.4 gave identical cuts on real ads
+SHOT_MIN = 0.4               # cuts closer than this are flashes, not shots
+CHECK_MODEL = "claude-opus-5"
+CHECK_FRAMES = (0.15, 0.5, 0.85)
+SWAP_RETRIES = 1
+
+
+def detect_shots(path, seconds):
+    """[[start, end], ...] covering the whole video, split at hard cuts and
+    so that no piece is longer than the model accepts."""
+    _, err = video_assembler._run(
+        ["-i", path, "-vf", "select=gt(scene\\,%s),showinfo" % SHOT_SCENE_THRESHOLD,
+         "-an", "-f", "null", "-"], timeout=600)
+    cuts = []
+    for t in sorted(float(x) for x in re.findall(r"pts_time:([\d.]+)", err)):
+        prev = cuts[-1] if cuts else 0.0
+        if t - prev >= SHOT_MIN and seconds - t >= SHOT_MIN:
+            cuts.append(round(t, 3))
+    edges = [0.0] + cuts + [round(float(seconds), 3)]
+    shots = []
+    for a, b in zip(edges, edges[1:]):
+        n = int((b - a) // (SWAP_MAX_SECONDS + 0.01)) + 1
+        step = (b - a) / n
+        for k in range(n):
+            shots.append([round(a + k * step, 3), round(a + (k + 1) * step, 3)])
+    return shots
+
+
+def billed_seconds(shots):
+    return sum(max(b - a, MIN_SECONDS) for a, b in shots)
+
+
+def estimate_swap_cost(shots_or_seconds):
+    if isinstance(shots_or_seconds, (list, tuple)):
+        secs = billed_seconds(shots_or_seconds)
+    else:
+        secs = max(float(shots_or_seconds or 0), MIN_SECONDS)
+    return round(secs * SWAP_MODEL["usd_per_second"], 2)
 
 
 def clean_swaps(swaps):
@@ -345,76 +396,236 @@ def clean_swaps(swaps):
     return out
 
 
-def build_swap_prompt(swaps, extra=""):
+def build_swap_prompt(swaps, extra="", remove_text=False):
     lines = ["Edit @Video1."]
     for i, sw in enumerate(swaps, 1):
-        lines.append("Replace %s with @Element%d, matching the reference photos exactly."
-                     % (sw["what"], i))
+        lines.append("Replace %s with @Element%d in every frame, matching the reference photos "
+                     "exactly." % (sw["what"], i))
+    if remove_text:
+        lines.append("Remove all on-screen text, captions, subtitles, stickers and emojis "
+                     "overlaid on the video and show the clean scene behind them.")
+        keep_tail = ""
+    else:
+        keep_tail = " and any on-screen text"
     lines.append("Keep everything else exactly as in @Video1: the motion, timing, camera, "
-                 "framing, background, lighting and all other people and objects.")
+                 "framing, background, lighting, all other people and objects" + keep_tail + ".")
     extra = (extra or "").strip()
     if extra:
         lines.append(extra)
     return " ".join(lines)
 
 
-def build_swap_payload(video_url, swaps, extra="", keep_sound=True):
+def build_swap_payload(video_url, swaps, extra="", remove_text=False):
+    # Sound is put back from the original after the shots are joined, so the
+    # model never has to carry it.
     return {"video_url": video_url,
-            "prompt": build_swap_prompt(swaps, extra),
-            "keep_audio": bool(keep_sound),
+            "prompt": build_swap_prompt(swaps, extra, remove_text),
+            "keep_audio": False,
             "elements": [{"frontal_image_url": sw["url"],
                           "reference_image_urls": sw["extras"] or [sw["url"]]}
                          for sw in swaps]}
 
 
-def swap_stream(video_url, seconds, swaps, extra="", keep_sound=True):
+def _source_path(video_file):
+    root = os.path.realpath(video_assembler.OUTPUT_DIR)
+    path = os.path.realpath(os.path.join(root, (video_file or "").replace("\\", "/")))
+    if not video_file or not path.startswith(root + os.sep) or not os.path.isfile(path):
+        raise MotionError("The uploaded video is no longer on the server — choose it again.")
+    return path
+
+
+def _cut_shot(src, a, b, dest):
+    """One shot as its own mp4; shorter than the model minimum → last frame held."""
+    dur = b - a
+    # No setpts here: with ffmpeg 7.1, setpts before tpad silently drops the padding.
+    vf = "null"
+    if dur < MIN_SECONDS:
+        vf = "tpad=stop_mode=clone:stop_duration=%.2f" % (MIN_SECONDS + 0.2 - dur)
+    code, err = video_assembler._run(
+        ["-y", "-ss", "%.3f" % a, "-t", "%.3f" % dur, "-i", src, "-an", "-vf", vf,
+         "-t", "%.3f" % max(dur, MIN_SECONDS + 0.1),
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+         "-movflags", "+faststart", dest], timeout=600)
+    if code != 0 or not os.path.exists(dest):
+        raise MotionError("Could not cut shot %.1f–%.1fs: %s" % (a, b, err.strip()[-200:]))
+
+
+def _frames_jpeg(path, dur, points):
+    out = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, p in enumerate(points):
+            f = os.path.join(tmp, "f%d.jpg" % i)
+            video_assembler._run(["-y", "-ss", "%.2f" % (dur * p), "-i", path, "-frames:v", "1",
+                                  "-vf", "scale=-2:720", f], timeout=60)
+            if os.path.exists(f):
+                with open(f, "rb") as fh:
+                    out.append(fh.read())
+    return out
+
+
+def _check_shot(path, dur, swaps, remove_text):
+    """Ask Claude whether the swap took in this shot. (ok, note).
+
+    Never blocks the clip: if the check itself fails, the shot passes."""
+    try:
+        import anthropic
+        import requests as _rq
+        frames = _frames_jpeg(path, dur, CHECK_FRAMES)
+        if not frames:
+            return True, ""
+        content = []
+        for i, sw in enumerate(swaps, 1):
+            raw = _rq.get(sw["url"], timeout=60).content
+            content += [{"type": "text", "text": "REFERENCE %d — what \"%s\" must become:" % (i, sw["what"])},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                     "data": base64.b64encode(raw).decode()}}]
+        for i, fr in enumerate(frames, 1):
+            content += [{"type": "text", "text": "FRAME %d of the edited shot:" % i},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                     "data": base64.b64encode(fr).decode()}}]
+        asks = "; ".join('"%s" → REFERENCE %d' % (sw["what"], i) for i, sw in enumerate(swaps, 1))
+        text_rule = ("\nAlso fail it if any overlaid caption, subtitle or sticker text is still "
+                     "visible (text that is part of the scene itself, like a sign or a logo on "
+                     "clothing, is fine)." if remove_text else "")
+        content.append({"type": "text", "text":
+            "This shot was edited to replace: %s.\n"
+            "Pass it only if, in EVERY frame where that subject is visible, it now clearly is "
+            "the reference (same person / same product), not the original one. A frame where "
+            "the subject is out of shot is fine.%s\n"
+            'Answer with JSON only: {"ok": true|false, "note": "<one short sentence>"}'
+            % (asks, text_rule)})
+        client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
+        resp = client.messages.create(model=CHECK_MODEL, max_tokens=200,
+                                      messages=[{"role": "user", "content": content}])
+        txt = "".join(b.text for b in resp.content if b.type == "text")
+        m = re.search(r"\{.*\}", txt, re.DOTALL)
+        import json as _json
+        data = _json.loads(m.group(0)) if m else {}
+        return bool(data.get("ok", True)), str(data.get("note") or "")
+    except Exception as e:
+        return True, "(check skipped: %s)" % type(e).__name__
+
+
+def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
+    """Upload, edit, check, maybe retry. Returns (local_path, cost, warning)."""
+    tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
+    with open(src_shot, "rb") as fh:
+        url = _upload(fh.read(), os.path.basename(src_shot), "video/mp4")
+    payload = build_swap_payload(url, swaps, extra, remove_text)
+    billed = max(dur, MIN_SECONDS) * SWAP_MODEL["usd_per_second"]
+    cost, warning, out_path = 0.0, "", None
+    for attempt in range(SWAP_RETRIES + 1):
+        res = fal_client.run(SWAP_MODEL["id"], payload, timeout=2400,
+                             on_status=lambda t: say("%s: %s" % (tag, t)))
+        cost += billed
+        video = res.get("video") or {}
+        vurl = video.get("url") if isinstance(video, dict) else None
+        if not vurl:
+            raise MotionError("%s: the model returned no video." % tag)
+        out_path = os.path.join(tmp, "out_%02d_%d.mp4" % (idx, attempt))
+        with open(out_path, "wb") as fh:
+            fh.write(fal_client.download(vurl))
+        ok, note = _check_shot(out_path, dur, swaps, remove_text)
+        if ok:
+            say("%s: ✅ swap checked%s" % (tag, (" — " + note) if note.startswith("(") else ""))
+            warning = ""
+            break
+        warning = "%s: ⚠️ %s" % (tag, note or "the swap did not take")
+        if attempt < SWAP_RETRIES:
+            say(warning + " — trying this shot again…")
+    if warning:
+        say(warning + " (kept the last try)")
+    return out_path, cost, warning
+
+
+def _join(parts, durs, src, keep_sound, dest):
+    """Trim every edited shot to its real length, scale to one size/fps, concat,
+    and put the original sound back."""
+    _, info = video_assembler._run(["-i", parts[0]], timeout=60)
+    m = re.search(r"Stream #\d+:\d+.*?: Video:.*?(\d{2,5})x(\d{2,5})", info)
+    w, h = (int(m.group(1)), int(m.group(2))) if m else (1080, 1920)
+    args = ["-y"]
+    for p in parts:
+        args += ["-i", p]
+    if keep_sound:
+        args += ["-i", src]
+    chains = []
+    for i, d in enumerate(durs):
+        chains.append("[%d:v]trim=duration=%.3f,setpts=PTS-STARTPTS,scale=%d:%d:force_original_aspect_ratio=decrease,"
+                      "pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1[v%d]" % (i, d, w, h, w, h, i))
+    chains.append("".join("[v%d]" % i for i in range(len(parts))) +
+                  "concat=n=%d:v=1:a=0[vout]" % len(parts))
+    args += ["-filter_complex", ";".join(chains), "-map", "[vout]"]
+    if keep_sound:
+        args += ["-map", "%d:a?" % len(parts), "-c:a", "aac", "-b:a", "160k", "-shortest"]
+    args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart", dest]
+    code, err = video_assembler._run(args, timeout=900)
+    if code != 0 or not os.path.exists(dest):
+        raise MotionError("Could not join the shots: %s" % err.strip()[-300:])
+
+
+def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=True,
+                remove_text=False, video_url=None):
     """Make one objects-swap clip. Yields {"type": "status"|"done"} events."""
-    if not video_url:
-        yield {"type": "done", "error": "Add the video first."}
-        return
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+
     try:
         swaps = clean_swaps(swaps)
-        if float(seconds or 0) > SWAP_MAX_SECONDS + 0.5:
-            raise MotionError("Objects swap allows at most %ds of video." % SWAP_MAX_SECONDS)
+        src = _source_path(video_file)
+        seconds = float(seconds or 0) or (video_assembler._probe_duration(src) or 0)
+        if seconds > SWAP_MAX_TOTAL + 0.5:
+            raise MotionError("Objects swap allows at most %ds of video." % SWAP_MAX_TOTAL)
+        shots = shots or detect_shots(src, seconds)
     except MotionError as e:
         yield {"type": "done", "error": str(e)}
         return
 
-    cost = estimate_swap_cost(seconds)
-    payload = build_swap_payload(video_url, swaps, extra, keep_sound)
+    n = len(shots)
+    est = estimate_swap_cost(shots)
+    yield {"type": "status", "text": "🔁 %s · %.1fs · %d shot%s · %d swap%s%s · ≈$%.2f" % (
+        SWAP_MODEL["label"], seconds, n, "" if n == 1 else "s", len(swaps),
+        "" if len(swaps) == 1 else "s", " · text removed" if remove_text else "", est)}
+    if n > 1:
+        yield {"type": "status", "text": "✂️ Cuts at " + ", ".join("%.1fs" % a for a, _ in shots[1:])
+               + " — each shot is edited on its own so the swap holds after every cut"}
+    yield {"type": "status", "text": "📝 " + build_swap_prompt(swaps, extra, remove_text)}
+    yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes (shots run at the same time)…"}
+
+    msgs = queue.Queue()
     try:
-        pending = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cut = []
+            for i, (a, b) in enumerate(shots):
+                p = os.path.join(tmp, "shot_%02d.mp4" % i)
+                _cut_shot(src, a, b, p)
+                cut.append(p)
+            with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
+                futs = [pool.submit(_edit_shot, i, n, cut[i], b - a, swaps, extra, remove_text,
+                                    tmp, msgs.put) for i, (a, b) in enumerate(shots)]
+                while not all(f.done() for f in futs):
+                    try:
+                        yield {"type": "status", "text": "   " + msgs.get(timeout=2)}
+                    except queue.Empty:
+                        pass
+                while not msgs.empty():
+                    yield {"type": "status", "text": "   " + msgs.get()}
+                results = [f.result() for f in futs]
 
-        def status(text):
-            pending.append(text)
-
-        def drain():
-            while pending:
-                yield {"type": "status", "text": "   " + pending.pop(0)}
-
-        yield {"type": "status", "text": "🔁 %s · %.1fs · %d swap%s · ≈$%.2f" % (
-            SWAP_MODEL["label"], float(seconds or 0), len(swaps),
-            "" if len(swaps) == 1 else "s", cost)}
-        yield {"type": "status", "text": "📝 " + payload["prompt"]}
-        yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes…"}
-
-        out = fal_client.run(SWAP_MODEL["id"], payload, on_status=status, timeout=2400)
-        yield from drain()
-
-        video = out.get("video") or {}
-        url = video.get("url") if isinstance(video, dict) else None
-        if not url:
-            yield {"type": "done", "error": "The model returned no video: %s" % str(out)[:300]}
-            return
-
-        yield {"type": "status", "text": "⬇️ Downloading…"}
-        filename = clip_studio.save_output(url, "swap " + swaps[0]["what"], "mp4")
-        yield {"type": "status", "text": "✅ Done"}
-        yield {"type": "done", "filename": filename, "video_url": url, "cost": cost,
-               "seconds": seconds, "mode": "swap", "model_label": SWAP_MODEL["label"],
+            cost = round(sum(r[1] for r in results), 2)
+            warnings = [r[2] for r in results if r[2]]
+            yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
+            name = "clip_swap_%s_%d.mp4" % (clip_studio._safe_stem(swaps[0]["what"]), int(time.time()))
+            _join([r[0] for r in results], [b - a for a, b in shots], src, keep_sound,
+                  os.path.join(video_assembler.OUTPUT_DIR, name))
+        yield {"type": "status", "text": "✅ Done" + (" — with warnings above" if warnings else "")}
+        yield {"type": "done", "filename": name, "cost": cost, "seconds": seconds,
+               "mode": "swap", "model_label": SWAP_MODEL["label"], "shots": n,
                "swaps": [sw["what"] for sw in swaps], "keep_sound": bool(keep_sound),
-               "prompt": payload["prompt"]}
-    except fal_client.FalError as e:
+               "remove_text": bool(remove_text), "warnings": warnings,
+               "prompt": build_swap_prompt(swaps, extra, remove_text)}
+    except (fal_client.FalError, MotionError) as e:
         yield {"type": "done", "error": str(e)}
     except Exception as e:
         yield {"type": "done", "error": "%s: %s" % (type(e).__name__, e)}
