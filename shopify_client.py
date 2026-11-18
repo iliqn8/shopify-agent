@@ -1,32 +1,209 @@
-import requests
+import contextvars
+import json
 import os
+import threading
+import time
 
-SHOP = os.getenv("SHOPIFY_STORE", "hzw4be-qf.myshopify.com")
-TOKEN = os.getenv("SHOPIFY_TOKEN", "")
-BASE = f"https://{SHOP}/admin/api/2024-04"
-HEADERS = {"X-Shopify-Access-Token": TOKEN, "Content-Type": "application/json"}
+import requests
 
+API_VERSION = "2024-04"
+
+# ── Stores ─────────────────────────────────────────────────────────────────
+# Main store = SHOPIFY_STORE / SHOPIFY_TOKEN (env). Extra stores come from env
+# SHOPIFY_STORE_2 / SHOPIFY_TOKEN_2 / SHOPIFY_NAME_2 ... or are added in the UI
+# (saved to stores.json on the persistent volume). A store can also use
+# client_id + client_secret instead of a token (client-credentials grant,
+# token refreshed automatically).
+# Which store a request talks to is picked per browser (X-Store header) and
+# kept in a context variable, so two devices on two stores do not mix.
+
+_DATA_DIR = "/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__))
+_STORES_FILE = os.path.join(_DATA_DIR, "stores.json")
+_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ec4899", "#a855f7", "#14b8a6"]
+
+_current = contextvars.ContextVar("shopify_store", default=None)
+_lock = threading.Lock()
+_cc_tokens = {}   # domain -> (token, expires_at)
+
+
+def _norm_domain(d):
+    d = (d or "").strip().lower()
+    for p in ("https://", "http://"):
+        if d.startswith(p):
+            d = d[len(p):]
+    d = d.split("/")[0]
+    if d and "." not in d:
+        d += ".myshopify.com"
+    return d
+
+
+def _env_stores():
+    out = []
+    main = _norm_domain(os.getenv("SHOPIFY_STORE", "hzw4be-qf.myshopify.com"))
+    out.append({"domain": main, "token": os.getenv("SHOPIFY_TOKEN", ""),
+                "name": os.getenv("SHOPIFY_NAME", "Bambyna"), "source": "env"})
+    for i in range(2, 10):
+        d = _norm_domain(os.getenv(f"SHOPIFY_STORE_{i}", ""))
+        if not d:
+            continue
+        out.append({"domain": d, "token": os.getenv(f"SHOPIFY_TOKEN_{i}", ""),
+                    "client_id": os.getenv(f"SHOPIFY_CLIENT_ID_{i}", ""),
+                    "client_secret": os.getenv(f"SHOPIFY_CLIENT_SECRET_{i}", ""),
+                    "name": os.getenv(f"SHOPIFY_NAME_{i}", d.split(".")[0]), "source": "env"})
+    return out
+
+
+def _file_stores():
+    try:
+        with open(_STORES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def stores():
+    """All configured stores (env first, then ones added in the UI)."""
+    seen, out = set(), []
+    for s in _env_stores() + _file_stores():
+        if s["domain"] in seen:
+            continue
+        seen.add(s["domain"])
+        s = dict(s)
+        s["color"] = _COLORS[len(out) % len(_COLORS)]
+        out.append(s)
+    return out
+
+
+def public_stores():
+    return [{"domain": s["domain"], "name": s.get("name") or s["domain"],
+             "color": s["color"], "removable": s.get("source") != "env"} for s in stores()]
+
+
+def default_domain():
+    return stores()[0]["domain"]
+
+
+def _store(domain=None):
+    domain = _norm_domain(domain or _current.get() or "") or default_domain()
+    for s in stores():
+        if s["domain"] == domain:
+            return s
+    raise ValueError(f"Unknown store: {domain}")
+
+
+def use_store(domain):
+    """Set the store for the current request / thread context. Unknown -> main store."""
+    d = _norm_domain(domain or "")
+    if not d or not any(s["domain"] == d for s in stores()):
+        d = default_domain()
+    _current.set(d)
+    return d
+
+
+def current_store():
+    s = _store()
+    return {"domain": s["domain"], "name": s.get("name") or s["domain"], "color": s["color"]}
+
+
+def _token(s):
+    if s.get("token"):
+        return s["token"]
+    if s.get("client_id") and s.get("client_secret"):
+        cached = _cc_tokens.get(s["domain"])
+        if cached and cached[1] > time.time() + 300:
+            return cached[0]
+        r = requests.post(f"https://{s['domain']}/admin/oauth/access_token",
+                          data={"grant_type": "client_credentials",
+                                "client_id": s["client_id"],
+                                "client_secret": s["client_secret"]}, timeout=30)
+        r.raise_for_status()
+        j = r.json()
+        _cc_tokens[s["domain"]] = (j["access_token"], time.time() + int(j.get("expires_in", 86399)))
+        return j["access_token"]
+    return ""
+
+
+def _base(domain=None):
+    return f"https://{_store(domain)['domain']}/admin/api/{API_VERSION}"
+
+
+def _headers(domain=None):
+    return {"X-Shopify-Access-Token": _token(_store(domain)), "Content-Type": "application/json"}
+
+
+def __getattr__(name):
+    # Old code reads sc.SHOP / sc.HEADERS / sc.BASE / sc.TOKEN - resolve them for the current store.
+    if name == "SHOP":
+        return _store()["domain"]
+    if name == "HEADERS":
+        return _headers()
+    if name == "BASE":
+        return _base()
+    if name == "TOKEN":
+        return _token(_store())
+    raise AttributeError(name)
+
+
+def add_store(domain, name="", token="", client_id="", client_secret=""):
+    """Check the credentials against /shop.json, then save the store. Returns its public info."""
+    d = _norm_domain(domain)
+    if not d.endswith(".myshopify.com"):
+        raise ValueError("Use the store's .myshopify.com address (Settings -> Domains).")
+    s = {"domain": d, "token": (token or "").strip(), "client_id": (client_id or "").strip(),
+         "client_secret": (client_secret or "").strip()}
+    if not s["token"] and not (s["client_id"] and s["client_secret"]):
+        raise ValueError("Add an Admin API access token (shpat_...) or a Client ID + Client secret.")
+    _cc_tokens.pop(d, None)
+    try:
+        tok = _token(s)
+    except requests.HTTPError as e:
+        raise ValueError(f"Could not get a token with that Client ID / secret: {e.response.text[:200]}")
+    r = requests.get(f"https://{d}/admin/api/{API_VERSION}/shop.json",
+                     headers={"X-Shopify-Access-Token": tok}, timeout=30)
+    if r.status_code != 200:
+        raise ValueError(f"Shopify said {r.status_code}: {r.text[:200]}")
+    shop = r.json()["shop"]
+    s["name"] = (name or "").strip() or shop.get("name") or d
+    s["source"] = "file"
+    with _lock:
+        items = [x for x in _file_stores() if x["domain"] != d]
+        items.append(s)
+        with open(_STORES_FILE, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2)
+    return next(p for p in public_stores() if p["domain"] == d)
+
+
+def remove_store(domain):
+    d = _norm_domain(domain)
+    with _lock:
+        items = [x for x in _file_stores() if x["domain"] != d]
+        with open(_STORES_FILE, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2)
+    _cc_tokens.pop(d, None)
+
+
+# ── HTTP ───────────────────────────────────────────────────────────────────
 
 def _get(path, params=None):
-    r = requests.get(f"{BASE}{path}", headers=HEADERS, params=params)
+    r = requests.get(f"{_base()}{path}", headers=_headers(), params=params)
     r.raise_for_status()
     return r.json()
 
 
 def _post(path, data):
-    r = requests.post(f"{BASE}{path}", headers=HEADERS, json=data)
+    r = requests.post(f"{_base()}{path}", headers=_headers(), json=data)
     r.raise_for_status()
     return r.json()
 
 
 def _put(path, data):
-    r = requests.put(f"{BASE}{path}", headers=HEADERS, json=data)
+    r = requests.put(f"{_base()}{path}", headers=_headers(), json=data)
     r.raise_for_status()
     return r.json()
 
 
 def _delete(path):
-    r = requests.delete(f"{BASE}{path}", headers=HEADERS)
+    r = requests.delete(f"{_base()}{path}", headers=_headers())
     r.raise_for_status()
     return {"success": True}
 
@@ -136,7 +313,7 @@ def update_theme_file(theme_id, key, value):
 
 
 def delete_theme_file(theme_id, key):
-    r = requests.delete(f"{BASE}/themes/{theme_id}/assets.json",
-                        headers=HEADERS, params={"asset[key]": key})
+    r = requests.delete(f"{_base()}/themes/{theme_id}/assets.json",
+                        headers=_headers(), params={"asset[key]": key})
     r.raise_for_status()
     return {"success": True}

@@ -799,6 +799,21 @@ If the user already provided ALL required fields in their first message, call th
         )
 
     blocks = [{"type": "text", "text": system, "cache_control": CACHE}]
+    # Several stores can be connected; the chat history is shared between them,
+    # so say every turn which one the tools act on right now.
+    try:
+        st = sc.current_store()
+        others = [s["name"] for s in sc.public_stores() if s["domain"] != st["domain"]]
+        note = (f"## Active store\nEvery Shopify tool call in this turn acts on **{st['name']}** "
+                f"({st['domain']}).")
+        if others:
+            note += (f" Other connected stores: {', '.join(others)}. Earlier messages may be about "
+                     "another store - if the user asks to change something in a store that is not "
+                     "the active one, tell them to switch the store in the header first; do not act "
+                     "on the active store instead.")
+        blocks.append({"type": "text", "text": note})
+    except Exception:
+        pass
     if extra_context:
         blocks.append({"type": "text",
                        "text": "## Store Training Data:\n" + extra_context})

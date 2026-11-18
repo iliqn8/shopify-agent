@@ -21,6 +21,23 @@ os.makedirs(os.path.join(os.path.dirname(__file__), "generated_images"), exist_o
 
 kb.init_db()
 
+import contextvars
+import shopify_client as _sc
+
+
+@app.before_request
+def _pick_store():
+    # Each browser says which store it works on (X-Store header, or ?store= for
+    # links/EventSource). Everything in this request - and every background job
+    # it starts through _spawn - talks to that store.
+    _sc.use_store(request.headers.get("X-Store") or request.args.get("store"))
+
+
+def _spawn(fn):
+    """Start a daemon thread that keeps the request's store (contextvars)."""
+    ctx = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx.run(fn), daemon=True).start()
+
 # ── Start image generator in background thread ─────────────────────────────
 
 def _start_imagegen():
@@ -38,6 +55,32 @@ threading.Thread(target=_start_imagegen, daemon=True).start()
 @app.route("/")
 def index():
     return render_template("app.html")
+
+
+# ── Stores ─────────────────────────────────────────────────────────────────
+
+@app.route("/api/stores", methods=["GET"])
+def stores_list():
+    return jsonify({"stores": _sc.public_stores(), "current": _sc.current_store()})
+
+
+@app.route("/api/stores", methods=["POST"])
+def stores_add():
+    d = request.json or {}
+    try:
+        s = _sc.add_store(d.get("domain", ""), name=d.get("name", ""), token=d.get("token", ""),
+                          client_id=d.get("client_id", ""), client_secret=d.get("client_secret", ""))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "store": s})
+
+
+@app.route("/api/stores/<path:domain>", methods=["DELETE"])
+def stores_remove(domain):
+    if not any(s["domain"] == domain and s["removable"] for s in _sc.public_stores()):
+        return jsonify({"error": "This store is set in Railway variables and can't be removed here"}), 400
+    _sc.remove_store(domain)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -152,7 +195,7 @@ def chat_start():
             _chat_jobs[job_id]["events"].append({"type": "done", "reply": err, "messages": []})
             _chat_jobs[job_id]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
     return jsonify({"job_id": job_id})
 
 
@@ -357,7 +400,7 @@ def product_build_start():
             _build_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
             _build_jobs[job_id]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
     return jsonify({"job_id": job_id})
 
 
@@ -416,7 +459,7 @@ def palettes_more_start():
             _build_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
             _build_jobs[job_id]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
     return jsonify({"job_id": job_id})
 
 
@@ -630,7 +673,7 @@ def section_auto_capture():
             _section_jobs[job_id]["events"].append({"type": "done", "error": str(e)})
             _section_jobs[job_id]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
     return jsonify({"job_id": job_id})
 
 
@@ -668,7 +711,7 @@ def section_build_start():
             _section_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
             _section_jobs[job_id]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
     return jsonify({"job_id": job_id})
 
 
@@ -721,7 +764,7 @@ def section_edit_start():
             _section_jobs[job_id]["events"].append({"type": "done", "reply": f"Error: {e}"})
             _section_jobs[job_id]["done"] = True
 
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
     return jsonify({"job_id": job_id})
 
 
@@ -750,6 +793,7 @@ def section_publish():
             liquid_code=liquid_code,
             reference_url=reference_url,
             theme_id=str(theme_id),
+            shop=sc.SHOP,
         )
         return jsonify({
             "ok": True,
@@ -770,6 +814,8 @@ def list_custom_sections():
 def delete_custom_section(sid):
     import shopify_client as sc
     row = kb.get_custom_section(sid)
+    if row and row.get("shop"):
+        sc.use_store(row["shop"])
     if row and row.get("theme_id") and row.get("asset_key"):
         try:
             sc.delete_theme_file(row["theme_id"], row["asset_key"])
@@ -790,6 +836,8 @@ def republish_custom_section(sid):
     row = kb.get_custom_section(sid)
     if not row:
         return jsonify({"error": "Section not found"}), 404
+    if row.get("shop"):
+        sc.use_store(row["shop"])
 
     try:
         sc.update_theme_file(row["theme_id"], row["asset_key"], liquid_code)
@@ -817,7 +865,7 @@ def _run_video_job(job_id, generator_factory):
             _video_jobs[job_id]["done"] = True
 
     _video_jobs[job_id] = {"events": [], "done": False}
-    threading.Thread(target=run, daemon=True).start()
+    _spawn(run)
 
 
 @app.route("/api/video-models")
@@ -2014,7 +2062,7 @@ def shopify_products():
             "description": p.get("body_html") or "",
             "price": variants[0].get("price") if variants else None,
             "image": (images[0].get("src") if images else None) or (p.get("image") or {}).get("src"),
-            "url": f"https://{os.getenv('SHOPIFY_STORE', '')}/products/{p.get('handle')}",
+            "url": f"https://{sc.SHOP}/products/{p.get('handle')}",
         })
     return jsonify(out)
 

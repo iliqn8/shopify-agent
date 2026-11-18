@@ -12,6 +12,36 @@
   .header h1 { font-size: 18px; font-weight: 600; color: #fff; }
   .header .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
   .header .store { font-size: 12px; color: #666; margin-left: auto; }
+  .header { border-top: 3px solid var(--store-color, #22c55e); }
+  .header .dot { background: var(--store-color, #22c55e); }
+  .store-picker { position: relative; margin-left: auto; }
+  .store-picker > button.store-btn { display: flex; align-items: center; gap: 8px; color: #fff; font-size: 13px; font-weight: 600;
+    border: 1px solid var(--store-color, #22c55e); background: #161616; padding: 6px 12px; }
+  .store-picker .sdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .store-picker .sdomain { font-size: 11px; font-weight: 400; color: #777; }
+  .store-menu { display: none; position: absolute; right: 0; top: calc(100% + 6px); z-index: 1000; min-width: 260px;
+    background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+  .store-menu.open { display: block; }
+  .store-menu .srow { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; color: #ddd; }
+  .store-menu .srow:hover { background: #262626; }
+  .store-menu .srow.active { background: #222; color: #fff; font-weight: 600; }
+  .store-menu .srow .sinfo { flex: 1; min-width: 0; }
+  .store-menu .srow .sinfo div:last-child { font-size: 11px; color: #777; font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
+  .store-menu .srm { background: none !important; border: none !important; color: #666 !important; padding: 2px 6px !important; }
+  .store-menu .srm:hover { color: #ef4444 !important; }
+  .store-menu .sadd { border-top: 1px solid #2a2a2a; margin-top: 4px; color: #8ab4ff; }
+  .store-modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 2000; align-items: center; justify-content: center; padding: 16px; }
+  .store-modal-bg.open { display: flex; }
+  .store-modal { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 20px; width: 100%; max-width: 480px; max-height: 90vh; overflow: auto; }
+  .store-modal h3 { color: #fff; font-size: 16px; margin-bottom: 6px; }
+  .store-modal p.hint { font-size: 12px; color: #888; line-height: 1.5; margin-bottom: 12px; }
+  .store-modal label { display: block; font-size: 11px; color: #999; text-transform: uppercase; letter-spacing: .04em; margin: 10px 0 4px; }
+  .store-modal input { width: 100%; background: #111; border: 1px solid #333; color: #eee; padding: 9px 10px; border-radius: 6px; font-size: 13px; }
+  .store-modal .or { text-align: center; font-size: 11px; color: #666; margin: 10px 0 0; }
+  .store-modal .sbtns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .store-modal .sbtns button { padding: 8px 14px; border-radius: 6px; border: 1px solid #3a3a3a; background: #2a2a2a; color: #ccc; cursor: pointer; font-size: 13px; }
+  .store-modal .sbtns button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+  .store-modal .serr { color: #ef4444; font-size: 12px; margin-top: 10px; white-space: pre-wrap; }
   .header button { background: #2a2a2a; border: 1px solid #3a3a3a; color: #aaa; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   .header button:hover { background: #333; color: #fff; }
 
@@ -96,6 +126,9 @@
     .header h1 { font-size: 16px; white-space: nowrap; }
     .header .store, #network-url { display: none; }
     .header button { margin-left: auto; }
+    .store-picker { order: 3; width: 100%; margin-left: 0; }
+    .store-picker > button.store-btn { width: 100%; margin-left: 0; justify-content: flex-start; }
+    .store-menu { left: 0; right: 0; }
     .tabs { padding: 0 6px; overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
     .tabs::-webkit-scrollbar { display: none; }
     .tab { padding: 10px 11px; white-space: nowrap; flex-shrink: 0; }
@@ -112,9 +145,42 @@
 <div class="header">
   <div class="dot"></div>
   <h1>Shopify AI Agent</h1>
-  <span class="store">hzw4be-qf.myshopify.com</span>
+  <div class="store-picker" id="store-picker">
+    <button class="store-btn" onclick="toggleStoreMenu(event)" title="Which store the agent works on">
+      <span class="sdot" id="store-dot"></span>
+      <span id="store-name">…</span>
+      <span class="sdomain" id="store-domain"></span>
+      <span style="color:#777">▾</span>
+    </button>
+    <div class="store-menu" id="store-menu"></div>
+  </div>
   <span id="network-url" style="font-size:11px;color:#444;cursor:pointer" onclick="copyNetworkUrl()" title="Click to copy network URL">📡 loading...</span>
   <button onclick="clearHistory()">Clear Chat</button>
+</div>
+
+<div class="store-modal-bg" id="store-modal" onclick="if(event.target===this)closeStoreModal()">
+  <div class="store-modal">
+    <h3>Connect another store</h3>
+    <p class="hint">In the new store's admin: <b>Settings → Apps → Develop apps</b> → create an app → give it the same Admin API scopes as the current one (products, themes, files, discounts, orders…) → install it.
+      Then paste the <b>Admin API access token</b> (starts with <code>shpat_</code>).
+      If the app was made in the Dev Dashboard instead, paste its <b>Client ID</b> and <b>Client secret</b>.</p>
+    <label>Store address (.myshopify.com)</label>
+    <input id="ns-domain" placeholder="my-store.myshopify.com" autocomplete="off">
+    <label>Name shown in the header (optional)</label>
+    <input id="ns-name" placeholder="e.g. Store 2" autocomplete="off">
+    <label>Admin API access token</label>
+    <input id="ns-token" placeholder="shpat_…" autocomplete="off">
+    <div class="or">— or —</div>
+    <label>Client ID</label>
+    <input id="ns-cid" autocomplete="off">
+    <label>Client secret</label>
+    <input id="ns-csecret" autocomplete="off">
+    <div class="serr" id="ns-err"></div>
+    <div class="sbtns">
+      <button onclick="closeStoreModal()">Cancel</button>
+      <button class="primary" id="ns-save" onclick="saveNewStore()">Check & connect</button>
+    </div>
+  </div>
 </div>
 
 <div class="tabs">
@@ -1487,6 +1553,101 @@
 </div>
 
 <script>
+// ── Store picker ─────────────────────────────────────────────────────────
+// Each browser remembers its own store. Every request to our server carries it
+// in the X-Store header, so the phone can be on one store and the laptop on another.
+const STORE_KEY = 'activeStore';
+function getActiveStore() { try { return localStorage.getItem(STORE_KEY) || ''; } catch (e) { return ''; } }
+(function () {
+  const origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const same = url.startsWith('/') || url.startsWith(location.origin);
+    const st = getActiveStore();
+    if (same && st) {
+      init = Object.assign({}, init || {});
+      const h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+      if (!h.has('X-Store')) h.set('X-Store', st);
+      init.headers = h;
+    }
+    return origFetch(input, init);
+  };
+})();
+
+let _stores = [];
+async function loadStores() {
+  try {
+    const r = await fetch('/api/stores');
+    const d = await r.json();
+    _stores = d.stores || [];
+    const cur = d.current || _stores[0];
+    // The server falls back to the main store if ours was removed — follow it.
+    if (cur && getActiveStore() !== cur.domain) { try { localStorage.setItem(STORE_KEY, cur.domain); } catch (e) {} }
+    document.getElementById('store-name').textContent = cur ? cur.name : '?';
+    document.getElementById('store-domain').textContent = cur ? cur.domain : '';
+    document.getElementById('store-dot').style.background = cur ? cur.color : '#666';
+    document.documentElement.style.setProperty('--store-color', cur ? cur.color : '#22c55e');
+    document.title = (_stores.length > 1 && cur ? cur.name + ' · ' : '') + 'Shopify AI Agent';
+    renderStoreMenu(cur);
+  } catch (e) { console.error('stores', e); }
+}
+function _esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function renderStoreMenu(cur) {
+  const m = document.getElementById('store-menu');
+  m.innerHTML = _stores.map(s => `
+    <div class="srow ${cur && s.domain === cur.domain ? 'active' : ''}" onclick="switchStore('${_esc(s.domain)}')">
+      <span class="sdot" style="background:${s.color}"></span>
+      <div class="sinfo"><div>${_esc(s.name)}</div><div>${_esc(s.domain)}</div></div>
+      ${cur && s.domain === cur.domain ? '<span>✓</span>' : ''}
+      ${s.removable ? `<button class="srm" title="Disconnect" onclick="event.stopPropagation();removeStore('${_esc(s.domain)}','${_esc(s.name)}')">✕</button>` : ''}
+    </div>`).join('') +
+    `<div class="srow sadd" onclick="openStoreModal()">＋ Connect another store</div>`;
+}
+function toggleStoreMenu(e) {
+  e.stopPropagation();
+  document.getElementById('store-menu').classList.toggle('open');
+}
+document.addEventListener('click', e => {
+  const m = document.getElementById('store-menu');
+  if (m && !e.target.closest('#store-picker')) m.classList.remove('open');
+});
+function switchStore(domain) {
+  if (domain === getActiveStore()) { document.getElementById('store-menu').classList.remove('open'); return; }
+  try { localStorage.setItem(STORE_KEY, domain); } catch (e) {}
+  // Reload so no tab keeps products/themes loaded from the other store.
+  location.reload();
+}
+async function removeStore(domain, name) {
+  if (!confirm(`Disconnect ${name}? Nothing in the store is changed — the agent just stops using it.`)) return;
+  const r = await fetch('/api/stores/' + encodeURIComponent(domain), { method: 'DELETE' });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || 'Error'); return; }
+  if (getActiveStore() === domain) { try { localStorage.removeItem(STORE_KEY); } catch (e) {} location.reload(); return; }
+  loadStores();
+}
+function openStoreModal() {
+  document.getElementById('store-menu').classList.remove('open');
+  ['ns-domain','ns-name','ns-token','ns-cid','ns-csecret'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('ns-err').textContent = '';
+  document.getElementById('store-modal').classList.add('open');
+}
+function closeStoreModal() { document.getElementById('store-modal').classList.remove('open'); }
+async function saveNewStore() {
+  const btn = document.getElementById('ns-save'), err = document.getElementById('ns-err');
+  err.textContent = ''; btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    const r = await fetch('/api/stores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      domain: document.getElementById('ns-domain').value, name: document.getElementById('ns-name').value,
+      token: document.getElementById('ns-token').value, client_id: document.getElementById('ns-cid').value,
+      client_secret: document.getElementById('ns-csecret').value }) });
+    const d = await r.json();
+    if (!r.ok) { err.textContent = d.error || 'Error'; return; }
+    closeStoreModal();
+    if (confirm(`${d.store.name} is connected. Switch to it now?`)) switchStore(d.store.domain); else loadStores();
+  } catch (e) { err.textContent = String(e); }
+  finally { btn.disabled = false; btn.textContent = 'Check & connect'; }
+}
+document.addEventListener('DOMContentLoaded', loadStores);
 let sending = false;
 let networkUrl = '';
 

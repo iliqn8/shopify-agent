@@ -53,6 +53,10 @@ def init_db():
         liquid_code TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    try:
+        conn.execute("ALTER TABLE custom_sections ADD COLUMN shop TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already there
     conn.execute("""CREATE TABLE IF NOT EXISTS video_projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
@@ -265,12 +269,12 @@ def delete_product_page(page_id):
     conn.close()
 
 
-def save_custom_section(section_name, asset_key, liquid_code, reference_url=None, theme_id=None):
+def save_custom_section(section_name, asset_key, liquid_code, reference_url=None, theme_id=None, shop=None):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""INSERT INTO custom_sections
-        (section_name, asset_key, reference_url, theme_id, liquid_code)
-        VALUES (?,?,?,?,?)""",
-        (section_name, asset_key, reference_url, theme_id, liquid_code))
+        (section_name, asset_key, reference_url, theme_id, liquid_code, shop)
+        VALUES (?,?,?,?,?,?)""",
+        (section_name, asset_key, reference_url, theme_id, liquid_code, shop))
     conn.commit()
     conn.close()
 
@@ -278,25 +282,25 @@ def save_custom_section(section_name, asset_key, liquid_code, reference_url=None
 def list_custom_sections():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id, section_name, asset_key, reference_url, theme_id, liquid_code, created_at "
+        "SELECT id, section_name, asset_key, reference_url, theme_id, liquid_code, created_at, shop "
         "FROM custom_sections ORDER BY created_at DESC"
     ).fetchall()
     conn.close()
     return [{"id": r[0], "section_name": r[1], "asset_key": r[2], "reference_url": r[3],
-             "theme_id": r[4], "liquid_code": r[5], "created_at": r[6]} for r in rows]
+             "theme_id": r[4], "liquid_code": r[5], "created_at": r[6], "shop": r[7]} for r in rows]
 
 
 def get_custom_section(section_id):
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT id, section_name, asset_key, reference_url, theme_id, liquid_code, created_at "
+        "SELECT id, section_name, asset_key, reference_url, theme_id, liquid_code, created_at, shop "
         "FROM custom_sections WHERE id = ?", (section_id,)
     ).fetchone()
     conn.close()
     if not row:
         return None
     return {"id": row[0], "section_name": row[1], "asset_key": row[2], "reference_url": row[3],
-            "theme_id": row[4], "liquid_code": row[5], "created_at": row[6]}
+            "theme_id": row[4], "liquid_code": row[5], "created_at": row[6], "shop": row[7]}
 
 
 def delete_custom_section(section_id):
