@@ -380,6 +380,8 @@ def clean_swaps(swaps):
     out = []
     for i, sw in enumerate(swaps or []):
         what = re.sub(r"\s+", " ", str((sw or {}).get("what") or "")).strip().rstrip(".")
+        # People type "Replace the man…"; the prompt already says "Replace".
+        what = re.sub(r"^(please\s+)?(replace|swap|change)\s+", "", what, flags=re.I).strip()
         url = (sw or {}).get("url")
         if not what and not url:
             continue
@@ -397,18 +399,26 @@ def clean_swaps(swaps):
 
 
 def build_swap_prompt(swaps, extra="", remove_text=False):
+    # Only the swaps Claude saw in this shot reach here (_plan_shot): sending a
+    # subject that is not in the shot made Kling paint it in (20.11.2026,
+    # pillow ad — the unboxing came back as a copy of the woman's photo).
+    # "in every frame" stays: the softer "wherever it appears" left the
+    # people unchanged. Each element is tied to its own subject only, so
+    # things that happen to be in its photo stay out.
     lines = ["Edit @Video1."]
     for i, sw in enumerate(swaps, 1):
         lines.append("Replace %s with @Element%d in every frame, matching the reference photos "
-                     "exactly." % (sw["what"], i))
+                     "exactly (face, hair, clothes, colour, shape); take only that subject from "
+                     "the photos, not their background or other objects." % (sw["what"], i))
     if remove_text:
         lines.append("Remove all on-screen text, captions, subtitles, stickers and emojis "
                      "overlaid on the video and show the clean scene behind them.")
         keep_tail = ""
     else:
         keep_tail = " and any on-screen text"
-    lines.append("Keep everything else exactly as in @Video1: the motion, timing, camera, "
-                 "framing, background, lighting, all other people and objects" + keep_tail + ".")
+    lines.append("Keep everything else exactly as in @Video1: the action, motion, timing, camera, "
+                 "framing, background, lighting, all other people and objects" + keep_tail + ". "
+                 "Do not add any person or object that is not already in @Video1.")
     extra = (extra or "").strip()
     if extra:
         lines.append(extra)
@@ -418,12 +428,14 @@ def build_swap_prompt(swaps, extra="", remove_text=False):
 def build_swap_payload(video_url, swaps, extra="", remove_text=False):
     # Sound is put back from the original after the shots are joined, so the
     # model never has to carry it.
-    return {"video_url": video_url,
-            "prompt": build_swap_prompt(swaps, extra, remove_text),
-            "keep_audio": False,
-            "elements": [{"frontal_image_url": sw["url"],
-                          "reference_image_urls": sw["extras"] or [sw["url"]]}
-                         for sw in swaps]}
+    payload = {"video_url": video_url,
+               "prompt": build_swap_prompt(swaps, extra, remove_text),
+               "keep_audio": False}
+    if swaps:
+        payload["elements"] = [{"frontal_image_url": sw["url"],
+                                "reference_image_urls": sw["extras"] or [sw["url"]]}
+                               for sw in swaps]
+    return payload
 
 
 def _source_path(video_file):
@@ -463,57 +475,117 @@ def _frames_jpeg(path, dur, points):
     return out
 
 
-def _check_shot(path, dur, swaps, remove_text):
-    """Ask Claude whether the swap took in this shot. (ok, note).
+def _img(raw):
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                        "data": base64.b64encode(raw).decode()}}
+
+
+def _claude_json(content, max_tokens=4000):
+    import anthropic
+    import json as _json
+    client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
+    resp = client.messages.create(model=CHECK_MODEL, max_tokens=max_tokens,
+                                  messages=[{"role": "user", "content": content}])
+    # Opus thinks first; a small max_tokens can be eaten by the thinking and
+    # leave no answer at all (20.11.2026: 300 → empty 3 times out of 4).
+    txt = "".join(b.text for b in resp.content if b.type == "text")
+    m = re.search(r"\{.*\}", txt, re.DOTALL)
+    if not m:
+        raise ValueError("no JSON in the answer (%s)" % resp.stop_reason)
+    return _json.loads(m.group(0))
+
+
+def _plan_shot(src_shot, dur, swaps):
+    """Which swaps are really visible in this ORIGINAL shot → indices into
+    swaps. Sending an element for a subject that is not in the shot makes
+    Kling invent it. If the look itself fails, every swap is sent (old way)."""
+    try:
+        frames = _frames_jpeg(src_shot, dur, CHECK_FRAMES)
+        if not frames:
+            return list(range(len(swaps))), ""
+        content = []
+        for i, fr in enumerate(frames, 1):
+            content += [{"type": "text", "text": "FRAME %d of the original shot:" % i}, _img(fr)]
+        items = "\n".join("%d. %s" % (i, sw["what"]) for i, sw in enumerate(swaps, 1))
+        content.append({"type": "text", "text":
+            "A user wants these things replaced in a video (each line says what to replace):\n%s\n\n"
+            "Which of them are visible in this shot, in at least one frame? Count a thing only if "
+            "it is really there: a person who is not in the shot does not count, and hands alone "
+            "do not count as a person.\n"
+            'Answer with JSON only: {"present": [<numbers>], "note": "<one short sentence>"}' % items})
+        data = _claude_json(content)
+        if not isinstance(data.get("present"), list):
+            raise ValueError("no present list")
+        present = sorted({int(x) - 1 for x in (data.get("present") or [])
+                          if str(x).isdigit() and 1 <= int(x) <= len(swaps)})
+        return present, str(data.get("note") or "")
+    except Exception as e:
+        return list(range(len(swaps))), "(scene look skipped: %s)" % type(e).__name__
+
+
+def _check_shot(path, dur, swaps, remove_text, src_shot=None):
+    """Ask Claude whether the swap took in this shot and it is still the
+    original shot (same action and framing, nothing invented). (ok, note).
 
     Never blocks the clip: if the check itself fails, the shot passes."""
     try:
-        import anthropic
         import requests as _rq
         frames = _frames_jpeg(path, dur, CHECK_FRAMES)
         if not frames:
             return True, ""
+        orig = _frames_jpeg(src_shot, dur, CHECK_FRAMES) if src_shot else []
         content = []
         for i, sw in enumerate(swaps, 1):
             raw = _rq.get(sw["url"], timeout=60).content
             content += [{"type": "text", "text": "REFERENCE %d — what \"%s\" must become:" % (i, sw["what"])},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                                     "data": base64.b64encode(raw).decode()}}]
+                        _img(raw)]
+        for i, fr in enumerate(orig, 1):
+            content += [{"type": "text", "text": "ORIGINAL FRAME %d (before the edit):" % i}, _img(fr)]
         for i, fr in enumerate(frames, 1):
-            content += [{"type": "text", "text": "FRAME %d of the edited shot:" % i},
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                                     "data": base64.b64encode(fr).decode()}}]
-        asks = "; ".join('"%s" → REFERENCE %d' % (sw["what"], i) for i, sw in enumerate(swaps, 1))
-        text_rule = ("\nAlso fail it if any overlaid caption, subtitle or sticker text is still "
+            content += [{"type": "text", "text": "EDITED FRAME %d (same moment):" % i}, _img(fr)]
+        if swaps:
+            asks = "; ".join('"%s" → REFERENCE %d' % (sw["what"], i) for i, sw in enumerate(swaps, 1))
+            rule = ("This shot was edited to replace: %s.\n"
+                    "Fail it if, in any frame where that subject is visible, it is still the original "
+                    "one instead of the reference (same person / same product).\n" % asks)
+        else:
+            rule = "This shot was edited only to remove overlaid text.\n"
+        same = ("Also fail it if the edited shot is not the same scene as the original: a different "
+                "action, a different camera angle or framing, or a person or object added that was "
+                "not in the original frames. Changes caused by the swap itself are fine.\n"
+                if orig else "")
+        text_rule = ("Also fail it if any overlaid caption, subtitle or sticker text is still "
                      "visible (text that is part of the scene itself, like a sign or a logo on "
-                     "clothing, is fine)." if remove_text else "")
-        content.append({"type": "text", "text":
-            "This shot was edited to replace: %s.\n"
-            "Pass it only if, in EVERY frame where that subject is visible, it now clearly is "
-            "the reference (same person / same product), not the original one. A frame where "
-            "the subject is out of shot is fine.%s\n"
-            'Answer with JSON only: {"ok": true|false, "note": "<one short sentence>"}'
-            % (asks, text_rule)})
-        client = anthropic.Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
-        resp = client.messages.create(model=CHECK_MODEL, max_tokens=200,
-                                      messages=[{"role": "user", "content": content}])
-        txt = "".join(b.text for b in resp.content if b.type == "text")
-        m = re.search(r"\{.*\}", txt, re.DOTALL)
-        import json as _json
-        data = _json.loads(m.group(0)) if m else {}
-        return bool(data.get("ok", True)), str(data.get("note") or "")
+                     "clothing, is fine).\n" if remove_text else "")
+        content.append({"type": "text", "text": rule + same + text_rule +
+            'Answer with JSON only: {"ok": true|false, "score": <0-10, how well the edit did '
+            'all of the above>, "note": "<one short sentence>"}'})
+        data = _claude_json(content)
+        try:
+            score = float(data.get("score"))
+        except (TypeError, ValueError):
+            score = 5.0
+        return bool(data.get("ok", True)), str(data.get("note") or ""), score
     except Exception as e:
-        return True, "(check skipped: %s)" % type(e).__name__
+        return True, "(check skipped: %s)" % type(e).__name__, 5.0
 
 
 def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
-    """Upload, edit, check, maybe retry. Returns (local_path, cost, warning)."""
+    """Look, upload, edit, check, maybe retry. Returns (local_path, cost, warning)."""
     tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
+    present, pnote = _plan_shot(src_shot, dur, swaps)
+    mine = [swaps[i] for i in present]
+    say("%s: 👀 %s%s" % (tag, ", ".join(sw["what"] for sw in mine) if mine else "nothing to replace",
+                         (" — " + pnote) if pnote else ""))
+    if not mine and not remove_text:
+        say("%s: kept as in the original (free)" % tag)
+        return src_shot, 0.0, ""
     with open(src_shot, "rb") as fh:
         url = _upload(fh.read(), os.path.basename(src_shot), "video/mp4")
-    payload = build_swap_payload(url, swaps, extra, remove_text)
+    payload = build_swap_payload(url, mine, extra, remove_text)
     billed = max(dur, MIN_SECONDS) * SWAP_MODEL["usd_per_second"]
     cost, warning, out_path = 0.0, "", None
+    best = None   # (score, path, warning) — a retry can come back worse than the first try
     for attempt in range(SWAP_RETRIES + 1):
         res = fal_client.run(SWAP_MODEL["id"], payload, timeout=2400,
                              on_status=lambda t: say("%s: %s" % (tag, t)))
@@ -525,16 +597,17 @@ def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
         out_path = os.path.join(tmp, "out_%02d_%d.mp4" % (idx, attempt))
         with open(out_path, "wb") as fh:
             fh.write(fal_client.download(vurl))
-        ok, note = _check_shot(out_path, dur, swaps, remove_text)
+        ok, note, score = _check_shot(out_path, dur, mine, remove_text, src_shot)
         if ok:
             say("%s: ✅ swap checked%s" % (tag, (" — " + note) if note.startswith("(") else ""))
-            warning = ""
-            break
+            return out_path, cost, ""
         warning = "%s: ⚠️ %s" % (tag, note or "the swap did not take")
+        if best is None or score > best[0]:
+            best = (score, out_path, warning)
         if attempt < SWAP_RETRIES:
             say(warning + " — trying this shot again…")
-    if warning:
-        say(warning + " (kept the last try)")
+    _, out_path, warning = best
+    say(warning + " (kept the better try)")
     return out_path, cost, warning
 
 
@@ -591,6 +664,8 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
         yield {"type": "status", "text": "✂️ Cuts at " + ", ".join("%.1fs" % a for a, _ in shots[1:])
                + " — each shot is edited on its own so the swap holds after every cut"}
     yield {"type": "status", "text": "📝 " + build_swap_prompt(swaps, extra, remove_text)}
+    yield {"type": "status", "text": "👀 Claude first looks at every shot and sends Kling only "
+                                     "the swaps that are really in it"}
     yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes (shots run at the same time)…"}
 
     msgs = queue.Queue()
