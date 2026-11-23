@@ -408,11 +408,23 @@ def build_swap_prompt(swaps, extra="", remove_text=False):
     # "in every frame" stays: the softer "wherever it appears" left the
     # people unchanged. Each element is tied to its own subject only, so
     # things that happen to be in its photo stay out.
+    # People: the plan names them by place/action only, and the outfit is
+    # asked for outright. With the original clothes in the description
+    # ("woman in a cream cardigan") Kling kept that cardigan and changed only
+    # face and hair (23.11.2026, abuela ad).
     lines = ["Edit @Video1."]
     for i, sw in enumerate(swaps, 1):
-        lines.append("Replace %s with @Element%d in every frame, matching the reference photos "
-                     "exactly (face, hair, clothes, colour, shape); take only that subject from "
-                     "the photos, not their background or other objects." % (sw.get("subject") or sw["what"], i))
+        who = sw.get("subject") or sw["what"]
+        if sw.get("person"):
+            lines.append("Replace %s with the person @Element%d in every frame: face, hair, body AND "
+                         "the complete outfit (every garment, its colours and patterns, scarf, "
+                         "jewellery) exactly as in the reference photos. None of the original "
+                         "person's clothes may remain. Take only that person from the photos, not "
+                         "their background or other objects." % (who, i))
+        else:
+            lines.append("Replace %s with @Element%d in every frame, matching the reference photos "
+                         "exactly (colour, material, shape, details); take only that subject from "
+                         "the photos, not their background or other objects." % (who, i))
     if remove_text:
         lines.append("Remove all on-screen text, captions, subtitles, stickers and emojis "
                      "overlaid on the video and show the clean scene behind them.")
@@ -421,6 +433,7 @@ def build_swap_prompt(swaps, extra="", remove_text=False):
         keep_tail = " and any on-screen text"
     lines.append("Keep everything else exactly as in @Video1: the action, motion, timing, camera, "
                  "framing, background, lighting, all other people and objects" + keep_tail + ". "
+                 "The replaced subjects keep the original pose and movement only. "
                  "Do not add any person or object that is not already in @Video1.")
     extra = (extra or "").strip()
     if extra:
@@ -546,23 +559,28 @@ def _plan_shot(src_shot, dur, swaps):
             "this shot. A person who is not in the shot does not count, and hands alone do not count "
             "as a person.\n"
             "For each line that IS in the shot, describe that original subject as it looks here so "
-            "a video editor can find it: kind, colour, material, where it is (max 20 words, no "
-            "mention of the reference).\n"
-            'Answer with JSON only: {"present": [{"n": <line number>, "subject": "<description>"}], '
-            '"note": "<one short sentence>"}' % items})
+            "a video editor can find it (max 20 words, no mention of the reference). For an object: "
+            "kind, colour, material, where it is. For a person: only who and where (e.g. \"the "
+            "elderly woman sitting on the bed\") - do NOT describe their clothes, hair or face, "
+            "because those are being replaced.\n"
+            'Answer with JSON only: {"present": [{"n": <line number>, "person": true|false, '
+            '"subject": "<description>"}], "note": "<one short sentence>"}' % items})
         data = _claude_json(content)
         if not isinstance(data.get("present"), list):
             raise ValueError("no present list")
         out, seen = [], set()
         for it in data["present"]:
+            person = False
             if isinstance(it, dict):
                 n, subj = it.get("n"), str(it.get("subject") or "").strip()
+                person = it.get("person") is True or str(it.get("person")).lower() == "true"
             else:
                 n, subj = it, ""
             if not str(n).isdigit() or not 1 <= int(n) <= len(swaps) or int(n) in seen:
                 continue
             seen.add(int(n))
             sw = dict(swaps[int(n) - 1])
+            sw["person"] = person
             if subj:
                 sw["subject"] = "%s (%s)" % (sw["what"], subj.rstrip(".")[:200])
             out.append((int(n), sw))
@@ -596,7 +614,9 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
                     "Fail it if, in any frame where that subject is visible, it is still the original "
                     "one instead of the reference (same person / same product). Compare with the "
                     "ORIGINAL frames: a product that kept the original's colour, material or details "
-                    "instead of the reference's is NOT swapped, even if the shape is similar.\n" % asks)
+                    "instead of the reference's is NOT swapped, even if the shape is similar. A person "
+                    "who got the new face and hair but still wears the ORIGINAL clothes is NOT "
+                    "swapped: the outfit must be the reference's too.\n" % asks)
         else:
             rule = "This shot was edited only to remove overlaid text.\n"
         same = ("Also fail it if the edited shot is not the same scene as the original: a different "
