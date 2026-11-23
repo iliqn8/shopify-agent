@@ -185,6 +185,28 @@ TTS_MODEL = "fal-ai/elevenlabs/tts/eleven-v3"
 
 # ── Queue plumbing ─────────────────────────────────────────────────────────
 
+class FalTransient(FalError):
+    """The job died on fal's side for a passing reason (5xx, "downstream service
+    unavailable"). Submitting it again usually works."""
+
+
+def _get_retry(url, timeout, tries=4):
+    """GET with retries on network errors and 5xx (fal answers 502/503/504 now and then)."""
+    last = None
+    for k in range(tries):
+        try:
+            r = requests.get(url, headers={"Authorization": f"Key {_key()}"}, timeout=timeout)
+            if r.status_code < 500:
+                return r
+            last = r
+        except requests.RequestException as e:
+            last = e
+        time.sleep(3 * (k + 1))
+    if isinstance(last, Exception):
+        raise FalTransient(f"fal.ai did not answer: {type(last).__name__}")
+    return last
+
+
 def submit(model_id, payload):
     """Enqueue a job. Returns (request_id, status_url, response_url)."""
     r = requests.post(f"{QUEUE_BASE}/{model_id}", headers=_headers(), json=payload, timeout=60)
@@ -210,7 +232,9 @@ def run(model_id, payload, on_status=None, timeout=1200, poll_every=3):
     last = None
     while time.time() < deadline:
         time.sleep(poll_every)
-        s = requests.get(status_url, headers={"Authorization": f"Key {_key()}"}, timeout=60)
+        s = _get_retry(status_url, 60)
+        if s.status_code >= 500:
+            raise FalTransient(f"fal.ai status check failed ({s.status_code}): {s.text[:300]}")
         if s.status_code >= 400:
             raise FalError(f"fal.ai status check failed ({s.status_code}): {s.text[:300]}")
         info = s.json()
@@ -227,7 +251,12 @@ def run(model_id, payload, on_status=None, timeout=1200, poll_every=3):
     else:
         raise FalError(f"fal.ai job timed out after {timeout}s")
 
-    out = requests.get(response_url, headers={"Authorization": f"Key {_key()}"}, timeout=120)
+    # 23.11.2026: a finished Kling job came back 504 "downstream_service_unavailable"
+    # here and the whole multi-shot clip was lost. Retry the fetch; if fal still
+    # says 5xx the job itself died → FalTransient, callers may submit again.
+    out = _get_retry(response_url, 120)
+    if out.status_code >= 500 or "downstream_service_unavailable" in out.text[:2000]:
+        raise FalTransient(f"fal.ai result fetch failed ({out.status_code}): {out.text[:300]}")
     if out.status_code >= 400:
         raise FalError(f"fal.ai result fetch failed ({out.status_code}): {out.text[:300]}")
     return out.json()

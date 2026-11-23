@@ -597,7 +597,7 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
     try:
         frames = _frames_jpeg(path, dur, CHECK_FRAMES)
         if not frames:
-            return True, ""
+            return True, "", 5.0
         orig = _frames_jpeg(src_shot, dur, CHECK_FRAMES) if src_shot else []
         content = []
         for i, sw in enumerate(swaps, 1):
@@ -641,6 +641,36 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
         return True, "(check skipped: %s)" % type(e).__name__, 5.0
 
 
+FAL_RESUBMITS = 2
+
+
+def _run_kling(payload, tag, say):
+    """fal_client.run, submitted again when the job dies on fal's side."""
+    for k in range(FAL_RESUBMITS + 1):
+        try:
+            return fal_client.run(SWAP_MODEL["id"], payload, timeout=2400,
+                                  on_status=lambda t: say("%s: %s" % (tag, t)))
+        except fal_client.FalTransient as e:
+            if k == FAL_RESUBMITS:
+                raise
+            say("%s: ⚠️ fal/Kling hiccup (%s) — sending this shot again…" % (tag, str(e)[:80]))
+            time.sleep(10)
+
+
+def _edit_shot_safe(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
+    """_edit_shot, but a shot that cannot be made keeps the original footage
+    instead of throwing away every finished (and paid) shot."""
+    try:
+        return _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say)
+    except (fal_client.FalError, MotionError) as e:
+        tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
+        if n == 1:
+            raise
+        warning = "%s: ❌ could not be edited (%s) — the ORIGINAL footage is kept there" % (tag, str(e)[:120])
+        say(warning)
+        return src_shot, getattr(e, "_cost", 0.0), warning
+
+
 def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
     """Look, upload, edit, check, maybe retry. Returns (local_path, cost, warning)."""
     tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
@@ -658,8 +688,14 @@ def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
     cost, warning, out_path = 0.0, "", None
     best = None   # (score, path, warning) — a retry can come back worse than the first try
     for attempt in range(SWAP_RETRIES + 1):
-        res = fal_client.run(SWAP_MODEL["id"], payload, timeout=2400,
-                             on_status=lambda t: say("%s: %s" % (tag, t)))
+        try:
+            res = _run_kling(payload, tag, say)
+        except (fal_client.FalError, MotionError) as e:
+            if best is not None:        # the first try is done and paid — use it
+                say("%s: retry failed (%s) — keeping the first try" % (tag, str(e)[:80]))
+                break
+            e._cost = cost
+            raise
         cost += billed
         video = res.get("video") or {}
         vurl = video.get("url") if isinstance(video, dict) else None
@@ -748,7 +784,7 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
                 _cut_shot(src, a, b, p)
                 cut.append(p)
             with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
-                futs = [pool.submit(_edit_shot, i, n, cut[i], b - a, swaps, extra, remove_text,
+                futs = [pool.submit(_edit_shot_safe, i, n, cut[i], b - a, swaps, extra, remove_text,
                                     tmp, msgs.put) for i, (a, b) in enumerate(shots)]
                 while not all(f.done() for f in futs):
                     try:
