@@ -5502,10 +5502,12 @@ function mtSwDraw() {
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
         <button class="btn-sm" onclick="mtSwPick(${i}, 'main')">📷 Photo of the new one</button>
         <button class="btn-sm" onclick="mtSwPick(${i}, 'extra')" title="Up to 3 more photos of the same thing from other angles">➕ Other angles (up to 3)</button>
+        ${sw.main && !sw.main.cleaned ? `<button class="btn-sm" onclick="mtSwClean(${i})" title="Optional, $0.15: keeps only the product/person on a white background — removes ad text, the room, other objects and things in the pockets. The product's own logo stays. Without it the photo is copied exactly as it is.">🧼 Clean photo</button>` : ''}
+        ${sw.main && sw.main.cleaned ? `<button class="btn-sm" onclick="mtSwUnclean(${i})" title="Use the photo exactly as you uploaded it">↩ Original</button>` : ''}
         <span id="mt-sw-status-${i}" style="color:#666;font-size:12px"></span>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-        ${sw.main ? thumb(sw.main, `mtSwRemovePhoto(${i}, 'main')`, 'main') : ''}
+        ${sw.main ? thumb(sw.main, `mtSwRemovePhoto(${i}, 'main')`, sw.main.cleaned ? 'main · 🧼 cleaned' : 'main') : ''}
         ${sw.extras.map((d, j) => thumb(d, `mtSwRemovePhoto(${i}, 'extra', ${j})`, 'angle ' + (j + 1))).join('')}
       </div>
     </div>`).join('');
@@ -5522,9 +5524,44 @@ function mtSwAddItem() {
 function mtSwRemoveItem(i) { mtSwaps.splice(i, 1); mtSwDraw(); }
 
 function mtSwRemovePhoto(i, kind, j) {
-  if (kind === 'main') mtSwaps[i].main = null;
+  if (kind === 'main') { mtSwaps[i].main = null; mtSwaps[i].mainOrig = null; }
   else mtSwaps[i].extras.splice(j, 1);
   mtSwDraw();
+}
+
+async function mtSwClean(i) {
+  const sw = mtSwaps[i];
+  if (!sw || !sw.main || sw.main.cleaned) return;
+  const st = document.getElementById('mt-sw-status-' + i);
+  st.style.color = '#888';
+  st.textContent = '⏳ Cleaning the photo (~30 s, $0.15)…';
+  try {
+    const d = await vidJson(await fetch('/api/motion-clean-image', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: sw.main.url, what: sw.what })
+    }));
+    if (d.error) throw new Error(d.error);
+    sw.mainOrig = sw.main;
+    sw.main = d;
+    mtSwDraw();
+    const s = document.getElementById('mt-sw-status-' + i);
+    s.style.color = '#4ade80';
+    s.textContent = '✅ Cleaned' + (d.cost ? ' ($' + d.cost.toFixed(2) + ')' : ' (already done — free)') + ' — check it; ↩ Original brings yours back';
+  } catch (e) {
+    st.style.color = '#f87171';
+    st.textContent = '❌ ' + e.message;
+  }
+}
+
+function mtSwUnclean(i) {
+  const sw = mtSwaps[i];
+  if (!sw || !sw.mainOrig) return;
+  sw.main = sw.mainOrig;
+  sw.mainOrig = null;
+  mtSwDraw();
+  const s = document.getElementById('mt-sw-status-' + i);
+  s.style.color = '#4ade80';
+  s.textContent = '✅ Your original photo';
 }
 
 function mtSwPick(i, kind) {
@@ -5554,7 +5591,7 @@ async function mtSwUploadImage(input, kind) {
       fd.append('file', f);
       const d = await vidJson(await fetch('/api/motion-image', { method: 'POST', body: fd }));
       if (d.error) throw new Error(d.error);
-      if (kind === 'main') sw.main = d; else sw.extras.push(d);
+      if (kind === 'main') { sw.main = d; sw.mainOrig = null; } else sw.extras.push(d);
     }
   } catch (e) { err = e.message; }
   mtSwDraw();

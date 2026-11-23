@@ -1489,6 +1489,19 @@ def motion_image():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/api/motion-clean-image", methods=["POST"])
+def motion_clean_image():
+    """🧼 Clean photo button in Objects swap — only on request ($0.15, cached)."""
+    import motion_studio
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(motion_studio.clean_photo(body.get("url"), body.get("what") or ""))
+    except motion_studio.MotionError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/api/motion-video", methods=["POST"])
 def motion_video():
     import motion_studio

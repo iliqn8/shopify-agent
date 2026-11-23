@@ -401,38 +401,73 @@ def clean_swaps(swaps):
     return out
 
 
-def build_swap_prompt(swaps, extra="", remove_text=False):
-    # Only the swaps Claude saw in this shot reach here (_plan_shot): sending a
-    # subject that is not in the shot made Kling paint it in (20.11.2026,
-    # pillow ad — the unboxing came back as a copy of the woman's photo).
-    # "in every frame" stays: the softer "wherever it appears" left the
-    # people unchanged. Each element is tied to its own subject only, so
-    # things that happen to be in its photo stay out.
-    # People: the plan names them by place/action only, and the outfit is
-    # asked for outright. With the original clothes in the description
-    # ("woman in a cream cardigan") Kling kept that cardigan and changed only
-    # face and hair (23.11.2026, abuela ad).
+def _slots(swaps, anchor_url=None):
+    """Kling O3 Edit: people/objects go in `elements` (@ElementN), places in
+    `image_urls` (@ImageN); at most 4 in total. A continuity frame from the
+    already edited anchor shot goes last, only if it fits."""
+    el = [sw for sw in swaps if sw.get("kind") != "place"]
+    im = [sw for sw in swaps if sw.get("kind") == "place"]
+    tags = {}
+    for i, sw in enumerate(el, 1):
+        tags[id(sw)] = "@Element%d" % i
+    for i, sw in enumerate(im, 1):
+        tags[id(sw)] = "@Image%d" % i
+    anchor_tag = None
+    if anchor_url and len(el) + len(im) < 4:
+        anchor_tag = "@Image%d" % (len(im) + 1)
+    return el, im, tags, anchor_tag
+
+
+def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
+    # Rules below each come from a clip that went wrong:
+    # - only the swaps Claude saw in this shot reach here (_plan_shot); a
+    #   subject that is not in the shot gets painted in (20.11, pillow unboxing);
+    # - "in every frame" stays: "wherever it appears" left people unchanged;
+    # - people are named by place/action, the outfit is asked for outright —
+    #   with "woman in a cream cardigan" Kling kept the cardigan (23.11, abuela);
+    # - a place is an @Image, not an element: as an element the new room came
+    #   and went between shots (24.11, pillow 14);
+    # - what is inside/on an object follows the video, not the photo — the ad
+    #   photo's phones ended up in the pockets (24.11, pillow 14);
+    # - the continuity frame keeps the room/person the same in every shot.
+    el, im, tags, anchor_tag = _slots(swaps, anchor_url)
     lines = ["Edit @Video1."]
-    for i, sw in enumerate(swaps, 1):
-        who = sw.get("subject") or sw["what"]
-        if sw.get("person"):
-            lines.append("Replace %s with the person @Element%d in every frame: face, hair, body AND "
+    for sw in swaps:
+        who, tag = sw.get("subject") or sw["what"], tags[id(sw)]
+        kind = sw.get("kind") or ("person" if sw.get("person") else "object")
+        if kind == "person":
+            lines.append("Replace %s with the person %s in every frame: face, hair, body AND "
                          "the complete outfit (every garment, its colours and patterns, scarf, "
                          "jewellery) exactly as in the reference photos. None of the original "
                          "person's clothes may remain. Take only that person from the photos, not "
-                         "their background or other objects." % (who, i))
+                         "their background or other objects." % (who, tag))
+        elif kind == "place":
+            lines.append("Move the whole scene into the place shown in %s, in every frame, as if "
+                         "this shot had been filmed there: replace the original setting (%s) — "
+                         "walls, windows, curtains, bed, bedding, furniture, decor and wall art — "
+                         "with the matching parts of %s. Keep the camera angle and framing; the "
+                         "people and the objects they use stay in front of the new setting."
+                         % (tag, who, tag))
         else:
-            lines.append("Replace %s with @Element%d in every frame, matching the reference photos "
-                         "exactly (colour, material, shape, details); take only that subject from "
-                         "the photos, not their background or other objects." % (who, i))
+            lines.append("Replace %s with %s in every frame, matching the reference photos "
+                         "exactly (colour, material, shape, details). Whatever is inside, on or "
+                         "held by it in @Video1 (for example items in its pockets) stays exactly "
+                         "as in @Video1 — add nothing from the photos. Take only that subject from "
+                         "the photos, not their background or other objects." % (who, tag))
+    if anchor_tag:
+        lines.append("%s is a frame from another shot of this same, already edited video: every "
+                     "replaced subject and the setting must look exactly as they do in %s (same "
+                     "person, same outfit, same product, same room and decor). Use it only for "
+                     "appearance, not for pose, framing or action." % (anchor_tag, anchor_tag))
     if remove_text:
         lines.append("Remove all on-screen text, captions, subtitles, stickers and emojis "
                      "overlaid on the video and show the clean scene behind them.")
         keep_tail = ""
     else:
         keep_tail = " and any on-screen text"
+    bg = "" if im else "background, "
     lines.append("Keep everything else exactly as in @Video1: the action, motion, timing, camera, "
-                 "framing, background, lighting, all other people and objects" + keep_tail + ". "
+                 "framing, " + bg + "lighting, all other people and objects" + keep_tail + ". "
                  "The replaced subjects keep the original pose and movement only. "
                  "Do not add any person or object that is not already in @Video1.")
     extra = (extra or "").strip()
@@ -441,16 +476,20 @@ def build_swap_prompt(swaps, extra="", remove_text=False):
     return " ".join(lines)
 
 
-def build_swap_payload(video_url, swaps, extra="", remove_text=False):
+def build_swap_payload(video_url, swaps, extra="", remove_text=False, anchor_url=None):
     # Sound is put back from the original after the shots are joined, so the
     # model never has to carry it.
+    el, im, _, anchor_tag = _slots(swaps, anchor_url)
     payload = {"video_url": video_url,
-               "prompt": build_swap_prompt(swaps, extra, remove_text),
+               "prompt": build_swap_prompt(swaps, extra, remove_text, anchor_url),
                "keep_audio": False}
-    if swaps:
+    if el:
         payload["elements"] = [{"frontal_image_url": sw["url"],
-                                "reference_image_urls": sw["extras"] or [sw["url"]]}
-                               for sw in swaps]
+                                "reference_image_urls": (sw.get("extras") or [sw["url"]])[:3]}
+                               for sw in el]
+    images = [sw["url"] for sw in im] + ([anchor_url] if anchor_tag else [])
+    if images:
+        payload["image_urls"] = images
     return payload
 
 
@@ -527,6 +566,102 @@ def _ref_image(url):
     return _REF_CACHE[url]
 
 
+CLEAN_MODEL = "fal-ai/nano-banana-pro/edit"
+CLEAN_USD = 0.15
+_CLEAN_CACHE = {}
+
+
+def _classify(urls_whats):
+    """Claude: kind (person/object/place) + which thing is meant, per photo.
+    [(url, what)] → [{"kind", "keep"}]; falls back to object / the user's words."""
+    content = []
+    for i, (url, what) in enumerate(urls_whats, 1):
+        content += [{"type": "text", "text": 'PHOTO %d — the user wrote: "%s"' % (i, what)},
+                    _img(_ref_image(url))]
+    content.append({"type": "text", "text":
+        "Each photo shows the NEW thing that will replace something in a video.\n"
+        "For each photo answer: kind = \"person\", \"object\" (a product or prop) or \"place\" "
+        "(a room, setting or background); keep = which single thing in the photo is meant "
+        "(max 15 words, e.g. \"the light-blue ribbed backrest pillow with arms\").\n"
+        'JSON only: {"photos": [{"n": 1, "kind": "...", "keep": "..."}]}'})
+    out = [{"kind": "object", "keep": what} for _, what in urls_whats]
+    try:
+        data = _claude_json(content)
+        for x in data.get("photos") or []:
+            n = int(x.get("n")) if str(x.get("n")).isdigit() else 0
+            if 1 <= n <= len(out):
+                if x.get("kind") in ("person", "object", "place"):
+                    out[n - 1]["kind"] = x["kind"]
+                if x.get("keep"):
+                    out[n - 1]["keep"] = str(x["keep"])[:150]
+    except Exception:
+        pass
+    return out
+
+
+def _clean_one(url, kind, keep):
+    if kind == "person":
+        prompt = ("Show ONLY %s from this image: exactly the same person — same face, skin, hair, "
+                  "body and the complete outfit with every colour, pattern, print and logo on the "
+                  "clothes — full body, standing, alone on a plain pure white background, hands "
+                  "empty. Remove the room, overlaid text and every other object or person." % keep)
+        ar = "3:4"
+    else:
+        # The product's OWN logos, labels and prints stay — the user sells
+        # branded products. Only what is not part of the product goes.
+        prompt = ("Product photo: show ONLY %s from this image, complete and exactly as it is — "
+                  "same colour, material, texture, stitching, shape, proportions and details, "
+                  "INCLUDING any logo, label, print or text that is printed on or attached to the "
+                  "product itself. Put it alone and fully in frame on a plain pure white "
+                  "background. Remove only what is not part of the product: overlaid ad text, "
+                  "badges and graphics, the room or background, other products or colour "
+                  "versions, and items placed in, on or held by it (phones, remotes, bottles, "
+                  "cups, books) — pockets and holders empty." % keep)
+        ar = "1:1"
+    return fal_client.edit_image([url], prompt, aspect_ratio=ar, model_id=CLEAN_MODEL)
+
+
+def clean_photo(url, what=""):
+    """🧼 button: a clean cut-out of the uploaded photo (only on request — a
+    product's own logo must be copyable as is). Same photo → cached, free.
+    Returns {"url", "thumb", "width", "height", "cleaned", "cost"}."""
+    if not url or not str(url).startswith("http"):
+        raise MotionError("Upload the photo first.")
+    if url in _CLEAN_CACHE:
+        return dict(_CLEAN_CACHE[url], cost=0.0)
+    info = _classify([(url, what or "the main subject")])[0]
+    if info["kind"] == "place":
+        raise MotionError("This looks like a room/setting — those are used as they are, no cleaning needed.")
+    try:
+        new = _clean_one(url, info["kind"], info["keep"])
+        raw = fal_client.download(new)
+    except fal_client.FalError as e:
+        raise MotionError("Cleaning failed: %s" % str(e)[:200])
+    im = Image.open(io.BytesIO(raw)).convert("RGB")
+    t = im.copy()
+    t.thumbnail((240, 240))
+    tb = io.BytesIO()
+    t.save(tb, "JPEG", quality=80)
+    res = {"url": new, "width": im.width, "height": im.height, "cleaned": True, "kind": info["kind"],
+           "thumb": "data:image/jpeg;base64," + base64.b64encode(tb.getvalue()).decode()}
+    _CLEAN_CACHE[url] = res
+    return dict(res, cost=CLEAN_USD)
+
+
+def _prepare_refs(swaps, say):
+    """Sort every reference into person / object / place (one Claude call) —
+    places go to Kling as @Image, people get the outfit rule. Photos are used
+    exactly as uploaded; cleaning is the user's 🧼 choice per photo, because
+    branded products must keep their logo (24.11.2026). Returns (swaps, 0)."""
+    out = [dict(sw) for sw in swaps]
+    infos = _classify([(sw["url"], sw["what"]) for sw in out])
+    for i, (sw, info) in enumerate(zip(out, infos), 1):
+        sw["kind"] = info["kind"]
+        sw["person"] = info["kind"] == "person"
+        say("📷 Photo %d: %s — %s" % (i, info["kind"], info["keep"]))
+    return out, 0.0
+
+
 def _plan_shot(src_shot, dur, swaps):
     """Which swaps are really in this ORIGINAL shot, and what exactly each one
     is here -> (swaps for this shot, each with a "subject" description, note).
@@ -547,7 +682,8 @@ def _plan_shot(src_shot, dur, swaps):
                          % (i, sw["what"])}, _img(_ref_image(sw["url"]))]
         for i, fr in enumerate(frames, 1):
             content += [{"type": "text", "text": "FRAME %d of the original shot:" % i}, _img(fr)]
-        items = "\n".join('%d. "%s" -> becomes REFERENCE %d' % (i, sw["what"], i)
+        items = "\n".join('%d. "%s" (%s) -> becomes REFERENCE %d'
+                          % (i, sw["what"], sw.get("kind") or "?", i)
                           for i, sw in enumerate(swaps, 1))
         content.append({"type": "text", "text":
             "A user wants these things in a video replaced by the reference photos:\n%s\n\n"
@@ -562,7 +698,8 @@ def _plan_shot(src_shot, dur, swaps):
             "a video editor can find it (max 20 words, no mention of the reference). For an object: "
             "kind, colour, material, where it is. For a person: only who and where (e.g. \"the "
             "elderly woman sitting on the bed\") - do NOT describe their clothes, hair or face, "
-            "because those are being replaced.\n"
+            "because those are being replaced. For a place: it is present whenever any of the "
+            "setting is visible; describe the visible setting (walls, bed, furniture, decor).\n"
             'Answer with JSON only: {"present": [{"n": <line number>, "person": true|false, '
             '"subject": "<description>"}], "note": "<one short sentence>"}' % items})
         data = _claude_json(content)
@@ -580,6 +717,8 @@ def _plan_shot(src_shot, dur, swaps):
                 continue
             seen.add(int(n))
             sw = dict(swaps[int(n) - 1])
+            if sw.get("kind"):
+                person = sw["kind"] == "person"
             sw["person"] = person
             if subj:
                 sw["subject"] = "%s (%s)" % (sw["what"], subj.rstrip(".")[:200])
@@ -616,7 +755,12 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
                     "ORIGINAL frames: a product that kept the original's colour, material or details "
                     "instead of the reference's is NOT swapped, even if the shape is similar. A person "
                     "who got the new face and hair but still wears the ORIGINAL clothes is NOT "
-                    "swapped: the outfit must be the reference's too.\n" % asks)
+                    "swapped: the outfit must be the reference's too. For a place/setting: if walls, "
+                    "furniture, bedding or decor of the ORIGINAL setting are still visible instead "
+                    "of the reference's, it is NOT swapped.\n"
+                    "Also fail it if items appear in, on or around a replaced object that were not "
+                    "in the original frames (e.g. phones or remotes in pockets that were empty or "
+                    "held other things).\n" % asks)
         else:
             rule = "This shot was edited only to remove overlaid text.\n"
         same = ("Also fail it if the edited shot is not the same scene as the original: a different "
@@ -657,11 +801,11 @@ def _run_kling(payload, tag, say):
             time.sleep(10)
 
 
-def _edit_shot_safe(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
+def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor_url=None):
     """_edit_shot, but a shot that cannot be made keeps the original footage
     instead of throwing away every finished (and paid) shot."""
     try:
-        return _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say)
+        return _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor_url)
     except (fal_client.FalError, MotionError) as e:
         tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
         if n == 1:
@@ -671,19 +815,16 @@ def _edit_shot_safe(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
         return src_shot, getattr(e, "_cost", 0.0), warning
 
 
-def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
-    """Look, upload, edit, check, maybe retry. Returns (local_path, cost, warning)."""
+def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor_url=None):
+    """Upload, edit, check, maybe retry. `mine` = this shot's plan.
+    Returns (local_path, cost, warning)."""
     tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
-    mine, pnote = _plan_shot(src_shot, dur, swaps)
-    say("%s: 👀 %s%s" % (tag, "; ".join(sw.get("subject") or sw["what"] for sw in mine)
-                         if mine else "nothing to replace",
-                         (" — " + pnote) if pnote else ""))
     if not mine and not remove_text:
         say("%s: kept as in the original (free)" % tag)
         return src_shot, 0.0, ""
     with open(src_shot, "rb") as fh:
         url = _upload(fh.read(), os.path.basename(src_shot), "video/mp4")
-    payload = build_swap_payload(url, mine, extra, remove_text)
+    payload = build_swap_payload(url, mine, extra, remove_text, anchor_url)
     billed = max(dur, MIN_SECONDS) * SWAP_MODEL["usd_per_second"]
     cost, warning, out_path = 0.0, "", None
     best = None   # (score, path, warning) — a retry can come back worse than the first try
@@ -716,6 +857,14 @@ def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
     _, out_path, warning = best
     say(warning + " (kept the better try)")
     return out_path, cost, warning
+
+
+def _anchor_frame(path, dur):
+    """Middle frame of an edited shot, uploaded — the continuity reference."""
+    fr = _frames_jpeg(path, dur, (0.5,))
+    if not fr:
+        return None
+    return _upload(fr[0], "anchor.jpg", "image/jpeg")
 
 
 def _join(parts, durs, src, keep_sound, dest):
@@ -770,32 +919,29 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
     if n > 1:
         yield {"type": "status", "text": "✂️ Cuts at " + ", ".join("%.1fs" % a for a, _ in shots[1:])
                + " — each shot is edited on its own so the swap holds after every cut"}
-    yield {"type": "status", "text": "📝 " + build_swap_prompt(swaps, extra, remove_text)}
-    yield {"type": "status", "text": "👀 Claude first looks at every shot and sends Kling only "
+    yield {"type": "status", "text": "👀 Then Claude looks at every shot and sends Kling only "
                                      "the swaps that are really in it"}
-    yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes (shots run at the same time)…"}
+    if n > 1:
+        yield {"type": "status", "text": "🔗 The shot with the most swaps is made first; a frame "
+                                         "of it keeps the person, product and room the same in "
+                                         "all other shots (≈2× the waiting time)"}
+    yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes per round…"}
 
     msgs = queue.Queue()
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            cut = []
-            for i, (a, b) in enumerate(shots):
-                p = os.path.join(tmp, "shot_%02d.mp4" % i)
-                _cut_shot(src, a, b, p)
-                cut.append(p)
-            with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
-                futs = [pool.submit(_edit_shot_safe, i, n, cut[i], b - a, swaps, extra, remove_text,
-                                    tmp, msgs.put) for i, (a, b) in enumerate(shots)]
-                while not all(f.done() for f in futs):
+            with ThreadPoolExecutor(max_workers=1) as one:
+                job = one.submit(_swap_pipeline, src, shots, swaps, extra, remove_text, tmp, msgs.put)
+                while not job.done():
                     try:
                         yield {"type": "status", "text": "   " + msgs.get(timeout=2)}
                     except queue.Empty:
                         pass
                 while not msgs.empty():
                     yield {"type": "status", "text": "   " + msgs.get()}
-                results = [f.result() for f in futs]
+                results, prep_cost, prompt = job.result()
 
-            cost = round(sum(r[1] for r in results), 2)
+            cost = round(sum(r[1] for r in results) + prep_cost, 2)
             warnings = [r[2] for r in results if r[2]]
             yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
             name = "clip_swap_%s_%d.mp4" % (clip_studio._safe_stem(swaps[0]["what"]), int(time.time()))
@@ -806,8 +952,55 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
                "mode": "swap", "model_label": SWAP_MODEL["label"], "shots": n,
                "swaps": [sw["what"] for sw in swaps], "keep_sound": bool(keep_sound),
                "remove_text": bool(remove_text), "warnings": warnings,
-               "prompt": build_swap_prompt(swaps, extra, remove_text)}
+               "prompt": prompt}
     except (fal_client.FalError, MotionError) as e:
         yield {"type": "done", "error": str(e)}
     except Exception as e:
         yield {"type": "done", "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _swap_pipeline(src, shots, swaps, extra, remove_text, tmp, say):
+    """Clean photos → plan every shot → anchor shot first → the rest with its
+    frame as a continuity reference. Returns (results, prep_cost, prompt)."""
+    from concurrent.futures import ThreadPoolExecutor
+    n = len(shots)
+    swaps, prep_cost = _prepare_refs(swaps, say)
+
+    cut = []
+    for i, (a, b) in enumerate(shots):
+        p = os.path.join(tmp, "shot_%02d.mp4" % i)
+        _cut_shot(src, a, b, p)
+        cut.append(p)
+
+    with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
+        plans = list(pool.map(lambda i: _plan_shot(cut[i], shots[i][1] - shots[i][0], swaps), range(n)))
+    for i, (mine, note) in enumerate(plans):
+        tag = "Shot %d/%d" % (i + 1, n) if n > 1 else "Clip"
+        say("%s: 👀 %s%s" % (tag, "; ".join(sw.get("subject") or sw["what"] for sw in mine)
+                             if mine else "nothing to replace", (" — " + note) if note else ""))
+
+    results = [None] * n
+    order = list(range(n))
+    anchor_url = None
+    work = [i for i in order if plans[i][0] or remove_text]
+    if n > 1 and len(work) > 1:
+        a = max(work, key=lambda i: (len(plans[i][0]), shots[i][1] - shots[i][0]))
+        say("🔗 Shot %d/%d goes first (anchor)" % (a + 1, n))
+        results[a] = _edit_shot_safe(a, n, cut[a], shots[a][1] - shots[a][0], plans[a][0],
+                                     extra, remove_text, tmp, say)
+        if results[a][0] != cut[a]:
+            try:
+                anchor_url = _anchor_frame(results[a][0], shots[a][1] - shots[a][0])
+                say("🔗 Continuity frame from shot %d → %s" % (a + 1, anchor_url))
+            except Exception as e:
+                say("🔗 Continuity frame skipped (%s)" % str(e)[:80])
+        order = [i for i in order if i != a]
+
+    with ThreadPoolExecutor(max_workers=max(1, min(len(order), 6))) as pool:
+        futs = {i: pool.submit(_edit_shot_safe, i, n, cut[i], shots[i][1] - shots[i][0],
+                               plans[i][0], extra, remove_text, tmp, say, anchor_url)
+                for i in order}
+        for i, f in futs.items():
+            results[i] = f.result()
+    return results, prep_cost, build_swap_prompt(swaps, extra, remove_text)
+
