@@ -382,6 +382,9 @@ def clean_swaps(swaps):
         what = re.sub(r"\s+", " ", str((sw or {}).get("what") or "")).strip().rstrip(".")
         # People type "Replace the man…"; the prompt already says "Replace".
         what = re.sub(r"^(please\s+)?(replace|swap|change)\s+", "", what, flags=re.I).strip()
+        # "...on all scenes" / "in every frame": the shots are planned one by one anyway.
+        what = re.sub(r"\s+(on|in|across|for|throughout)\s+(all|every|each|the whole)\s*(of\s+the\s+)?"
+                      r"(scenes?|shots?|frames?|clips?|video)\b.*$", "", what, flags=re.I).strip() or what
         url = (sw or {}).get("url")
         if not what and not url:
             continue
@@ -409,7 +412,7 @@ def build_swap_prompt(swaps, extra="", remove_text=False):
     for i, sw in enumerate(swaps, 1):
         lines.append("Replace %s with @Element%d in every frame, matching the reference photos "
                      "exactly (face, hair, clothes, colour, shape); take only that subject from "
-                     "the photos, not their background or other objects." % (sw["what"], i))
+                     "the photos, not their background or other objects." % (sw.get("subject") or sw["what"], i))
     if remove_text:
         lines.append("Remove all on-screen text, captions, subtitles, stickers and emojis "
                      "overlaid on the video and show the clean scene behind them.")
@@ -495,32 +498,77 @@ def _claude_json(content, max_tokens=4000):
     return _json.loads(m.group(0))
 
 
+_REF_CACHE = {}
+
+
+def _ref_image(url):
+    """The reference photo as JPEG bytes (downloaded once per run)."""
+    if url not in _REF_CACHE:
+        import requests as _rq
+        raw = _rq.get(url, timeout=60).content
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        im.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=88)
+        _REF_CACHE[url] = buf.getvalue()
+    return _REF_CACHE[url]
+
+
 def _plan_shot(src_shot, dur, swaps):
-    """Which swaps are really visible in this ORIGINAL shot → indices into
-    swaps. Sending an element for a subject that is not in the shot makes
-    Kling invent it. If the look itself fails, every swap is sent (old way)."""
+    """Which swaps are really in this ORIGINAL shot, and what exactly each one
+    is here -> (swaps for this shot, each with a "subject" description, note).
+
+    Sending an element for a subject that is not in the shot makes Kling
+    invent it. The plan sees the reference photos: with only the words "the
+    product" it took the plain white bed pillows of the "before" shot for the
+    product (23.11.2026, abuela pillow ad). The concrete description also goes
+    to Kling instead of the vague words: "the product" alone left a look-alike
+    original unchanged. If the look itself fails, every swap is sent (old way)."""
     try:
         frames = _frames_jpeg(src_shot, dur, CHECK_FRAMES)
         if not frames:
-            return list(range(len(swaps))), ""
+            return list(swaps), ""
         content = []
+        for i, sw in enumerate(swaps, 1):
+            content += [{"type": "text", "text": "REFERENCE %d - the NEW thing that will replace \"%s\":"
+                         % (i, sw["what"])}, _img(_ref_image(sw["url"]))]
         for i, fr in enumerate(frames, 1):
             content += [{"type": "text", "text": "FRAME %d of the original shot:" % i}, _img(fr)]
-        items = "\n".join("%d. %s" % (i, sw["what"]) for i, sw in enumerate(swaps, 1))
+        items = "\n".join('%d. "%s" -> becomes REFERENCE %d' % (i, sw["what"], i)
+                          for i, sw in enumerate(swaps, 1))
         content.append({"type": "text", "text":
-            "A user wants these things replaced in a video (each line says what to replace):\n%s\n\n"
-            "Which of them are visible in this shot, in at least one frame? Count a thing only if "
-            "it is really there: a person who is not in the shot does not count, and hands alone "
-            "do not count as a person.\n"
-            'Answer with JSON only: {"present": [<numbers>], "note": "<one short sentence>"}' % items})
+            "A user wants these things in a video replaced by the reference photos:\n%s\n\n"
+            "For each line, find in this shot the ONE thing the user means: the subject of the same "
+            "kind as its reference (the same type of product, the same role of person). Use the "
+            "reference to understand vague words like \"the product\" or \"the avatar\": a "
+            "different kind of object that merely sits nearby (e.g. ordinary bed pillows when the "
+            "reference is a backrest pillow with arms) does NOT count - then that line is not in "
+            "this shot. A person who is not in the shot does not count, and hands alone do not count "
+            "as a person.\n"
+            "For each line that IS in the shot, describe that original subject as it looks here so "
+            "a video editor can find it: kind, colour, material, where it is (max 20 words, no "
+            "mention of the reference).\n"
+            'Answer with JSON only: {"present": [{"n": <line number>, "subject": "<description>"}], '
+            '"note": "<one short sentence>"}' % items})
         data = _claude_json(content)
         if not isinstance(data.get("present"), list):
             raise ValueError("no present list")
-        present = sorted({int(x) - 1 for x in (data.get("present") or [])
-                          if str(x).isdigit() and 1 <= int(x) <= len(swaps)})
-        return present, str(data.get("note") or "")
+        out, seen = [], set()
+        for it in data["present"]:
+            if isinstance(it, dict):
+                n, subj = it.get("n"), str(it.get("subject") or "").strip()
+            else:
+                n, subj = it, ""
+            if not str(n).isdigit() or not 1 <= int(n) <= len(swaps) or int(n) in seen:
+                continue
+            seen.add(int(n))
+            sw = dict(swaps[int(n) - 1])
+            if subj:
+                sw["subject"] = "%s (%s)" % (sw["what"], subj.rstrip(".")[:200])
+            out.append((int(n), sw))
+        return [sw for _, sw in sorted(out, key=lambda x: x[0])], str(data.get("note") or "")
     except Exception as e:
-        return list(range(len(swaps))), "(scene look skipped: %s)" % type(e).__name__
+        return list(swaps), "(scene look skipped: %s)" % type(e).__name__
 
 
 def _check_shot(path, dur, swaps, remove_text, src_shot=None):
@@ -529,30 +577,33 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
 
     Never blocks the clip: if the check itself fails, the shot passes."""
     try:
-        import requests as _rq
         frames = _frames_jpeg(path, dur, CHECK_FRAMES)
         if not frames:
             return True, ""
         orig = _frames_jpeg(src_shot, dur, CHECK_FRAMES) if src_shot else []
         content = []
         for i, sw in enumerate(swaps, 1):
-            raw = _rq.get(sw["url"], timeout=60).content
-            content += [{"type": "text", "text": "REFERENCE %d — what \"%s\" must become:" % (i, sw["what"])},
-                        _img(raw)]
+            content += [{"type": "text", "text": "REFERENCE %d — what \"%s\" must become:"
+                         % (i, sw.get("subject") or sw["what"])}, _img(_ref_image(sw["url"]))]
         for i, fr in enumerate(orig, 1):
             content += [{"type": "text", "text": "ORIGINAL FRAME %d (before the edit):" % i}, _img(fr)]
         for i, fr in enumerate(frames, 1):
             content += [{"type": "text", "text": "EDITED FRAME %d (same moment):" % i}, _img(fr)]
         if swaps:
-            asks = "; ".join('"%s" → REFERENCE %d' % (sw["what"], i) for i, sw in enumerate(swaps, 1))
+            asks = "; ".join('"%s" → REFERENCE %d' % (sw.get("subject") or sw["what"], i)
+                             for i, sw in enumerate(swaps, 1))
             rule = ("This shot was edited to replace: %s.\n"
                     "Fail it if, in any frame where that subject is visible, it is still the original "
-                    "one instead of the reference (same person / same product).\n" % asks)
+                    "one instead of the reference (same person / same product). Compare with the "
+                    "ORIGINAL frames: a product that kept the original's colour, material or details "
+                    "instead of the reference's is NOT swapped, even if the shape is similar.\n" % asks)
         else:
             rule = "This shot was edited only to remove overlaid text.\n"
         same = ("Also fail it if the edited shot is not the same scene as the original: a different "
                 "action, a different camera angle or framing, or a person or object added that was "
-                "not in the original frames. Changes caused by the swap itself are fine.\n"
+                "not in the original frames, or any OTHER object changed into something else (only "
+                "the subjects listed above may change; e.g. plain bed pillows turned into the "
+                "product). Changes caused by the swap itself are fine.\n"
                 if orig else "")
         text_rule = ("Also fail it if any overlaid caption, subtitle or sticker text is still "
                      "visible (text that is part of the scene itself, like a sign or a logo on "
@@ -573,9 +624,9 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
 def _edit_shot(idx, n, src_shot, dur, swaps, extra, remove_text, tmp, say):
     """Look, upload, edit, check, maybe retry. Returns (local_path, cost, warning)."""
     tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
-    present, pnote = _plan_shot(src_shot, dur, swaps)
-    mine = [swaps[i] for i in present]
-    say("%s: 👀 %s%s" % (tag, ", ".join(sw["what"] for sw in mine) if mine else "nothing to replace",
+    mine, pnote = _plan_shot(src_shot, dur, swaps)
+    say("%s: 👀 %s%s" % (tag, "; ".join(sw.get("subject") or sw["what"] for sw in mine)
+                         if mine else "nothing to replace",
                          (" — " + pnote) if pnote else ""))
     if not mine and not remove_text:
         say("%s: kept as in the original (free)" % tag)
