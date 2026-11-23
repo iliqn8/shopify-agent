@@ -859,14 +859,6 @@ def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor
     return out_path, cost, warning
 
 
-def _anchor_frame(path, dur):
-    """Middle frame of an edited shot, uploaded — the continuity reference."""
-    fr = _frames_jpeg(path, dur, (0.5,))
-    if not fr:
-        return None
-    return _upload(fr[0], "anchor.jpg", "image/jpeg")
-
-
 def _join(parts, durs, src, keep_sound, dest):
     """Trim every edited shot to its real length, scale to one size/fps, concat,
     and put the original sound back."""
@@ -921,11 +913,7 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
                + " — each shot is edited on its own so the swap holds after every cut"}
     yield {"type": "status", "text": "👀 Then Claude looks at every shot and sends Kling only "
                                      "the swaps that are really in it"}
-    if n > 1:
-        yield {"type": "status", "text": "🔗 The shot with the most swaps is made first; a frame "
-                                         "of it keeps the person, product and room the same in "
-                                         "all other shots (≈2× the waiting time)"}
-    yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes per round…"}
+    yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes (shots run at the same time)…"}
 
     msgs = queue.Queue()
     try:
@@ -960,8 +948,8 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
 
 
 def _swap_pipeline(src, shots, swaps, extra, remove_text, tmp, say):
-    """Clean photos → plan every shot → anchor shot first → the rest with its
-    frame as a continuity reference. Returns (results, prep_cost, prompt)."""
+    """Sort photos → plan every shot → edit all shots at the same time.
+    Returns (results, prep_cost, prompt)."""
     from concurrent.futures import ThreadPoolExecutor
     n = len(shots)
     swaps, prep_cost = _prepare_refs(swaps, say)
@@ -979,27 +967,15 @@ def _swap_pipeline(src, shots, swaps, extra, remove_text, tmp, say):
         say("%s: 👀 %s%s" % (tag, "; ".join(sw.get("subject") or sw["what"] for sw in mine)
                              if mine else "nothing to replace", (" — " + note) if note else ""))
 
+    # NO continuity frame from an already edited shot: Kling O3 Edit copies
+    # such an @Image whole — shots 1–2 came back as copies of shot 3 (pose,
+    # props, framing), 24.11.2026 pillow 14. Every shot is edited only
+    # against its own original footage.
     results = [None] * n
-    order = list(range(n))
-    anchor_url = None
-    work = [i for i in order if plans[i][0] or remove_text]
-    if n > 1 and len(work) > 1:
-        a = max(work, key=lambda i: (len(plans[i][0]), shots[i][1] - shots[i][0]))
-        say("🔗 Shot %d/%d goes first (anchor)" % (a + 1, n))
-        results[a] = _edit_shot_safe(a, n, cut[a], shots[a][1] - shots[a][0], plans[a][0],
-                                     extra, remove_text, tmp, say)
-        if results[a][0] != cut[a]:
-            try:
-                anchor_url = _anchor_frame(results[a][0], shots[a][1] - shots[a][0])
-                say("🔗 Continuity frame from shot %d → %s" % (a + 1, anchor_url))
-            except Exception as e:
-                say("🔗 Continuity frame skipped (%s)" % str(e)[:80])
-        order = [i for i in order if i != a]
-
-    with ThreadPoolExecutor(max_workers=max(1, min(len(order), 6))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(n, 6))) as pool:
         futs = {i: pool.submit(_edit_shot_safe, i, n, cut[i], shots[i][1] - shots[i][0],
-                               plans[i][0], extra, remove_text, tmp, say, anchor_url)
-                for i in order}
+                               plans[i][0], extra, remove_text, tmp, say)
+                for i in range(n)}
         for i, f in futs.items():
             results[i] = f.result()
     return results, prep_cost, build_swap_prompt(swaps, extra, remove_text)
