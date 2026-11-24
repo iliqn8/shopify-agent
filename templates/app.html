@@ -5933,7 +5933,7 @@ function dmUpdateCost() {
     // Video in the input: cheaper per token, but its seconds count too (floor 1.8x the output).
     const [w, h] = (r.dimensions[dmAspect] || '0x0').split('x').map(Number);
     const tokens = Math.max(vs + dmSeconds, vi.min_factor * dmSeconds) * w * h * vi.fps / 1024;
-    usd = tokens * (vi.usd_per_token[dmResolution] || 0);
+    usd = tokens * (((m.video_usd_per_token || {})[dmResolution]) || vi.usd_per_token[dmResolution] || 0);
   }
   document.getElementById('dm-cost').textContent = '≈ $' + usd.toFixed(2)
     + (vs ? ' (incl. ' + vs.toFixed(1) + 's of reference video)' : '');

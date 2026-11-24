@@ -40,6 +40,7 @@ import video_assembler
 # one is an entry here plus its price row. Only what has been verified against
 # the published spec belongs in it.
 MODEL_ID = "dreamina-seedance-2-5-260628"
+FLASH_MODEL_ID = "dreamina-seedance-2-5-flash-261115"
 
 MIN_SECONDS = 4
 MAX_SECONDS = 30
@@ -59,6 +60,25 @@ DREAMINA_MODELS = {
         "audio": {"supported": True, "free": True},
         "text_to_video": True,
         "recommended": True,
+    },
+    # Seedance 2.5 Flash (24.11.2026). Rates from BytePlus's pricing page
+    # (doc 1544106, read 24.11.2026): $7.0/M tokens at 480p/720p, $4.3/M with
+    # video in the input; 1080p "Not supported". Their examples check out with
+    # the same token formula: 5s 16:9 480p $0.34 (48,038 tokens), 720p $0.76
+    # (108,000). Model access verified on this account with a refused request.
+    "seedance-2.5-flash": {
+        "id": FLASH_MODEL_ID,
+        "label": "Dreamina Seedance 2.5 Flash",
+        "tagline": ("4–30s · 480p/720p · free audio · faster and ~35% cheaper "
+                    "than 2.5 · no 1080p"),
+        "duration": {"mode": "range", "min": MIN_SECONDS, "max": MAX_SECONDS},
+        "resolutions": ["480p", "720p"],
+        "default_resolution": "720p",
+        "aspect_from_image": True,
+        "audio": {"supported": True, "free": True},
+        "text_to_video": True,
+        "usd_per_token": {"480p": 7.0e-6, "720p": 7.0e-6},
+        "usd_per_token_video": {"480p": 4.3e-6, "720p": 4.3e-6},
     },
 }
 
@@ -174,13 +194,23 @@ def dimensions(resolution, aspect):
     return table.get(aspect) or table["16:9"]
 
 
-def usd_per_second(resolution="720p", aspect="16:9", now=None):
+def _rate(resolution, video_input=False, model=DEFAULT_MODEL, now=None):
+    """USD per token for this model: its own table, else Seedance 2.5's."""
+    spec = model_spec(model)
+    if video_input:
+        table = spec.get("usd_per_token_video") or USD_PER_TOKEN_WITH_VIDEO
+    else:
+        table = spec.get("usd_per_token") or USD_PER_TOKEN
+    rate = table.get(resolution) or table.get("720p")
+    if not spec.get("usd_per_token") and resolution in PROMO["resolutions"] and promo_active(now):
+        rate *= PROMO["multiplier"]
+    return rate
+
+
+def usd_per_second(resolution="720p", aspect="16:9", now=None, model=DEFAULT_MODEL):
     """Price of one generated second at this shape. A rate, not a clip."""
     w, h = dimensions(resolution, aspect)
-    rate = USD_PER_TOKEN.get(resolution, USD_PER_TOKEN["720p"])
-    if resolution in PROMO["resolutions"] and promo_active(now):
-        rate *= PROMO["multiplier"]
-    return round(w * h * FPS / 1024 * rate, 4)
+    return round(w * h * FPS / 1024 * _rate(resolution, False, model, now), 4)
 
 
 def clamp_seconds(seconds, model=DEFAULT_MODEL):
@@ -195,7 +225,7 @@ def estimate_cost(seconds, resolution="720p", aspect="16:9",
     with sound as without, and the callers are shaped like Clip Studio's, where
     audio does move the price on the Kling models.
     """
-    return round(usd_per_second(resolution, aspect)
+    return round(usd_per_second(resolution, aspect, model=model)
                  * clamp_seconds(seconds, model), 4)
 
 
@@ -208,12 +238,12 @@ def video_input_tokens(output_seconds, input_seconds, resolution="720p", aspect=
 
 
 def estimate_video_input_cost(output_seconds, input_seconds, resolution="720p",
-                              aspect="16:9", now=None):
+                              aspect="16:9", now=None, model=DEFAULT_MODEL):
     return cost_of_tokens(video_input_tokens(output_seconds, input_seconds, resolution, aspect),
-                          resolution, now, video_input=True)
+                          resolution, now, video_input=True, model=model)
 
 
-def cost_of_tokens(tokens, resolution="720p", now=None, video_input=False):
+def cost_of_tokens(tokens, resolution="720p", now=None, video_input=False, model=DEFAULT_MODEL):
     """The real bill, from the token count BytePlus returns on a finished task.
 
     This is the number that was actually charged. The estimate above is the
@@ -222,11 +252,7 @@ def cost_of_tokens(tokens, resolution="720p", now=None, video_input=False):
     `video_input` switches to the cheaper per-token rate BytePlus uses when the
     task read a video (edits, video references).
     """
-    table = USD_PER_TOKEN_WITH_VIDEO if video_input else USD_PER_TOKEN
-    rate = table.get(resolution, table["720p"])
-    if resolution in PROMO["resolutions"] and promo_active(now):
-        rate *= PROMO["multiplier"]
-    return round((tokens or 0) * rate, 4)
+    return round((tokens or 0) * _rate(resolution, video_input, model, now), 4)
 
 
 def normalise(model=DEFAULT_MODEL, resolution=None, aspect="16:9", audio=True,
@@ -264,7 +290,7 @@ def options():
                 {"key": r,
                  "note": RESOLUTION_NOTE.get(r, ""),
                  "dimensions": {a: "%dx%d" % dimensions(r, a) for a in ASPECTS},
-                 "usd_per_second": {a: usd_per_second(r, a) for a in ASPECTS}}
+                 "usd_per_second": {a: usd_per_second(r, a, model=key) for a in ASPECTS}}
                 for r in spec["resolutions"]
             ],
             "default_resolution": spec["default_resolution"],
@@ -272,6 +298,7 @@ def options():
             "audio": spec["audio"],
             "text_to_video": spec["text_to_video"],
             "aspect_from_image": spec["aspect_from_image"],
+            "video_usd_per_token": {r: _rate(r, True, key) for r in spec["resolutions"]},
         })
 
     return {
@@ -887,7 +914,7 @@ def estimate_edit_cost(seconds, resolution="720p", aspect="16:9",
                        model=DEFAULT_MODEL):
     """What an edit of a clip this long will cost. See EDIT_BILLING_MULTIPLIER."""
     return estimate_video_input_cost(clamp_seconds(seconds, model), seconds,
-                                     resolution, aspect)
+                                     resolution, aspect, model=model)
 
 
 def has_edit_trigger(text):
@@ -1018,7 +1045,8 @@ def edit_stream(video_url, instructions, reference_images=None,
         made_seconds = task.get("duration") or source_seconds
         made_resolution = task.get("resolution") or resolution
         tokens = (task.get("usage") or {}).get("completion_tokens") or 0
-        actual = cost_of_tokens(tokens, made_resolution, video_input=True) if tokens else cost
+        actual = (cost_of_tokens(tokens, made_resolution, video_input=True, model=s["model"])
+                  if tokens else cost)
 
         yield {"type": "status", "text": f"⬇️ Downloading the {container.upper()}…"}
         filename = save_output(url, prompt, container)
@@ -1073,7 +1101,7 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
     spec = s["spec"]
     seconds, resolution, aspect = s["seconds"], s["resolution"], s["aspect"]
     audio, container = s["audio"], s["container"]
-    cost = (estimate_video_input_cost(seconds, video_seconds, resolution, aspect)
+    cost = (estimate_video_input_cost(seconds, video_seconds, resolution, aspect, model=s["model"])
             if reference_videos else estimate_cost(seconds, resolution, aspect, s["model"], audio))
 
     try:
@@ -1138,7 +1166,8 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
         made_seconds = task.get("duration") or seconds
         made_resolution = task.get("resolution") or resolution
         tokens = (task.get("usage") or {}).get("completion_tokens") or 0
-        actual = (cost_of_tokens(tokens, made_resolution, video_input=bool(reference_videos))
+        actual = (cost_of_tokens(tokens, made_resolution, video_input=bool(reference_videos),
+                                 model=s["model"])
                   if tokens else cost)
 
         yield {"type": "status", "text": f"⬇️ Downloading the {container.upper()}…"}
