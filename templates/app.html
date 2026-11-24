@@ -1388,6 +1388,10 @@
           <input type="checkbox" id="mt-sw-notext" checked style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
           <span style="color:#ddd;font-size:13px">Remove on-screen text <span style="color:#777">— captions, subtitles, emojis from the original video</span></span>
         </label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
+          <input type="checkbox" id="mt-sw-retry" style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer">
+          <span style="color:#ddd;font-size:13px">Auto-retry failed shots <span style="color:#777">— paid again; off = see the result first, then 🔁 Redo only the shot you want</span></span>
+        </label>
       </div>
 
       <div style="border-top:1px solid #222;padding-top:16px">
@@ -5410,6 +5414,7 @@ async function mtLoadHistory() {
       const meta = (s.mode === 'swap'
         ? [s.model_label, s.seconds ? s.seconds + 's' : null,
            '🔁 ' + (s.swaps || []).join(', '), s.shots > 1 ? s.shots + ' shots' : null,
+           s.redo_of ? 'redo of shot ' + s.redo_of : null,
            s.remove_text ? 'text removed' : null,
            (s.warnings || []).length ? '⚠️ ' + s.warnings.length + ' shot(s) failed the check' : null,
            s.cost ? '$' + Number(s.cost).toFixed(2) : null]
@@ -5429,6 +5434,7 @@ async function mtLoadHistory() {
           <button class="btn-sm" onclick="mtDelete(${c.id})">🗑</button>
         </div>
         ${url ? `<video controls preload="none" src="${url}" style="width:100%;max-width:240px;margin-top:8px;border-radius:8px;background:#000"></video>` : ''}
+        ${s.mode === 'swap' ? mtSwRedoHtml(s) : ''}
       </div>`;
     }).join('');
   } catch (e) {
@@ -5671,17 +5677,43 @@ async function mtSwGenerate() {
     swaps: swaps.map(s => ({ what: s.what.trim(), url: s.main.url, extras: s.extras.map(x => x.url) })),
     extra: document.getElementById('mt-sw-extra').value.trim(),
     keep_sound: document.getElementById('mt-sw-sound').checked,
-    remove_text: document.getElementById('mt-sw-notext').checked
+    remove_text: document.getElementById('mt-sw-notext').checked,
+    auto_retry: document.getElementById('mt-sw-retry').checked
   };
   const o = mtSwOpts();
+  const head = `
+      ${mtSwVideo.thumb ? `<img src="${mtSwVideo.thumb}" style="height:44px;border-radius:6px">` : ''}
+      ${swaps.map(s => `<img src="${s.main.thumb}" style="height:44px;border-radius:6px">`).join('')}
+      <div style="color:#ccc;font-size:12px;flex:1;min-width:160px">${mtEsc(o.label)} · ${mtSwVideo.seconds}s · ${mtEsc(swaps.map(s => s.what.trim()).join(', '))}</div>`;
+  mtSwRunJob('/api/motion-swap-start', body, head);
+}
 
+// 🔁 Redo one shot of a finished clip: a new card, a new clip; the old one stays.
+function mtSwRedo(swapJob, shot, cost, btn) {
+  if (!confirm(`Make shot ${shot + 1} again with Kling? ≈$${cost.toFixed(2)} — the other shots stay as they are and you get a new clip.`)) return;
+  if (btn) btn.disabled = true;
+  const head = `<div style="color:#ccc;font-size:12px;flex:1;min-width:160px">🔁 Redo of shot ${shot + 1}</div>`;
+  mtSwRunJob('/api/motion-swap-redo', { swap_job: swapJob, shot }, head);
+}
+
+function mtSwRedoHtml(ev) {
+  const info = (ev.shot_info || []).filter(s => s.redo);
+  if (!ev.swap_job || !info.length) return '';
+  return `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+    <span style="color:#888;font-size:11px">Not happy with a shot?</span>
+    ${info.map(s => `<button class="btn-sm" title="${mtEsc(s.warning || 'This shot passed the check')}"
+        onclick="mtSwRedo('${mtEsc(ev.swap_job)}', ${s.i}, ${s.cost}, this)"
+        style="${s.warning ? 'border-color:#fbbf24;color:#fbbf24' : ''}">
+        ${s.warning ? '⚠️' : '✅'} 🔁 Redo shot ${s.i + 1} (${s.start.toFixed(1)}–${s.end.toFixed(1)}s · ≈$${s.cost.toFixed(2)})</button>`).join('')}
+  </div>`;
+}
+
+async function mtSwRunJob(endpoint, body, head) {
   const card = document.createElement('div');
   card.style.cssText = 'background:#101018;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px';
   card.innerHTML = `
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      ${mtSwVideo.thumb ? `<img src="${mtSwVideo.thumb}" style="height:44px;border-radius:6px">` : ''}
-      ${swaps.map(s => `<img src="${s.main.thumb}" style="height:44px;border-radius:6px">`).join('')}
-      <div style="color:#ccc;font-size:12px;flex:1;min-width:160px">${mtEsc(o.label)} · ${mtSwVideo.seconds}s · ${mtEsc(swaps.map(s => s.what.trim()).join(', '))}</div>
+      ${head}
       <span class="mt-job-state" style="color:#fbbf24;font-size:12px">⏳ starting…</span>
     </div>
     <pre class="mt-job-log" style="margin:8px 0 0;background:#0c0c0c;border:1px solid #222;border-radius:8px;padding:8px 10px;color:#8ab4f8;font-size:11px;line-height:1.5;max-height:140px;overflow-y:auto;white-space:pre-wrap"></pre>
@@ -5692,7 +5724,7 @@ async function mtSwGenerate() {
   const add = t => { log.textContent += (log.textContent ? '\n' : '') + t; log.scrollTop = log.scrollHeight; };
 
   try {
-    const d = await vidJson(await fetch('/api/motion-swap-start', {
+    const d = await vidJson(await fetch(endpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
     if (d.error) throw new Error(d.error);
     state.textContent = '⏳ generating…';
@@ -5703,7 +5735,7 @@ async function mtSwGenerate() {
       if (ev.error) { state.style.color = '#f87171'; state.textContent = '❌ failed'; add('❌ ' + ev.error); return; }
       state.style.color = '#4ade80';
       state.textContent = '✅ done' + (ev.cost ? ' · $' + ev.cost.toFixed(2) : '');
-      card.querySelector('.mt-job-result').innerHTML = mtResultHtml(ev.filename);
+      card.querySelector('.mt-job-result').innerHTML = mtResultHtml(ev.filename) + mtSwRedoHtml(ev);
       mtLoadHistory();
     });
   } catch (e) {

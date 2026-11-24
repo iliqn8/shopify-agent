@@ -1596,6 +1596,7 @@ def motion_swap_start():
         "extra": (d.get("extra") or "").strip(),
         "keep_sound": bool(d.get("keep_sound", True)),
         "remove_text": bool(d.get("remove_text", False)),
+        "retries": 1 if d.get("auto_retry") else 0,
     }
     if not settings["video_file"]:
         return jsonify({"error": "Add the video first."}), 400
@@ -1613,7 +1614,38 @@ def motion_swap_start():
                     kb.save_studio_clip(settings["extra"], _json_s.dumps(dict(
                         {k: event.get(k) for k in
                          ("mode", "model_label", "seconds", "swaps", "keep_sound", "cost",
-                          "shots", "remove_text", "warnings")},
+                          "shots", "remove_text", "warnings", "swap_job", "shot_info")},
+                        provider="kling-motion")),
+                        event["filename"])
+                except Exception:
+                    pass
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/motion-swap-redo", methods=["POST"])
+def motion_swap_redo():
+    """🔁 Redo one shot of a finished swap clip (one paid Kling run)."""
+    import uuid as _uuid_r
+    import json as _json_r
+    import motion_studio
+
+    d = request.json or {}
+    swap_job, shot = str(d.get("swap_job") or ""), d.get("shot")
+    if not swap_job or not str(shot).isdigit():
+        return jsonify({"error": "Missing clip or shot."}), 400
+    job_id = str(_uuid_r.uuid4())
+
+    def factory():
+        for event in motion_studio.redo_shot_stream(swap_job, int(shot)):
+            if event.get("type") == "done" and event.get("filename"):
+                try:
+                    kb.save_studio_clip("", _json_r.dumps(dict(
+                        {k: event.get(k) for k in
+                         ("mode", "model_label", "seconds", "swaps", "keep_sound", "cost",
+                          "shots", "remove_text", "warnings", "redo_of", "swap_job", "shot_info")},
                         provider="kling-motion")),
                         event["filename"])
                 except Exception:

@@ -16,6 +16,7 @@ seconds × rate (2 × 3s Pro = $1.01).
 
 import base64
 import io
+import json
 import os
 import re
 import tempfile
@@ -696,6 +697,14 @@ def _prepare_refs(swaps, say):
         if info.get("look"):
             sw["look"] = info["look"]
         say("📷 Photo %d: %s — %s" % (i, info["kind"], info["keep"]))
+    # Every extra angle of a place gets its own "look": the shot that uses it
+    # must still list what the new place has — with only "@Image1" and no list
+    # Kling left the whole room unchanged (24.11.2026, live, pillow 14 shot 3).
+    for sw in out:
+        extras = [u for u in (sw.get("extras") or []) if u]
+        if sw.get("kind") == "place" and extras:
+            infos = _classify([(u, sw["what"]) for u in extras])
+            sw["looks"] = [sw.get("look", "")] + [x.get("look", "") for x in infos]
     return out, 0.0
 
 
@@ -793,8 +802,11 @@ def _plan_shot(src_shot, dur, swaps):
                 # the closest view goes (24.11.2026, pillow 14 shot 3: wide photo
                 # + close view -> second bed behind her; close view alone ->
                 # headboard right behind her, as in the original).
-                if v > 1:
-                    sw.pop("look", None)   # the wide photo's list would add its tree/window
+                # The chosen view's own list: the wide photo's would add its
+                # tree/window, no list at all leaves the old room (see _prepare_refs).
+                looks = sw.get("looks") or []
+                if v > 1 and v <= len(looks) and looks[v - 1]:
+                    sw["look"] = looks[v - 1]
                 sw["url"], sw["extras"] = views[v - 1], []
             out.append((int(n), sw))
         return [sw for _, sw in sorted(out, key=lambda x: x[0])], str(data.get("note") or "")
@@ -877,11 +889,11 @@ def _run_kling(payload, tag, say):
             time.sleep(10)
 
 
-def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
+def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, retries=None):
     """_edit_shot, but a shot that cannot be made keeps the original footage
     instead of throwing away every finished (and paid) shot."""
     try:
-        return _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say)
+        return _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, retries)
     except (fal_client.FalError, MotionError) as e:
         tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
         if n == 1:
@@ -891,9 +903,13 @@ def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
         return src_shot, getattr(e, "_cost", 0.0), warning
 
 
-def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
+def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, retries=None):
     """Upload, edit, check, maybe retry. `mine` = this shot's plan.
+    `retries`: paid automatic retries of a shot that fails the check — the user
+    chooses (default off in the tab; a 🔁 Redo button does it on demand).
     Returns (local_path, cost, warning)."""
+    retries = SWAP_RETRIES if retries is None else max(0, int(retries))
+    stamp = int(time.time() * 1000) % 10 ** 8   # a redo must not overwrite the earlier take
     tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
     if not mine and not remove_text:
         say("%s: kept as in the original (free)" % tag)
@@ -905,7 +921,7 @@ def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
     billed = max(dur, MIN_SECONDS) * SWAP_MODEL["usd_per_second"]
     warning, out_path = "", None
     best = None   # (score, path, warning) — a retry can come back worse than the first try
-    for attempt in range(SWAP_RETRIES + 1):
+    for attempt in range(retries + 1):
         try:
             res = _run_kling(payload, tag, say)
         except (fal_client.FalError, MotionError) as e:
@@ -919,7 +935,7 @@ def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
         vurl = video.get("url") if isinstance(video, dict) else None
         if not vurl:
             raise MotionError("%s: the model returned no video." % tag)
-        out_path = os.path.join(tmp, "out_%02d_%d.mp4" % (idx, attempt))
+        out_path = os.path.join(tmp, "out_%02d_%d_%d.mp4" % (idx, stamp, attempt))
         with open(out_path, "wb") as fh:
             fh.write(fal_client.download(vurl))
         ok, note, score = _check_shot(out_path, dur, mine, remove_text, src_shot)
@@ -929,7 +945,7 @@ def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
         warning = "%s: ⚠️ %s" % (tag, note or "the swap did not take")
         if best is None or score > best[0]:
             best = (score, out_path, warning)
-        if attempt < SWAP_RETRIES:
+        if attempt < retries:
             say(warning + " — trying this shot again…")
     _, out_path, warning = best
     say(warning + " (kept the better try)")
@@ -964,7 +980,7 @@ def _join(parts, durs, src, keep_sound, dest):
 
 
 def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=True,
-                remove_text=False, video_url=None):
+                remove_text=False, video_url=None, retries=None):
     """Make one objects-swap clip. Yields {"type": "status"|"done"} events."""
     import queue
     from concurrent.futures import ThreadPoolExecutor
@@ -992,41 +1008,155 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
                                      "the swaps that are really in it"}
     yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes (shots run at the same time)…"}
 
+    if retries:
+        yield {"type": "status", "text": "🔁 A shot that fails the check is made once more "
+                                         "automatically (paid again)"}
+
     msgs = queue.Queue()
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            with ThreadPoolExecutor(max_workers=1) as one:
-                job = one.submit(_swap_pipeline, src, shots, swaps, extra, remove_text, tmp, msgs.put)
-                while not job.done():
-                    try:
-                        yield {"type": "status", "text": "   " + msgs.get(timeout=2)}
-                    except queue.Empty:
-                        pass
-                while not msgs.empty():
-                    yield {"type": "status", "text": "   " + msgs.get()}
-                results, prep_cost, prompt = job.result()
+        # The shots, their plans and every take stay on disk so one shot can be
+        # redone later (🔁 Redo) without paying for the whole clip again.
+        job_id, tmp = _new_swap_job()
+        with ThreadPoolExecutor(max_workers=1) as one:
+            job = one.submit(_swap_pipeline, src, shots, swaps, extra, remove_text, tmp,
+                             msgs.put, retries)
+            while not job.done():
+                try:
+                    yield {"type": "status", "text": "   " + msgs.get(timeout=2)}
+                except queue.Empty:
+                    pass
+            while not msgs.empty():
+                yield {"type": "status", "text": "   " + msgs.get()}
+            results, prep_cost, prompt, cut, plans = job.result()
 
-            cost = round(sum(r[1] for r in results) + prep_cost, 2)
-            warnings = [r[2] for r in results if r[2]]
-            yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
-            name = "clip_swap_%s_%d.mp4" % (clip_studio._safe_stem(swaps[0]["what"]), int(time.time()))
-            _join([r[0] for r in results], [b - a for a, b in shots], src, keep_sound,
-                  os.path.join(video_assembler.OUTPUT_DIR, name))
+        cost = round(sum(r[1] for r in results) + prep_cost, 2)
+        warnings = [r[2] for r in results if r[2]]
+        yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
+        name = "clip_swap_%s_%d.mp4" % (clip_studio._safe_stem(swaps[0]["what"]), int(time.time()))
+        _join([r[0] for r in results], [b - a for a, b in shots], src, keep_sound,
+              os.path.join(video_assembler.OUTPUT_DIR, name))
+        state = {"src": src, "shots": shots, "cut": cut, "plans": plans, "extra": extra,
+                 "remove_text": bool(remove_text), "keep_sound": bool(keep_sound),
+                 "stem": clip_studio._safe_stem(swaps[0]["what"]), "seconds": seconds,
+                 "swaps": [sw["what"] for sw in swaps],
+                 "parts": [r[0] for r in results], "warnings": [r[2] for r in results]}
+        _save_swap_job(job_id, state)
         yield {"type": "status", "text": "✅ Done" + (" — with warnings above" if warnings else "")}
         yield {"type": "done", "filename": name, "cost": cost, "seconds": seconds,
                "mode": "swap", "model_label": SWAP_MODEL["label"], "shots": n,
                "swaps": [sw["what"] for sw in swaps], "keep_sound": bool(keep_sound),
                "remove_text": bool(remove_text), "warnings": warnings,
-               "prompt": prompt}
+               "prompt": prompt, "swap_job": job_id, "shot_info": _shot_info(state)}
     except (fal_client.FalError, MotionError) as e:
         yield {"type": "done", "error": str(e)}
     except Exception as e:
         yield {"type": "done", "error": "%s: %s" % (type(e).__name__, e)}
 
 
-def _swap_pipeline(src, shots, swaps, extra, remove_text, tmp, say):
+# ── Kept swap jobs (for 🔁 Redo of one shot) ──────────────────────────────
+SWAP_JOBS_DIR = os.path.join(os.path.dirname(video_assembler.OUTPUT_DIR), "swap_jobs")
+SWAP_JOBS_KEEP = 12
+
+
+def _new_swap_job():
+    import uuid
+    import shutil
+    os.makedirs(SWAP_JOBS_DIR, exist_ok=True)
+    old = sorted((os.path.join(SWAP_JOBS_DIR, d) for d in os.listdir(SWAP_JOBS_DIR)),
+                 key=os.path.getmtime)
+    for d in old[:max(0, len(old) - SWAP_JOBS_KEEP + 1)]:
+        shutil.rmtree(d, ignore_errors=True)
+    job_id = uuid.uuid4().hex[:16]
+    path = os.path.join(SWAP_JOBS_DIR, job_id)
+    os.makedirs(path)
+    return job_id, path
+
+
+def _job_dir(job_id):
+    if not re.fullmatch(r"[0-9a-f]{16}", job_id or ""):
+        raise MotionError("Unknown swap job.")
+    path = os.path.join(SWAP_JOBS_DIR, job_id)
+    if not os.path.isfile(os.path.join(path, "job.json")):
+        raise MotionError("This clip's shots are no longer kept on the server — make the clip again.")
+    return path
+
+
+def _save_swap_job(job_id, state):
+    with open(os.path.join(SWAP_JOBS_DIR, job_id, "job.json"), "w", encoding="utf-8") as fh:
+        json.dump(state, fh)
+
+
+def _shot_info(state):
+    """Per shot: time range, what a redo costs, the check's warning ("" = ok)."""
+    out = []
+    for i, (a, b) in enumerate(state["shots"]):
+        out.append({"i": i, "start": a, "end": b, "warning": state["warnings"][i] or "",
+                    "redo": bool(state["plans"][i] or state["remove_text"]),
+                    "cost": estimate_swap_cost(b - a)})
+    return out
+
+
+def redo_shot_stream(job_id, idx):
+    """Make one shot of a finished swap clip again (one Kling run, no automatic
+    retry) and join a NEW clip with it; the other shots stay as they were."""
+    try:
+        path = _job_dir(job_id)
+        with open(os.path.join(path, "job.json"), encoding="utf-8") as fh:
+            st = json.load(fh)
+        n = len(st["shots"])
+        idx = int(idx)
+        if not 0 <= idx < n:
+            raise MotionError("No such shot.")
+        if not (st["plans"][idx] or st["remove_text"]):
+            raise MotionError("Nothing is replaced in this shot.")
+        a, b = st["shots"][idx]
+        if not os.path.isfile(st["src"]) or not all(os.path.isfile(p) for p in st["parts"]):
+            raise MotionError("This clip's shots are no longer on the server — make the clip again.")
+    except (MotionError, ValueError, KeyError, OSError) as e:
+        yield {"type": "done", "error": str(e) or "Unknown swap job."}
+        return
+
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
+    yield {"type": "status", "text": "🔁 Redo %s (%.1f–%.1fs) · %s · ≈$%.2f — the other shots stay as they are"
+           % (tag, a, b, SWAP_MODEL["label"], estimate_swap_cost(b - a))}
+    yield {"type": "status", "text": "⏳ Kling usually takes 5–10 minutes…"}
+    msgs = queue.Queue()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as one:
+            job = one.submit(_edit_shot, idx, n, st["cut"][idx], b - a, st["plans"][idx],
+                             st["extra"], st["remove_text"], path, msgs.put, 0)
+            while not job.done():
+                try:
+                    yield {"type": "status", "text": "   " + msgs.get(timeout=2)}
+                except queue.Empty:
+                    pass
+            while not msgs.empty():
+                yield {"type": "status", "text": "   " + msgs.get()}
+            part, cost, warning = job.result()
+        st["parts"][idx], st["warnings"][idx] = part, warning
+        yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
+        name = "clip_swap_%s_%d.mp4" % (st["stem"], int(time.time()))
+        _join(st["parts"], [y - x for x, y in st["shots"]], st["src"], st["keep_sound"],
+              os.path.join(video_assembler.OUTPUT_DIR, name))
+        _save_swap_job(job_id, st)
+        warnings = [w for w in st["warnings"] if w]
+        yield {"type": "status", "text": "✅ Done" + (" — with warnings above" if warning else "")}
+        yield {"type": "done", "filename": name, "cost": round(cost, 2), "seconds": st["seconds"],
+               "mode": "swap", "model_label": SWAP_MODEL["label"], "shots": n,
+               "swaps": st["swaps"], "keep_sound": st["keep_sound"], "remove_text": st["remove_text"],
+               "warnings": warnings, "redo_of": idx + 1, "swap_job": job_id,
+               "shot_info": _shot_info(st)}
+    except (fal_client.FalError, MotionError) as e:
+        yield {"type": "done", "error": str(e)}
+    except Exception as e:
+        yield {"type": "done", "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _swap_pipeline(src, shots, swaps, extra, remove_text, tmp, say, retries=None):
     """Sort photos → plan every shot → edit all shots at the same time.
-    Returns (results, prep_cost, prompt)."""
+    Returns (results, prep_cost, prompt, cut shot paths, per-shot plans)."""
     from concurrent.futures import ThreadPoolExecutor
     n = len(shots)
     swaps, prep_cost = _prepare_refs(swaps, say)
@@ -1051,9 +1181,10 @@ def _swap_pipeline(src, shots, swaps, extra, remove_text, tmp, say):
     results = [None] * n
     with ThreadPoolExecutor(max_workers=max(1, min(n, 6))) as pool:
         futs = {i: pool.submit(_edit_shot_safe, i, n, cut[i], shots[i][1] - shots[i][0],
-                               plans[i][0], extra, remove_text, tmp, say)
+                               plans[i][0], extra, remove_text, tmp, say, retries)
                 for i in range(n)}
         for i, f in futs.items():
             results[i] = f.result()
-    return results, prep_cost, build_swap_prompt(swaps, extra, remove_text)
+    return (results, prep_cost, build_swap_prompt(swaps, extra, remove_text), cut,
+            [p[0] for p in plans])
 
