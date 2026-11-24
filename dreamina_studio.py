@@ -79,6 +79,10 @@ DREAMINA_MODELS = {
         "text_to_video": True,
         "usd_per_token": {"480p": 7.0e-6, "720p": 7.0e-6},
         "usd_per_token_video": {"480p": 4.3e-6, "720p": 4.3e-6},
+        # Seedance 2.5 tutorial (doc 2607688, read 24.11.2026): Flash takes
+        # 10 reference images and 5 reference videos, against 30 and 10.
+        "max_images": 10,
+        "max_videos": 5,
     },
 }
 
@@ -299,6 +303,8 @@ def options():
             "text_to_video": spec["text_to_video"],
             "aspect_from_image": spec["aspect_from_image"],
             "video_usd_per_token": {r: _rate(r, True, key) for r in spec["resolutions"]},
+            "max_images": max_images(spec),
+            "max_videos": max_videos(spec),
         })
 
     return {
@@ -503,6 +509,14 @@ MAX_IDEA_IMAGES = clip_studio.MAX_IDEA_IMAGES
 # as this app's own public URL. Real faces are refused here just as in photos.
 MAX_REFERENCE_VIDEOS = 10
 MAX_REFERENCE_VIDEO_SECONDS = 30
+
+
+def max_images(spec):
+    return spec.get("max_images") or MAX_REFERENCE_IMAGES
+
+
+def max_videos(spec):
+    return spec.get("max_videos") or MAX_REFERENCE_VIDEOS
 REF_VIDEO_MIN_SECONDS = 2
 REF_VIDEO_SUBDIR = "refvideos"
 REF_VIDEO_DIR = os.path.join(video_assembler.OUTPUT_DIR, REF_VIDEO_SUBDIR)
@@ -819,13 +833,13 @@ def build_payload(spec, prompt, seconds, resolution, aspect, audio, container,
         raise DreaminaError(
             "A starting frame and references cannot be combined — Seedance "
             "treats them as different kinds of task. Pick one.")
-    if len(videos) > MAX_REFERENCE_VIDEOS:
-        raise DreaminaError("Seedance 2.5 takes at most %d reference videos; %d were sent."
-                            % (MAX_REFERENCE_VIDEOS, len(videos)))
-    if len(refs) > MAX_REFERENCE_IMAGES:
+    if len(videos) > max_videos(spec):
+        raise DreaminaError("%s takes at most %d reference videos; %d were sent."
+                            % (spec["label"], max_videos(spec), len(videos)))
+    if len(refs) > max_images(spec):
         raise DreaminaError(
-            "Seedance 2.5 takes at most %d reference images; %d were sent."
-            % (MAX_REFERENCE_IMAGES, len(refs)))
+            "%s takes at most %d reference images; %d were sent."
+            % (spec["label"], max_images(spec), len(refs)))
 
     content = [{"type": "text", "text": prompt}]
     if image_url:
@@ -946,10 +960,10 @@ def build_edit_payload(spec, prompt, video_url, resolution, audio, container,
     branch on every line.
     """
     refs = [u for u in (reference_images or []) if u]
-    if len(refs) > MAX_REFERENCE_IMAGES:
+    if len(refs) > max_images(spec):
         raise DreaminaError(
-            "Seedance 2.5 takes at most %d reference images; %d were sent."
-            % (MAX_REFERENCE_IMAGES, len(refs)))
+            "%s takes at most %d reference images; %d were sent."
+            % (spec["label"], max_images(spec), len(refs)))
     if not video_url:
         raise DreaminaError("There is no video to edit.")
 
@@ -1086,9 +1100,9 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9",
     reference_images = [u for u in (reference_images or []) if u]
     reference_videos = [v for v in (reference_videos or []) if v and v.get("url")]
     video_seconds = sum(float(v.get("seconds") or 0) for v in reference_videos)
-    if len(reference_videos) > MAX_REFERENCE_VIDEOS:
-        yield {"type": "done", "error": "Seedance 2.5 takes at most %d reference videos."
-               % MAX_REFERENCE_VIDEOS}
+    if len(reference_videos) > max_videos(model_spec(model)):
+        yield {"type": "done", "error": "%s takes at most %d reference videos."
+               % (model_spec(model)["label"], max_videos(model_spec(model)))}
         return
     if video_seconds > MAX_REFERENCE_VIDEO_SECONDS + 0.5:
         yield {"type": "done", "error": (

@@ -5777,7 +5777,8 @@ let dmSeconds = 8;
 let dmRefs = [];          // [{source:{kind,file|url|id}, url, thumb, error}]
 let dmPortraits = [];
 let dmRefMode = 'first_frame';
-const DM_MAX_REFS = 30;
+const DM_MAX_REFS = 30;   // Seedance 2.5; a model may take fewer (dmMaxRefs)
+function dmMaxRefs() { return (dmOpts && dmSpec().max_images) || DM_MAX_REFS; }
 
 // A little scene drawn at the real proportions, so the shape is something you
 // look at rather than a ratio you have to picture.
@@ -6025,8 +6026,9 @@ async function dmHandleVideo(input) {
   if (dmRefMode !== 'reference') dmSetRefMode('reference', true);
   if (dmRefMode !== 'reference') return;
   for (const f of files) {
-    if (dmRefVideos.length >= vi.max_videos) {
-      alert('Seedance 2.5 takes at most ' + vi.max_videos + ' reference videos.');
+    const maxV = dmSpec().max_videos || vi.max_videos;
+    if (dmRefVideos.length >= maxV) {
+      alert(dmSpec().label + ' takes at most ' + maxV + ' reference videos.');
       break;
     }
     const entry = { name: f.name, filename: null, seconds: 0, thumb: null, error: null };
@@ -6102,8 +6104,8 @@ function dmAddRef(source) {
     const prev = dmRefs[0];
     if (prev) { prev.url = null; dmPrepareRef(prev); }
   }
-  if (dmRefs.length >= DM_MAX_REFS) {
-    alert('Seedance 2.5 takes at most ' + DM_MAX_REFS + ' reference images.');
+  if (dmRefs.length >= dmMaxRefs()) {
+    alert(dmSpec().label + ' takes at most ' + dmMaxRefs() + ' reference images.');
     return;
   }
   const entry = { source, url: null, error: null };
@@ -6812,13 +6814,18 @@ function dmUpdateEditCost() {
   // An edit keeps the source's length, and is billed at about DOUBLE a
   // generation of that length — the source is read as well as written.
   // Measured: a 7s 480p edit quoted at $0.72 was billed $1.44.
+  // Priced like the server (estimate_edit_cost): those tokens are billed at
+  // the cheaper video-input rate — at the generation rate this quoted ~67% high.
   const secs = dmLastClip.seconds || 4;
-  el.textContent = per ? '≈ $' + (per * secs * DM_EDIT_COST_X).toFixed(2) : '';
+  const [w, h] = ((r && r.dimensions[dmLastClip.aspect]) || '0x0').split('x').map(Number);
+  const vrate = ((m.video_usd_per_token || {})[dmLastClip.resolution]) || 0;
+  const usd = vrate && w ? secs * DM_EDIT_COST_X * w * h * 24 / 1024 * vrate : per * secs * DM_EDIT_COST_X;
+  el.textContent = per ? '≈ $' + usd.toFixed(2) : '';
 }
 
 function dmAddEditPhotos(input) {
   Array.from(input.files || []).forEach(f => {
-    if (dmEditPhotos.length >= DM_MAX_REFS) return;
+    if (dmEditPhotos.length >= dmMaxRefs()) return;
     const entry = { source: { kind: 'file', file: f }, url: null, error: null };
     dmEditPhotos.push(entry);
     dmDrawEditPhotos();
