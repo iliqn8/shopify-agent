@@ -2082,6 +2082,149 @@ def delete_dreamina_history(cid):
     return jsonify({"ok": True})
 
 
+# ── Omni Studio (Gemini Omni Flash 1.2 on fal) ─────────────────────────────
+# Dreamina Studio's twin on Google's model. Photo prep, reference videos, idea
+# photos, angles and AI characters reuse the /api/dreamina-* routes; what is
+# model-specific is here. History rows carry provider "omni".
+
+@app.route("/api/omni-options")
+def omni_options():
+    import omni_studio
+    import fal_client
+    ok, msg = fal_client.check_account()
+    return jsonify({**omni_studio.options(), "account_ok": ok, "account_message": msg})
+
+
+def _omni_writer_job(stream_fn, d, *lead):
+    import uuid as _uuid_ow
+    import dreamina_studio
+    import omni_studio
+    photos = d.get("photos") or []
+    refs = d.get("reference_images") or []
+    shown = 0
+    if refs and not photos:
+        photos = dreamina_studio.photos_from_references(refs)
+        shown = len(photos)
+    if not lead[0] and not photos:
+        return jsonify({"error": "Describe your idea, or attach a photo."}), 400
+    job_id = str(_uuid_ow.uuid4())
+    _run_video_job(job_id, lambda: stream_fn(
+        *lead,
+        model=d.get("model") or omni_studio.DEFAULT_MODEL,
+        seconds=d.get("seconds") or 8,
+        aspect=d.get("aspect") or "16:9",
+        has_image=bool(d.get("has_image")),
+        photos=photos,
+        angle=d.get("angle") or "",
+        references=int(d.get("references") or len(refs)),
+        references_shown=shown,
+        videos=int(d.get("videos") or 0),
+    ))
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/omni-write-prompt", methods=["POST"])
+def omni_write_prompt():
+    import omni_studio
+    d = request.json or {}
+    return _omni_writer_job(omni_studio.write_prompt_stream, d, (d.get("idea") or "").strip())
+
+
+@app.route("/api/omni-refine-prompt", methods=["POST"])
+def omni_refine_prompt():
+    import omni_studio
+    d = request.json or {}
+    current = (d.get("prompt") or "").strip()
+    instructions = (d.get("instructions") or "").strip()
+    if not current:
+        return jsonify({"error": "There is no prompt to change yet."}), 400
+    if not instructions:
+        return jsonify({"error": "Say what you would like changed."}), 400
+    return _omni_writer_job(omni_studio.refine_prompt_stream, d, current, instructions)
+
+
+def _omni_save(event, prompt, extra=None):
+    import json as _json_os
+    try:
+        kb.save_studio_clip(prompt, _json_os.dumps(dict(
+            {k: event.get(k) for k in ("model", "model_label", "seconds", "resolution",
+                                       "aspect", "audio", "container", "cost")},
+            provider="omni", **(extra or {}))), event["filename"])
+    except Exception:
+        pass          # a history row is not worth losing the clip over
+
+
+@app.route("/api/omni-generate-start", methods=["POST"])
+def omni_generate_start():
+    import uuid as _uuid_og
+    import omni_studio
+    d = request.json or {}
+    prompt = (d.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Write a prompt first."}), 400
+    settings = {
+        "model": d.get("model") or omni_studio.DEFAULT_MODEL,
+        "seconds": d.get("seconds") or 8,
+        "resolution": d.get("resolution"),
+        "aspect": d.get("aspect") or "16:9",
+        "container": d.get("container") or "mp4",
+        "image_url": d.get("image_url") or None,
+        "reference_images": d.get("reference_images") or [],
+        "reference_videos": d.get("reference_videos") or [],
+    }
+    job_id = str(_uuid_og.uuid4())
+
+    def factory():
+        for event in omni_studio.generate_stream(prompt, **settings):
+            if event.get("type") == "done" and event.get("filename"):
+                _omni_save(event, prompt)
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/omni-edit-start", methods=["POST"])
+def omni_edit_start():
+    import uuid as _uuid_oe
+    import omni_studio
+    d = request.json or {}
+    instructions = (d.get("instructions") or "").strip()
+    filename = (d.get("filename") or "").strip()
+    if not instructions:
+        return jsonify({"error": "Say what should change about the clip."}), 400
+    if not filename or "/" in filename or "\\" in filename:
+        return jsonify({"error": "Which clip should be edited?"}), 400
+    job_id = str(_uuid_oe.uuid4())
+
+    def factory():
+        for event in omni_studio.edit_stream(
+                filename, instructions,
+                resolution=d.get("resolution") or "720p",
+                aspect=d.get("aspect") or "16:9",
+                container=d.get("container") or "mp4",
+                source_seconds=d.get("seconds"),
+                model=d.get("model") or omni_studio.DEFAULT_MODEL):
+            if event.get("type") == "done" and event.get("filename"):
+                _omni_save(event, event.get("prompt") or instructions,
+                           {"edited_from": filename})
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/omni-history", methods=["GET"])
+def omni_history():
+    return jsonify(kb.list_studio_clips("omni"))
+
+
+@app.route("/api/omni-history/<int:cid>", methods=["DELETE"])
+def delete_omni_history(cid):
+    kb.delete_studio_clip(cid)
+    return jsonify({"ok": True})
+
+
 @app.route("/generated-videos/<path:filename>")
 def serve_generated_video(filename):
     import video_assembler
