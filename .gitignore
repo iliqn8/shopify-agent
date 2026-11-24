@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 *.pyo
 stores.json
+swap_jobs/
