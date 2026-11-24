@@ -442,12 +442,21 @@ def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
                          "person's clothes may remain. Take only that person from the photos, not "
                          "their background or other objects." % (who, tag))
         elif kind == "place":
-            lines.append("Move the whole scene into the place shown in %s, in every frame, as if "
-                         "this shot had been filmed there: replace the original setting (%s) — "
-                         "walls, windows, curtains, bed, bedding, furniture, decor and wall art — "
-                         "with the matching parts of %s. Keep the camera angle and framing; the "
-                         "people and the objects they use stay in front of the new setting."
-                         % (tag, who, tag))
+            # A close shot kept its original room in both tries with only
+            # "move the scene into @Image1" (24.11.2026, pillow 14 shot 3):
+            # Kling needs the new things named and the old ones listed.
+            old = sw.get("subject") or ""
+            old = old[old.find("(") + 1:old.rfind(")")] if "(" in old else old
+            look = sw.get("look") or ""
+            lines.append("Change the background and setting in every frame to the place shown in %s, "
+                         "as if this shot had been filmed there%s. Everything around and behind the "
+                         "people and the objects they use must be repainted as that place, including "
+                         "the bedding and the wall behind them, even where it is out of focus. "
+                         "Nothing of the original setting may remain visible%s. Keep the camera angle "
+                         "and framing; the people and the objects they use stay in front of the new "
+                         "setting." % (tag,
+                                       (": " + look.rstrip(".")) if look else "",
+                                       (" (" + old.rstrip(".") + ")") if old else ""))
         else:
             lines.append("Replace %s with %s in every frame, matching the reference photos "
                          "exactly (colour, material, shape, details). Whatever is inside, on or "
@@ -582,8 +591,13 @@ def _classify(urls_whats):
         "Each photo shows the NEW thing that will replace something in a video.\n"
         "For each photo answer: kind = \"person\", \"object\" (a product or prop) or \"place\" "
         "(a room, setting or background); keep = which single thing in the photo is meant "
-        "(max 15 words, e.g. \"the light-blue ribbed backrest pillow with arms\").\n"
-        'JSON only: {"photos": [{"n": 1, "kind": "...", "keep": "..."}]}'})
+        "(max 15 words, e.g. \"the light-blue ribbed backrest pillow with arms\"); "
+        "look = ONLY for a place: the 6-10 most visible things in it that a video editor "
+        "must paint in, with colours (max 45 words, e.g. \"large US flag above a beige "
+        "tufted headboard, pine garland with warm lights and a red bow, red plaid pillows, "
+        "red knit blanket, lit table lamps, decorated Christmas tree by a snowy window\"); "
+        "empty for others.\n"
+        'JSON only: {"photos": [{"n": 1, "kind": "...", "keep": "...", "look": "..."}]}'})
     out = [{"kind": "object", "keep": what} for _, what in urls_whats]
     try:
         data = _claude_json(content)
@@ -594,6 +608,8 @@ def _classify(urls_whats):
                     out[n - 1]["kind"] = x["kind"]
                 if x.get("keep"):
                     out[n - 1]["keep"] = str(x["keep"])[:150]
+                if x.get("look") and out[n - 1]["kind"] == "place":
+                    out[n - 1]["look"] = str(x["look"])[:350]
     except Exception:
         pass
     return out
@@ -658,6 +674,8 @@ def _prepare_refs(swaps, say):
     for i, (sw, info) in enumerate(zip(out, infos), 1):
         sw["kind"] = info["kind"]
         sw["person"] = info["kind"] == "person"
+        if info.get("look"):
+            sw["look"] = info["look"]
         say("📷 Photo %d: %s — %s" % (i, info["kind"], info["keep"]))
     return out, 0.0
 
