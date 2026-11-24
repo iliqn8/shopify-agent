@@ -418,6 +418,14 @@ def _slots(swaps, anchor_url=None):
     return el, im, tags, anchor_tag
 
 
+PROMPT_MAX = 2400   # Kling O3 Edit rejects prompts over 2500 characters (after the job ran)
+
+
+def _words(text, n):
+    w = (text or "").split()
+    return " ".join(w[:n]).rstrip(".,;") if w else ""
+
+
 def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
     # Rules below each come from a clip that went wrong:
     # - only the swaps Claude saw in this shot reach here (_plan_shot); a
@@ -427,62 +435,61 @@ def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
     #   with "woman in a cream cardigan" Kling kept the cardigan (23.11, abuela);
     # - a place is an @Image, not an element: as an element the new room came
     #   and went between shots (24.11, pillow 14);
+    # - a place lists what the new one has and what of the old must go — with
+    #   only "move the scene into @Image1" a close shot kept its room (24.11);
+    # - the furniture people are on keeps its role ("support"): "repaint the
+    #   bedding too" turned the bed she sat on into a floor rug (24.11, live);
     # - what is inside/on an object follows the video, not the photo — the ad
     #   photo's phones ended up in the pockets (24.11, pillow 14);
-    # - the continuity frame keeps the room/person the same in every shot.
-    el, im, tags, anchor_tag = _slots(swaps, anchor_url)
-    lines = ["Edit @Video1."]
-    for sw in swaps:
-        who, tag = sw.get("subject") or sw["what"], tags[id(sw)]
-        kind = sw.get("kind") or ("person" if sw.get("person") else "object")
-        if kind == "person":
-            lines.append("Replace %s with the person %s in every frame: face, hair, body AND "
-                         "the complete outfit (every garment, its colours and patterns, scarf, "
-                         "jewellery) exactly as in the reference photos. None of the original "
-                         "person's clothes may remain. Take only that person from the photos, not "
-                         "their background or other objects." % (who, tag))
-        elif kind == "place":
-            # A close shot kept its original room in both tries with only
-            # "move the scene into @Image1" (24.11.2026, pillow 14 shot 3):
-            # Kling needs the new things named and the old ones listed.
-            old = sw.get("subject") or ""
-            old = old[old.find("(") + 1:old.rfind(")")] if "(" in old else old
-            look = sw.get("look") or ""
-            lines.append("Change the background and setting in every frame to the place shown in %s, "
-                         "as if this shot had been filmed there%s. Everything around and behind the "
-                         "people and the objects they use must be repainted as that place, including "
-                         "the bedding and the wall behind them, even where it is out of focus. "
-                         "Nothing of the original setting may remain visible%s. Keep the camera angle "
-                         "and framing; the people and the objects they use stay in front of the new "
-                         "setting." % (tag,
-                                       (": " + look.rstrip(".")) if look else "",
-                                       (" (" + old.rstrip(".") + ")") if old else ""))
-        else:
-            lines.append("Replace %s with %s in every frame, matching the reference photos "
-                         "exactly (colour, material, shape, details). Whatever is inside, on or "
-                         "held by it in @Video1 (for example items in its pockets) stays exactly "
-                         "as in @Video1 — add nothing from the photos. Take only that subject from "
-                         "the photos, not their background or other objects." % (who, tag))
-    if anchor_tag:
-        lines.append("%s is a frame from another shot of this same, already edited video: every "
-                     "replaced subject and the setting must look exactly as they do in %s (same "
-                     "person, same outfit, same product, same room and decor). Use it only for "
-                     "appearance, not for pose, framing or action." % (anchor_tag, anchor_tag))
-    if remove_text:
-        lines.append("Remove all on-screen text, captions, subtitles, stickers and emojis "
-                     "overlaid on the video and show the clean scene behind them.")
-        keep_tail = ""
-    else:
-        keep_tail = " and any on-screen text"
-    bg = "" if im else "background, "
-    lines.append("Keep everything else exactly as in @Video1: the action, motion, timing, camera, "
-                 "framing, " + bg + "lighting, all other people and objects" + keep_tail + ". "
-                 "The replaced subjects keep the original pose and movement only. "
-                 "Do not add any person or object that is not already in @Video1.")
+    # - never an already edited frame as a reference: Kling copies it whole.
+    # Kling refuses > 2500 characters, so descriptions shrink until it fits.
+    el, im, tags, _ = _slots(swaps)
     extra = (extra or "").strip()
-    if extra:
-        lines.append(extra)
-    return " ".join(lines)
+    for budget in (45, 30, 20, 12, 6, 0):
+        lines = ["Edit @Video1."]
+        for sw in swaps:
+            who, tag = sw.get("subject") or sw["what"], tags[id(sw)]
+            if budget < 20 and "(" in who:
+                who = sw["what"] + (" (" + _words(who[who.find("(") + 1:who.rfind(")")], budget) + ")"
+                                    if budget else "")
+            kind = sw.get("kind") or ("person" if sw.get("person") else "object")
+            if kind == "person":
+                lines.append("Replace %s with the person %s in every frame: face, hair, body and the "
+                             "complete outfit (every garment, colour, pattern, accessory) exactly as "
+                             "in the photos; none of the original clothes may remain." % (who, tag))
+            elif kind == "place":
+                old = sw.get("subject") or ""
+                old = old[old.find("(") + 1:old.rfind(")")] if "(" in old else ""
+                look, support = _words(sw.get("look"), budget), _words(sw.get("support"), budget)
+                old = _words(old, budget)
+                lines.append("Restyle the setting in every frame into the place in %s%s, as if filmed "
+                             "there: each piece keeps its role and position (walls, headboard, "
+                             "bedding, furniture, decor), even out of focus; nothing of the original "
+                             "look%s may remain." % (tag, (" (" + look + ")") if look else "",
+                                                    (" (" + old + ")") if old else ""))
+                if support:
+                    lines.append("In @Video1 %s — keep that: a bed stays a bed, the surface under "
+                                 "them becomes its bedding, never a floor or rug, and no second bed "
+                                 "appears behind them." % support)
+            else:
+                lines.append("Replace %s with %s in every frame, exactly matching the photos (colour, "
+                             "material, shape, details); what is inside or on it (e.g. items in its "
+                             "pockets) stays as in @Video1, nothing added from the photos."
+                             % (who, tag))
+        lines.append("Take only the named subject from each photo, not its background or other "
+                     "objects.")
+        if remove_text:
+            lines.append("Remove all overlaid text, captions, stickers and emojis.")
+        lines.append("Keep the action, motion, timing, camera, framing, lighting%s and all other "
+                     "people and objects exactly as in @Video1; replaced subjects keep the original "
+                     "pose and movement; add no new person or object."
+                     % (("" if im else ", background") + ("" if remove_text else ", on-screen text")))
+        if extra:
+            lines.append(extra)
+        prompt = " ".join(lines)
+        if len(prompt) <= PROMPT_MAX:
+            return prompt
+    return prompt[:PROMPT_MAX]
 
 
 def build_swap_payload(video_url, swaps, extra="", remove_text=False, anchor_url=None):
@@ -717,17 +724,22 @@ def _plan_shot(src_shot, dur, swaps):
             "kind, colour, material, where it is. For a person: only who and where (e.g. \"the "
             "elderly woman sitting on the bed\") - do NOT describe their clothes, hair or face, "
             "because those are being replaced. For a place: it is present whenever any of the "
-            "setting is visible; describe the visible setting (walls, bed, furniture, decor).\n"
+            "setting is visible; describe the visible setting (walls, bed, furniture, decor), and "
+            "also give \"support\": what the people in the shot sit, lie or stand on and what is "
+            "right behind them (max 25 words, e.g. \"she sits ON the bed, on its floral bedspread; "
+            "the bed's carved headboard is right behind her\").\n"
             'Answer with JSON only: {"present": [{"n": <line number>, "person": true|false, '
-            '"subject": "<description>"}], "note": "<one short sentence>"}' % items})
+            '"subject": "<description>", "support": "<only for a place>"}], '
+            '"note": "<one short sentence>"}' % items})
         data = _claude_json(content)
         if not isinstance(data.get("present"), list):
             raise ValueError("no present list")
         out, seen = [], set()
         for it in data["present"]:
-            person = False
+            person, support = False, ""
             if isinstance(it, dict):
                 n, subj = it.get("n"), str(it.get("subject") or "").strip()
+                support = str(it.get("support") or "").strip()
                 person = it.get("person") is True or str(it.get("person")).lower() == "true"
             else:
                 n, subj = it, ""
@@ -740,6 +752,8 @@ def _plan_shot(src_shot, dur, swaps):
             sw["person"] = person
             if subj:
                 sw["subject"] = "%s (%s)" % (sw["what"], subj.rstrip(".")[:200])
+            if support and sw.get("kind") == "place":
+                sw["support"] = support.rstrip(".")[:220]
             out.append((int(n), sw))
         return [sw for _, sw in sorted(out, key=lambda x: x[0])], str(data.get("note") or "")
     except Exception as e:
@@ -785,7 +799,9 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
                 "action, a different camera angle or framing, or a person or object added that was "
                 "not in the original frames, or any OTHER object changed into something else (only "
                 "the subjects listed above may change; e.g. plain bed pillows turned into the "
-                "product). Changes caused by the swap itself are fine.\n"
+                "product), or a person who now sits, lies or stands on something else than in the "
+                "original (e.g. was on a bed, now on the floor or a rug, with a bed behind her). "
+                "Changes caused by the swap itself are fine.\n"
                 if orig else "")
         text_rule = ("Also fail it if any overlaid caption, subtitle or sticker text is still "
                      "visible (text that is part of the scene itself, like a sign or a logo on "
