@@ -401,21 +401,32 @@ def clean_swaps(swaps):
     return out
 
 
-def _slots(swaps, anchor_url=None):
+def _slots(swaps):
     """Kling O3 Edit: people/objects go in `elements` (@ElementN), places in
-    `image_urls` (@ImageN); at most 4 in total. A continuity frame from the
-    already edited anchor shot goes last, only if it fits."""
+    `image_urls` (@ImageN); at most 4 in total. A place sends its main photo
+    plus its extra angles while they fit — a photo taken from the shot's own
+    camera angle is what makes Kling lay the room out right (24.11.2026: from
+    a side view of the room it put a second bed behind her instead of the
+    headboard right behind her). Returns (elements, image_urls, tags)."""
     el = [sw for sw in swaps if sw.get("kind") != "place"]
-    im = [sw for sw in swaps if sw.get("kind") == "place"]
-    tags = {}
+    places = [sw for sw in swaps if sw.get("kind") == "place"]
+    room = 4 - len(el)
+    urls, tags = [], {}
     for i, sw in enumerate(el, 1):
         tags[id(sw)] = "@Element%d" % i
-    for i, sw in enumerate(im, 1):
-        tags[id(sw)] = "@Image%d" % i
-    anchor_tag = None
-    if anchor_url and len(el) + len(im) < 4:
-        anchor_tag = "@Image%d" % (len(im) + 1)
-    return el, im, tags, anchor_tag
+    for sw in places:                      # every place gets its main photo first
+        if len(urls) < room:
+            urls.append(sw["url"])
+            tags[id(sw)] = ["@Image%d" % len(urls)]
+    for sw in places:                      # then the extra angles, while they fit
+        for u in sw.get("extras") or []:
+            if len(urls) < room and id(sw) in tags:
+                urls.append(u)
+                tags[id(sw)].append("@Image%d" % len(urls))
+    for sw in places:
+        t = tags.get(id(sw)) or ["@Image1"]
+        tags[id(sw)] = t[0] if len(t) == 1 else ", ".join(t[:-1]) + " and " + t[-1]
+    return el, urls, tags
 
 
 PROMPT_MAX = 2400   # Kling O3 Edit rejects prompts over 2500 characters (after the job ran)
@@ -426,7 +437,7 @@ def _words(text, n):
     return " ".join(w[:n]).rstrip(".,;") if w else ""
 
 
-def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
+def build_swap_prompt(swaps, extra="", remove_text=False):
     # Rules below each come from a clip that went wrong:
     # - only the swaps Claude saw in this shot reach here (_plan_shot); a
     #   subject that is not in the shot gets painted in (20.11, pillow unboxing);
@@ -443,7 +454,7 @@ def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
     #   photo's phones ended up in the pockets (24.11, pillow 14);
     # - never an already edited frame as a reference: Kling copies it whole.
     # Kling refuses > 2500 characters, so descriptions shrink until it fits.
-    el, im, tags, _ = _slots(swaps)
+    el, im, tags = _slots(swaps)
     extra = (extra or "").strip()
     for budget in (45, 30, 20, 12, 6, 0):
         lines = ["Edit @Video1."]
@@ -462,10 +473,12 @@ def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
                 old = old[old.find("(") + 1:old.rfind(")")] if "(" in old else ""
                 look, support = _words(sw.get("look"), budget), _words(sw.get("support"), budget)
                 old = _words(old, budget)
-                lines.append("Restyle the setting in every frame into the place in %s%s, as if filmed "
-                             "there: each piece keeps its role and position (walls, headboard, "
+                views = (" (the same place from different angles — follow the view closest to "
+                         "this shot's camera angle and copy its layout)") if " and " in tag else ""
+                lines.append("Restyle the setting in every frame into the place in %s%s%s, as if "
+                             "filmed there: each piece keeps its role and position (walls, headboard, "
                              "bedding, furniture, decor), even out of focus; nothing of the original "
-                             "look%s may remain." % (tag, (" (" + look + ")") if look else "",
+                             "look%s may remain." % (tag, views, (" (" + look + ")") if look else "",
                                                     (" (" + old + ")") if old else ""))
                 if support:
                     lines.append("In @Video1 %s — keep that: a bed stays a bed, the surface under "
@@ -492,18 +505,17 @@ def build_swap_prompt(swaps, extra="", remove_text=False, anchor_url=None):
     return prompt[:PROMPT_MAX]
 
 
-def build_swap_payload(video_url, swaps, extra="", remove_text=False, anchor_url=None):
+def build_swap_payload(video_url, swaps, extra="", remove_text=False):
     # Sound is put back from the original after the shots are joined, so the
     # model never has to carry it.
-    el, im, _, anchor_tag = _slots(swaps, anchor_url)
+    el, images, _ = _slots(swaps)
     payload = {"video_url": video_url,
-               "prompt": build_swap_prompt(swaps, extra, remove_text, anchor_url),
+               "prompt": build_swap_prompt(swaps, extra, remove_text),
                "keep_audio": False}
     if el:
         payload["elements"] = [{"frontal_image_url": sw["url"],
                                 "reference_image_urls": (sw.get("extras") or [sw["url"]])[:3]}
                                for sw in el]
-    images = [sw["url"] for sw in im] + ([anchor_url] if anchor_tag else [])
     if images:
         payload["image_urls"] = images
     return payload
@@ -687,6 +699,13 @@ def _prepare_refs(swaps, say):
     return out, 0.0
 
 
+def _place_views(sw):
+    """A place's photos: the main one, then its extra angles."""
+    if sw.get("kind") != "place":
+        return [sw["url"]]
+    return [sw["url"]] + [u for u in (sw.get("extras") or []) if u]
+
+
 def _plan_shot(src_shot, dur, swaps):
     """Which swaps are really in this ORIGINAL shot, and what exactly each one
     is here -> (swaps for this shot, each with a "subject" description, note).
@@ -701,10 +720,22 @@ def _plan_shot(src_shot, dur, swaps):
         frames = _frames_jpeg(src_shot, dur, CHECK_FRAMES)
         if not frames:
             return list(swaps), ""
-        content = []
+        content, multi = [], False
         for i, sw in enumerate(swaps, 1):
-            content += [{"type": "text", "text": "REFERENCE %d - the NEW thing that will replace \"%s\":"
-                         % (i, sw["what"])}, _img(_ref_image(sw["url"]))]
+            views = _place_views(sw)
+            if len(views) > 1:
+                multi = True
+                for k, u in enumerate(views, 1):
+                    content += [{"type": "text", "text": "REFERENCE %d, VIEW %d - the NEW place that "
+                                 "will replace \"%s\", seen from one angle:" % (i, k, sw["what"])},
+                                _img(_ref_image(u))]
+            else:
+                content += [{"type": "text", "text": "REFERENCE %d - the NEW thing that will replace \"%s\":"
+                             % (i, sw["what"])}, _img(_ref_image(sw["url"]))]
+        view_rule = ("A place shown in several VIEWS: also give \"view\" - the number of the view whose "
+                     "camera angle and distance are closest to this shot (e.g. a close shot of someone "
+                     "in front of a headboard -> the close view of that headboard, not the wide room "
+                     "view).\n" if multi else "")
         for i, fr in enumerate(frames, 1):
             content += [{"type": "text", "text": "FRAME %d of the original shot:" % i}, _img(fr)]
         items = "\n".join('%d. "%s" (%s) -> becomes REFERENCE %d'
@@ -727,10 +758,10 @@ def _plan_shot(src_shot, dur, swaps):
             "setting is visible; describe the visible setting (walls, bed, furniture, decor), and "
             "also give \"support\": what the people in the shot sit, lie or stand on and what is "
             "right behind them (max 25 words, e.g. \"she sits ON the bed, on its floral bedspread; "
-            "the bed's carved headboard is right behind her\").\n"
+            "the bed's carved headboard is right behind her\").\n%s"
             'Answer with JSON only: {"present": [{"n": <line number>, "person": true|false, '
-            '"subject": "<description>", "support": "<only for a place>"}], '
-            '"note": "<one short sentence>"}' % items})
+            '"subject": "<description>", "support": "<only for a place>", "view": <only for a '
+            'place shown in views>}], "note": "<one short sentence>"}' % (items, view_rule)})
         data = _claude_json(content)
         if not isinstance(data.get("present"), list):
             raise ValueError("no present list")
@@ -754,6 +785,17 @@ def _plan_shot(src_shot, dur, swaps):
                 sw["subject"] = "%s (%s)" % (sw["what"], subj.rstrip(".")[:200])
             if support and sw.get("kind") == "place":
                 sw["support"] = support.rstrip(".")[:220]
+            views = _place_views(sw)
+            if len(views) > 1:
+                v = str(it.get("view") or "1") if isinstance(it, dict) else "1"
+                v = int(v) if v.isdigit() and 1 <= int(v) <= len(views) else 1
+                # Kling lays the room out like the FIRST photo it gets, so only
+                # the closest view goes (24.11.2026, pillow 14 shot 3: wide photo
+                # + close view -> second bed behind her; close view alone ->
+                # headboard right behind her, as in the original).
+                if v > 1:
+                    sw.pop("look", None)   # the wide photo's list would add its tree/window
+                sw["url"], sw["extras"] = views[v - 1], []
             out.append((int(n), sw))
         return [sw for _, sw in sorted(out, key=lambda x: x[0])], str(data.get("note") or "")
     except Exception as e:
@@ -835,11 +877,11 @@ def _run_kling(payload, tag, say):
             time.sleep(10)
 
 
-def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor_url=None):
+def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
     """_edit_shot, but a shot that cannot be made keeps the original footage
     instead of throwing away every finished (and paid) shot."""
     try:
-        return _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor_url)
+        return _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say)
     except (fal_client.FalError, MotionError) as e:
         tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
         if n == 1:
@@ -849,7 +891,7 @@ def _edit_shot_safe(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, a
         return src_shot, getattr(e, "_cost", 0.0), warning
 
 
-def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor_url=None):
+def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say):
     """Upload, edit, check, maybe retry. `mine` = this shot's plan.
     Returns (local_path, cost, warning)."""
     tag = "Shot %d/%d" % (idx + 1, n) if n > 1 else "Clip"
@@ -858,9 +900,10 @@ def _edit_shot(idx, n, src_shot, dur, mine, extra, remove_text, tmp, say, anchor
         return src_shot, 0.0, ""
     with open(src_shot, "rb") as fh:
         url = _upload(fh.read(), os.path.basename(src_shot), "video/mp4")
-    payload = build_swap_payload(url, mine, extra, remove_text, anchor_url)
+    cost = 0.0
+    payload = build_swap_payload(url, mine, extra, remove_text)
     billed = max(dur, MIN_SECONDS) * SWAP_MODEL["usd_per_second"]
-    cost, warning, out_path = 0.0, "", None
+    warning, out_path = "", None
     best = None   # (score, path, warning) — a retry can come back worse than the first try
     for attempt in range(SWAP_RETRIES + 1):
         try:
