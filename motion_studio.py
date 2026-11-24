@@ -486,10 +486,16 @@ def build_swap_prompt(swaps, extra="", remove_text=False):
                                  "them becomes its bedding, never a floor or rug, and no second bed "
                                  "appears behind them." % support)
             else:
+                # What is in its pockets is named item by item: with only "stays as
+                # in @Video1" Kling dropped the lilac tumbler in 3 of 3 tries and
+                # swapped the remote for another box after a cut (24.11, pillow 14).
+                contents = _words(sw.get("contents"), max(budget, 12))
+                inside = ("these items in/on it stay exactly as in @Video1 — same item, place and "
+                          "moment, none missing, none swapped: %s" % contents if contents else
+                          "what is inside or on it (e.g. items in its pockets) stays as in @Video1")
                 lines.append("Replace %s with %s in every frame, exactly matching the photos (colour, "
-                             "material, shape, details); what is inside or on it (e.g. items in its "
-                             "pockets) stays as in @Video1, nothing added from the photos."
-                             % (who, tag))
+                             "material, shape, details); %s; nothing added from the photos."
+                             % (who, tag, inside))
         lines.append("Take only the named subject from each photo, not its background or other "
                      "objects.")
         if remove_text:
@@ -767,10 +773,16 @@ def _plan_shot(src_shot, dur, swaps):
             "setting is visible; describe the visible setting (walls, bed, furniture, decor), and "
             "also give \"support\": what the people in the shot sit, lie or stand on and what is "
             "right behind them (max 25 words, e.g. \"she sits ON the bed, on its floral bedspread; "
-            "the bed's carved headboard is right behind her\").\n%s"
+            "the bed's carved headboard is right behind her\").\n"
+            "For an object also give \"contents\": every item that is in, on or attached to that "
+            "original object at any moment of this shot - colour, kind, which pocket/side - and "
+            "anything put in or taken out during the shot (max 35 words, e.g. \"a lilac tumbler in "
+            "the left cup pocket; a black TV remote and a pink glasses case in the front pocket - "
+            "she puts the remote in during the shot\"); empty if there is nothing.\n%s"
             'Answer with JSON only: {"present": [{"n": <line number>, "person": true|false, '
-            '"subject": "<description>", "support": "<only for a place>", "view": <only for a '
-            'place shown in views>}], "note": "<one short sentence>"}' % (items, view_rule)})
+            '"subject": "<description>", "support": "<only for a place>", "contents": "<only '
+            'for an object>", "view": <only for a place shown in views>}], '
+            '"note": "<one short sentence>"}' % (items, view_rule)})
         data = _claude_json(content)
         if not isinstance(data.get("present"), list):
             raise ValueError("no present list")
@@ -794,6 +806,9 @@ def _plan_shot(src_shot, dur, swaps):
                 sw["subject"] = "%s (%s)" % (sw["what"], subj.rstrip(".")[:200])
             if support and sw.get("kind") == "place":
                 sw["support"] = support.rstrip(".")[:220]
+            contents = str(it.get("contents") or "").strip() if isinstance(it, dict) else ""
+            if contents and sw.get("kind") == "object":
+                sw["contents"] = contents.rstrip(".")[:260]
             views = _place_views(sw)
             if len(views) > 1:
                 v = str(it.get("view") or "1") if isinstance(it, dict) else "1"
@@ -846,12 +861,17 @@ def _check_shot(path, dur, swaps, remove_text, src_shot=None):
                     "of the reference's, it is NOT swapped.\n"
                     "Also fail it if items appear in, on or around a replaced object that were not "
                     "in the original frames (e.g. phones or remotes in pockets that were empty or "
-                    "held other things).\n" % asks)
+                    "held other things), or if an item that is in, on or held at it in the ORIGINAL "
+                    "frames is missing or became a different item in the EDITED frames (e.g. the "
+                    "tumbler in a cup pocket is gone, a remote became a box).%s\n"
+                    % (asks, "".join(" Items of \"%s\": %s." % (sw["what"], sw["contents"])
+                                     for sw in swaps if sw.get("contents"))))
         else:
             rule = "This shot was edited only to remove overlaid text.\n"
         same = ("Also fail it if the edited shot is not the same scene as the original: a different "
                 "action, a different camera angle or framing, or a person or object added that was "
-                "not in the original frames, or any OTHER object changed into something else (only "
+                "not in the original frames (also an extra hand, arm or sleeve that belongs to no "
+                "one — e.g. the original person's old sleeve left behind as a second arm), or any OTHER object changed into something else (only "
                 "the subjects listed above may change; e.g. plain bed pillows turned into the "
                 "product), or a person who now sits, lies or stands on something else than in the "
                 "original (e.g. was on a bed, now on the floor or a rug, with a bed behind her). "
@@ -979,6 +999,177 @@ def _join(parts, durs, src, keep_sound, dest):
         raise MotionError("Could not join the shots: %s" % err.strip()[-300:])
 
 
+# ── Keeping the on-screen text ─────────────────────────────────────────────
+# Asked to "keep the on-screen text", Kling still loses it once it repaints the
+# frame (a new room): of three shots one kept half a caption, two lost it
+# (24.11.2026, pillow 14). So the captions are read from the original, Kling
+# removes them, and they are drawn back on top of the finished clip.
+CAPTION_STEP = 0.5     # seconds between the frames Claude reads
+CAPTION_MAX_FRAMES = 40
+
+
+def _video_size(path):
+    _, info = video_assembler._run(["-i", path], timeout=60)
+    m = re.search(r"Stream #\d+:\d+.*?: Video:.*?(\d{2,5})x(\d{2,5})", info)
+    return (int(m.group(1)), int(m.group(2))) if m else (1080, 1920)
+
+
+def _read_captions(src, seconds):
+    """Claude reads the overlaid captions of the original video → list of
+    {text, start, end, cx, cy, width, line_h, style, color, bg}."""
+    step = max(CAPTION_STEP, seconds / CAPTION_MAX_FRAMES)
+    times = [round(t * step + step / 2, 2) for t in range(int(seconds / step))] or [0.0]
+    frames = _frames_jpeg(src, seconds, [t / seconds for t in times]) if seconds else []
+    if not frames:
+        return []
+    content = []
+    for t, fr in zip(times, frames):
+        content += [{"type": "text", "text": "FRAME at %.2fs:" % t}, _img(fr)]
+    content.append({"type": "text", "text":
+        "These are frames of one video at the times given (the video is %.2fs long).\n"
+        "List every OVERLAID caption: text added on top of the video in editing (captions, "
+        "subtitles, text stickers, with the emojis next to them). NOT text that is part of the "
+        "filmed scene (signs, labels, logos, screens).\n"
+        "One entry per caption as it appears on screen; when the text changes, that is a new entry. "
+        "For each: \"text\" exactly as written, keep the line breaks as \\n and the emojis; "
+        "\"start\" = time of the first frame showing it minus %.2f (0 if it is there from the "
+        "start); \"end\" = time of the last frame showing it plus %.2f (the video length if it "
+        "stays to the end); \"cx\", \"cy\" = centre of the text block as a fraction of the "
+        "frame width / height; \"width\" = width of its widest line as a fraction of the frame "
+        "width; \"line_h\" = height of one text line (capital letter top to descender) as a "
+        "fraction of the frame height; \"style\" = \"outline\" (letters with a dark outline or "
+        "shadow), \"box\" (letters on a solid background box) or \"plain\"; \"color\" = the "
+        "letters' colour as #hex; \"bg\" = the box colour as #hex (only for box); "
+        "\"align\" = \"center\" or \"left\".\n"
+        'JSON only: {"captions": [{"text": "...", "start": 0, "end": 3.5, "cx": 0.5, "cy": 0.1, '
+        '"width": 0.6, "line_h": 0.03, "style": "outline", "color": "#ffffff", "bg": "", '
+        '"align": "center"}]}  — {"captions": []} if there is none.'
+        % (seconds, step / 2, step / 2)})
+    data = _claude_json(content, max_tokens=6000)
+    out = []
+    for c in data.get("captions") or []:
+        try:
+            text = str(c.get("text") or "").replace("\\n", "\n").strip()
+            a, b = max(0.0, float(c.get("start") or 0)), min(seconds, float(c.get("end") or seconds))
+            if not text or b - a < 0.2:
+                continue
+            num = lambda k, d, lo, hi: min(hi, max(lo, float(c.get(k) or d)))
+            out.append({"text": text[:300], "start": round(a, 2), "end": round(b, 2),
+                        "cx": num("cx", 0.5, 0, 1), "cy": num("cy", 0.15, 0, 1),
+                        "width": num("width", 0.6, 0.05, 1), "line_h": num("line_h", 0.03, 0.01, 0.2),
+                        "style": c.get("style") if c.get("style") in ("outline", "box", "plain") else "outline",
+                        "color": c.get("color") if re.fullmatch(r"#[0-9a-fA-F]{6}", str(c.get("color"))) else "#ffffff",
+                        "bg": c.get("bg") if re.fullmatch(r"#[0-9a-fA-F]{6}", str(c.get("bg"))) else "#ffffff",
+                        "align": "left" if c.get("align") == "left" else "center"})
+        except (TypeError, ValueError):
+            continue
+    return out[:20]
+
+
+_CAPTION_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:transparent;width:%(W)dpx;height:%(H)dpx;overflow:hidden}
+#c{position:absolute;white-space:pre;line-height:1.18;font-weight:600;
+ -webkit-font-smoothing:antialiased}
+#c img.e{height:1.05em;width:1.05em;vertical-align:-0.18em;margin-left:0.06em}
+#c{
+ font-family:'TikTok Sans','Proxima Nova',Montserrat,Arial,'Liberation Sans','DejaVu Sans',
+ 'Noto Color Emoji','Segoe UI Emoji','Apple Color Emoji',sans-serif}
+</style></head><body><div id="c"></div><script>
+// Emojis as Twemoji pictures: a font may not have the newer ones (🥹 came out
+// as an empty box on Windows); if the picture cannot load, the character stays.
+function emojiHtml(text){
+  const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const seg=new Intl.Segmenter('en',{granularity:'grapheme'});
+  let out='';
+  for(const {segment:g} of seg.segment(text)){
+    if(/\\p{Extended_Pictographic}/u.test(g)){
+      let cps=[...g].map(ch=>ch.codePointAt(0).toString(16));
+      if(!g.includes('\\u200d')) cps=cps.filter(c=>c!=='fe0f');
+      out+='<img class="e" alt="'+esc(g)+'" src="https://cdn.jsdelivr.net/gh/jdecked/twemoji@15.1.0/assets/svg/'+cps.join('-')+'.svg" onerror="this.replaceWith(this.alt)">';
+    } else out+=esc(g);
+  }
+  return out;
+}
+async function draw(c){
+  const el=document.getElementById('c'), W=%(W)d, H=%(H)d;
+  el.innerHTML=emojiHtml(c.text); el.style.textAlign=c.align; el.style.color=c.color;
+  await Promise.all([...el.querySelectorAll('img')].map(i=>Promise.race([
+    i.decode().catch(()=>0), new Promise(r=>setTimeout(r,6000))])));
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  let fs=c.line_h*H/1.18;
+  el.style.fontSize=fs+'px';
+  // the measured width of the original wins, within reason of the line height
+  let got=el.getBoundingClientRect().width;
+  if(got>0){fs=Math.max(fs*0.6,Math.min(fs*1.6,fs*c.width*W/got)); el.style.fontSize=fs+'px';
+            got=el.getBoundingClientRect().width;}
+  if(got>W*0.96){fs=fs*W*0.96/got; el.style.fontSize=fs+'px';}
+  if(c.style==='outline'){
+    el.style.webkitTextStroke=Math.max(2,fs*0.07)+'px #000'; el.style.paintOrder='stroke fill';
+    el.style.textShadow='0 '+(fs*0.04)+'px '+(fs*0.08)+'px rgba(0,0,0,.45)';
+  } else if(c.style==='box'){
+    el.style.background=c.bg; el.style.padding=(fs*0.18)+'px '+(fs*0.35)+'px'; el.style.borderRadius=(fs*0.25)+'px';
+  }
+  const r=el.getBoundingClientRect();
+  el.style.left=Math.max(0,Math.min(W-r.width,c.cx*W-r.width/2))+'px';
+  el.style.top=Math.max(0,Math.min(H-r.height,c.cy*H-r.height/2))+'px';
+}
+</script></body></html>"""
+
+
+def _caption_pngs(caps, w, h, folder):
+    """Each caption drawn once by Chromium (real emoji, outlined text) as a
+    transparent full-frame PNG → [(path, start, end)]."""
+    from playwright.sync_api import sync_playwright
+    out = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": w, "height": h})
+            page.set_content(_CAPTION_HTML % {"W": w, "H": h})
+            for i, c in enumerate(caps):
+                page.evaluate("c => draw(c)", c)   # awaits the emoji pictures
+                path = os.path.join(folder, "caption_%02d.png" % i)
+                page.screenshot(path=path, omit_background=True)
+                out.append((path, c["start"], c["end"]))
+        finally:
+            browser.close()
+    return out
+
+
+def _put_captions(video, caps, folder, dest):
+    """Draw the original captions on top of the finished clip."""
+    w, h = _video_size(video)
+    pngs = _caption_pngs(caps, w, h, folder)
+    args = ["-y", "-i", video]
+    for path, _, _ in pngs:
+        args += ["-i", path]
+    chain, last = [], "0:v"
+    for i, (_, a, b) in enumerate(pngs, 1):
+        chain.append("[%s][%d:v]overlay=0:0:enable='between(t,%.2f,%.2f)'[o%d]" % (last, i, a, b, i))
+        last = "o%d" % i
+    args += ["-filter_complex", ";".join(chain), "-map", "[%s]" % last, "-map", "0:a?",
+             "-c:a", "copy", "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart", dest]
+    code, err = video_assembler._run(args, timeout=900)
+    if code != 0 or not os.path.exists(dest):
+        raise MotionError("Could not put the text back: %s" % err.strip()[-300:])
+
+
+def _finish(parts, shots, src, keep_sound, captions, folder, dest):
+    """Join the shots; with captions, join to a temp file and draw them on top."""
+    durs = [b - a for a, b in shots]
+    if not captions:
+        _join(parts, durs, src, keep_sound, dest)
+        return
+    joined = os.path.join(folder, "joined_%d.mp4" % int(time.time() * 1000))
+    _join(parts, durs, src, keep_sound, joined)
+    _put_captions(joined, captions, folder, dest)
+    try:
+        os.remove(joined)
+    except OSError:
+        pass
+
+
 def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=True,
                 remove_text=False, video_url=None, retries=None):
     """Make one objects-swap clip. Yields {"type": "status"|"done"} events."""
@@ -1012,13 +1203,31 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
         yield {"type": "status", "text": "🔁 A shot that fails the check is made once more "
                                          "automatically (paid again)"}
 
+    # Text kept → read it now, let Kling remove it, draw it back at the end.
+    captions, kling_notext = [], bool(remove_text)
+    if not remove_text and swaps:
+        yield {"type": "status", "text": "🔤 Reading the on-screen text — Kling loses it when it "
+                                         "repaints the frame, so it is drawn back on top at the end"}
+        try:
+            captions = _read_captions(src, seconds)
+        except Exception as e:
+            yield {"type": "status", "text": "   ⚠️ could not read the text (%s) — Kling is asked "
+                                             "to keep it instead" % type(e).__name__}
+        for c in captions:
+            yield {"type": "status", "text": "   🔤 %.1f–%.1fs: %s" % (c["start"], c["end"],
+                                                                     c["text"].replace("\n", " / "))}
+        if captions:
+            kling_notext = True
+        elif not remove_text:
+            yield {"type": "status", "text": "   no overlaid text found"}
+
     msgs = queue.Queue()
     try:
         # The shots, their plans and every take stay on disk so one shot can be
         # redone later (🔁 Redo) without paying for the whole clip again.
         job_id, tmp = _new_swap_job()
         with ThreadPoolExecutor(max_workers=1) as one:
-            job = one.submit(_swap_pipeline, src, shots, swaps, extra, remove_text, tmp,
+            job = one.submit(_swap_pipeline, src, shots, swaps, extra, kling_notext, tmp,
                              msgs.put, retries)
             while not job.done():
                 try:
@@ -1031,12 +1240,14 @@ def swap_stream(video_file, seconds, swaps, shots=None, extra="", keep_sound=Tru
 
         cost = round(sum(r[1] for r in results) + prep_cost, 2)
         warnings = [r[2] for r in results if r[2]]
-        yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
+        yield {"type": "status", "text": ("🧩 Joining the shots" if n > 1 else "🎞️ Finishing")
+               + (" and putting the text back…" if captions else "…")}
         name = "clip_swap_%s_%d.mp4" % (clip_studio._safe_stem(swaps[0]["what"]), int(time.time()))
-        _join([r[0] for r in results], [b - a for a, b in shots], src, keep_sound,
-              os.path.join(video_assembler.OUTPUT_DIR, name))
+        _finish([r[0] for r in results], shots, src, keep_sound, captions, tmp,
+                os.path.join(video_assembler.OUTPUT_DIR, name))
         state = {"src": src, "shots": shots, "cut": cut, "plans": plans, "extra": extra,
-                 "remove_text": bool(remove_text), "keep_sound": bool(keep_sound),
+                 "remove_text": kling_notext, "captions": captions,
+                 "user_remove_text": bool(remove_text), "keep_sound": bool(keep_sound),
                  "stem": clip_studio._safe_stem(swaps[0]["what"]), "seconds": seconds,
                  "swaps": [sw["what"] for sw in swaps],
                  "parts": [r[0] for r in results], "warnings": [r[2] for r in results]}
@@ -1138,14 +1349,15 @@ def redo_shot_stream(job_id, idx):
         st["parts"][idx], st["warnings"][idx] = part, warning
         yield {"type": "status", "text": "🧩 Joining the shots…" if n > 1 else "🎞️ Finishing…"}
         name = "clip_swap_%s_%d.mp4" % (st["stem"], int(time.time()))
-        _join(st["parts"], [y - x for x, y in st["shots"]], st["src"], st["keep_sound"],
-              os.path.join(video_assembler.OUTPUT_DIR, name))
+        _finish(st["parts"], st["shots"], st["src"], st["keep_sound"], st.get("captions") or [],
+                path, os.path.join(video_assembler.OUTPUT_DIR, name))
         _save_swap_job(job_id, st)
         warnings = [w for w in st["warnings"] if w]
         yield {"type": "status", "text": "✅ Done" + (" — with warnings above" if warning else "")}
         yield {"type": "done", "filename": name, "cost": round(cost, 2), "seconds": st["seconds"],
                "mode": "swap", "model_label": SWAP_MODEL["label"], "shots": n,
-               "swaps": st["swaps"], "keep_sound": st["keep_sound"], "remove_text": st["remove_text"],
+               "swaps": st["swaps"], "keep_sound": st["keep_sound"],
+               "remove_text": st.get("user_remove_text", st["remove_text"]),
                "warnings": warnings, "redo_of": idx + 1, "swap_job": job_id,
                "shot_info": _shot_info(st)}
     except (fal_client.FalError, MotionError) as e:
