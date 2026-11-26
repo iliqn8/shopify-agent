@@ -273,8 +273,22 @@ def _upload_video(path):
 
 # ── Generation ─────────────────────────────────────────────────────────────
 
+# fal's Omni endpoints have no negative_prompt field, so "no text" has to be said
+# in the prompt itself. Print on the product stays — only added text is banned.
+NO_TEXT_LINE = ("No on-screen text of any kind: no captions, subtitles, titles, text overlays, "
+                "watermarks, logos or written words added anywhere in the frame. Text printed "
+                "on the product itself stays exactly as it is.")
+
+
+def with_no_text(prompt, no_text):
+    prompt = (prompt or "").strip()
+    if not no_text or NO_TEXT_LINE in prompt:
+        return prompt
+    return prompt.rstrip() + ("\n\n" if prompt else "") + NO_TEXT_LINE
+
+
 def build_payload(prompt, seconds, resolution, aspect, image_url=None,
-                  reference_images=None, reference_videos=None):
+                  reference_images=None, reference_videos=None, no_text=False):
     """(endpoint, body). Kept apart so it can be tested unpaid."""
     refs = [u for u in (reference_images or []) if u]
     videos = [u for u in (reference_videos or []) if u]
@@ -286,7 +300,7 @@ def build_payload(prompt, seconds, resolution, aspect, image_url=None,
     if len(videos) > MAX_REFERENCE_VIDEOS:
         raise OmniError("Gemini Omni takes at most %d reference videos; %d were sent."
                         % (MAX_REFERENCE_VIDEOS, len(videos)))
-    body = {"prompt": to_omni_tokens(prompt), "aspect_ratio": aspect,
+    body = {"prompt": to_omni_tokens(with_no_text(prompt, no_text)), "aspect_ratio": aspect,
             "resolution": resolution, "duration": int(seconds)}
     if image_url:
         body["image_url"] = image_url
@@ -314,7 +328,7 @@ def _events():
 
 def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9", audio=True,
                     container="mp4", image_url=None, reference_images=None,
-                    model=DEFAULT_MODEL, reference_videos=None):
+                    model=DEFAULT_MODEL, reference_videos=None, no_text=False):
     """`reference_videos` is [{"filename", "seconds"}] — our own refvideos/ files."""
     prompt = (prompt or "").strip()
     if not prompt:
@@ -365,13 +379,16 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9", audio=T
                                 "%d days). Upload it again." % dreamina_studio.REF_VIDEO_KEEP_DAYS)
             vids.append(_upload_video(path))
 
-        endpoint, body = build_payload(prompt, seconds, resolution, aspect, first, refs, vids)
+        endpoint, body = build_payload(prompt, seconds, resolution, aspect, first, refs, vids,
+                                       no_text=no_text)
         yield {"type": "status", "text": (
             "🖼️ Animating your starting frame…" if first else
             "🖼️ Generating with %d photo%s and %d video%s as references…"
             % (len(refs), "" if len(refs) == 1 else "s", len(vids), "" if len(vids) == 1 else "s")
             if (refs or vids) else "✨ Generating from the prompt alone…")}
-        if body["prompt"] != prompt:
+        if no_text:
+            yield {"type": "status", "text": "   🚫 no on-screen text — added to the prompt"}
+        if to_omni_tokens(prompt) != prompt:
             yield {"type": "status", "text": "   references sent as <IMAGE_REF_n> / <VIDEO_REF_n>"}
 
         out = fal_client.run(endpoint, body, on_status=status, timeout=1800)
@@ -388,7 +405,7 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9", audio=T
                "cost": cost, "estimated_cost": cost, "tokens": 0,
                "seconds": seconds, "resolution": resolution, "aspect": aspect,
                "audio": True, "container": container, "model": s["model"],
-               "model_label": spec["label"]}
+               "model_label": spec["label"], "no_text": bool(no_text)}
     except (fal_client.FalError, OmniError, clip_studio.ClipError) as e:
         yield from drain()
         yield {"type": "done", "error": str(e)}
@@ -398,18 +415,18 @@ def generate_stream(prompt, seconds=8, resolution="720p", aspect="16:9", audio=T
 
 # ── Editing a finished clip ────────────────────────────────────────────────
 
-def compose_edit_prompt(instructions):
+def compose_edit_prompt(instructions, no_text=False):
     """The instruction plus fal's own advice: say what must stay as it is."""
     text = (instructions or "").strip()
     text = re.sub(r"@\s*[Vv]ideo\s*\d*", "the video", text)
     if not re.search(r"\bkeep\b|\bpreserve\b|\bunchanged\b", text, re.I):
         text = text.rstrip(". ") + (". Keep everything else — the people, the product, the "
                                     "lighting, the camera movement and the sound — exactly as it is.")
-    return text
+    return with_no_text(text, no_text)
 
 
 def edit_stream(filename, instructions, resolution="720p", aspect="16:9",
-                container="mp4", source_seconds=None, model=DEFAULT_MODEL):
+                container="mp4", source_seconds=None, model=DEFAULT_MODEL, no_text=False):
     instructions = (instructions or "").strip()
     if not instructions:
         yield {"type": "done", "error": "Say what should change about the clip."}
@@ -428,7 +445,7 @@ def edit_stream(filename, instructions, resolution="720p", aspect="16:9",
     spec, resolution, container = s["spec"], s["resolution"], s["container"]
     secs = float(source_seconds or s["seconds"])
     cost = round(usd_per_second(resolution) * secs, 4)
-    prompt = compose_edit_prompt(instructions)
+    prompt = compose_edit_prompt(instructions, no_text)
     status, drain = _events()
     try:
         yield {"type": "status", "text": (
@@ -451,7 +468,7 @@ def edit_stream(filename, instructions, resolution="720p", aspect="16:9",
                "estimated_cost": cost, "tokens": 0, "seconds": source_seconds,
                "resolution": resolution, "aspect": aspect, "audio": True,
                "container": container, "model": s["model"], "model_label": spec["label"],
-               "prompt": prompt, "edited": True}
+               "prompt": prompt, "edited": True, "no_text": bool(no_text)}
     except (fal_client.FalError, OmniError, clip_studio.ClipError) as e:
         yield from drain()
         yield {"type": "done", "error": str(e)}

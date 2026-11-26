@@ -1480,6 +1480,14 @@
           <div id="om-audio-note" style="color:#666;font-size:11px;margin-top:4px">Sound effects, ambience and lip-synced speech.</div>
         </div>
         <div>
+          <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">TEXT</label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="om-no-text" style="accent-color:#6366f1;width:16px;height:16px">
+            <span style="color:#ddd;font-size:13px">🚫 No on-screen text</span>
+          </label>
+          <div style="color:#666;font-size:11px;margin-top:4px">No captions, subtitles, titles or watermarks. Also applies to edits.<br>Print on the product stays.</div>
+        </div>
+        <div>
           <label style="color:#aaa;font-size:12px;display:block;margin-bottom:8px">FORMAT</label>
           <div id="om-formats" style="display:flex;gap:8px"></div>
         </div>
@@ -8722,6 +8730,7 @@ async function omApplyEdit() {
         audio: omLastClip.audio,
         container: omLastClip.container,
         model: omLastClip.model,
+        no_text: document.getElementById('om-no-text').checked,
         reference_images: omEditPhotos.filter(p => p.url).map(p => p.url),
         // The server prefers its own configured domain; this is the fallback.
         origin: window.location.origin
@@ -8768,6 +8777,7 @@ async function omGenerate() {
         resolution: omResolution,
         aspect: omAspect,
         audio: document.getElementById('om-audio').checked,
+        no_text: document.getElementById('om-no-text').checked,
         container: omFormat,
         image_url: omFirstFrameUrl(),
         reference_images: omReferenceUrls(),
@@ -9044,6 +9054,7 @@ function omReuse(id) {
     if (s.resolution) omPickResolution(s.resolution);
     if (s.container) omPickFormat(s.container);
     if (typeof s.audio === 'boolean') document.getElementById('om-audio').checked = s.audio;
+    document.getElementById('om-no-text').checked = !!s.no_text;
     if (s.seconds) { omSeconds = s.seconds; omDrawDuration(); }
     omUpdateCost();
   } catch (e) {}

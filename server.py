@@ -2148,7 +2148,7 @@ def _omni_save(event, prompt, extra=None):
     try:
         kb.save_studio_clip(prompt, _json_os.dumps(dict(
             {k: event.get(k) for k in ("model", "model_label", "seconds", "resolution",
-                                       "aspect", "audio", "container", "cost")},
+                                       "aspect", "audio", "container", "cost", "no_text")},
             provider="omni", **(extra or {}))), event["filename"])
     except Exception:
         pass          # a history row is not worth losing the clip over
@@ -2171,6 +2171,7 @@ def omni_generate_start():
         "image_url": d.get("image_url") or None,
         "reference_images": d.get("reference_images") or [],
         "reference_videos": d.get("reference_videos") or [],
+        "no_text": bool(d.get("no_text")),
     }
     job_id = str(_uuid_og.uuid4())
 
@@ -2204,7 +2205,8 @@ def omni_edit_start():
                 aspect=d.get("aspect") or "16:9",
                 container=d.get("container") or "mp4",
                 source_seconds=d.get("seconds"),
-                model=d.get("model") or omni_studio.DEFAULT_MODEL):
+                model=d.get("model") or omni_studio.DEFAULT_MODEL,
+                no_text=bool(d.get("no_text"))):
             if event.get("type") == "done" and event.get("filename"):
                 _omni_save(event, event.get("prompt") or instructions,
                            {"edited_from": filename})
