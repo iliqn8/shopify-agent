@@ -2216,6 +2216,38 @@ def omni_edit_start():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/omni-clean-start", methods=["POST"])
+def omni_clean_start():
+    """🧽 Take burned-in captions/titles out of a finished clip (no video model)."""
+    import uuid as _uuid_oc
+    import caption_cleaner
+    import omni_studio
+    d = request.json or {}
+    filename = (d.get("filename") or "").strip()
+    if not filename or "/" in filename or "\\" in filename:
+        return jsonify({"error": "Which clip should be cleaned?"}), 400
+    path = omni_studio._local_video(filename)
+    if not path:
+        return jsonify({"error": "That clip is no longer on the server."}), 404
+    src = next((c for c in kb.list_studio_clips("omni") if c.get("filename") == filename), None)
+    prompt = (src or {}).get("prompt") or "Text removed from " + filename
+    keep = {k: d.get(k) for k in ("model", "model_label", "seconds", "resolution",
+                                  "aspect", "audio", "container")}
+    job_id = str(_uuid_oc.uuid4())
+
+    def factory():
+        for event in caption_cleaner.clean_stream(path):
+            if event.get("type") == "done" and event.get("filename"):
+                event = dict(keep, **event)
+                event["cleaned"] = True
+                _omni_save(event, prompt, {"cleaned_from": filename,
+                                           "removed_text": event.get("removed")})
+            yield event
+
+    _run_video_job(job_id, factory)
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/omni-history", methods=["GET"])
 def omni_history():
     return jsonify(kb.list_studio_clips("omni"))

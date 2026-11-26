@@ -1511,6 +1511,9 @@
         <video id="om-player" controls style="width:100%;max-width:420px;border-radius:10px;background:#000"></video>
         <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <a id="om-download" class="btn-sm" download style="text-decoration:none">⬇️ Download</a>
+          <button class="btn-sm" id="om-clean-btn" onclick="omCleanText()"
+            title="Finds captions, subtitles or titles the model drew on the video and paints them out. Makes a NEW clip; the original stays. Text printed on the product is left alone. About $0.02 (one Claude look), no video model."
+            style="border-color:#0e7490;color:#a5f3fc">🧽 Remove on-screen text</button>
           <span id="om-result-meta" style="color:#666;font-size:12px"></span>
         </div>
 
@@ -8596,7 +8599,8 @@ function omShowClip(ev) {
      ev.audio ? 'with audio' : 'silent',
      // The billed figure, from the token count BytePlus returned.
      ev.cost ? '$' + ev.cost.toFixed(2) + ' billed' : null,
-     ev.edited ? 'edited' : null].filter(Boolean).join(' · ');
+     ev.edited ? 'edited' : null,
+     ev.cleaned ? 'text removed' : null].filter(Boolean).join(' · ');
   document.getElementById('om-edit').value = '';
   document.getElementById('om-edit-status').textContent = '';
   omEditPhotos = [];
@@ -8753,6 +8757,46 @@ async function omApplyEdit() {
   }
 }
 
+// 🧽 Paint out captions/titles the model burned in. A new clip; the source stays.
+async function omCleanText(src) {
+  src = src || omLastClip;
+  if (!src || !src.filename) { alert('Open a clip first.'); return; }
+  const btn = document.getElementById('om-clean-btn');
+  btn.disabled = true;
+  const label = 'Remove on-screen text · ' + src.filename;
+  const meta = [src.model_label, src.seconds ? src.seconds + 's' : null,
+                (src.resolution ? src.resolution + ' ' : '') + (src.aspect || ''), '≈$0.02'].filter(Boolean).join(' · ');
+  try {
+    const r = await fetch('/api/omni-clean-start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: src.filename, model: src.model, model_label: src.model_label,
+        seconds: src.seconds, resolution: src.resolution, aspect: src.aspect,
+        audio: src.audio, container: src.container
+      })
+    });
+    const d = await vidJson(r);
+    if (d.error) throw new Error(d.error);
+    omTrackJob(d.job_id, 'clean', label, meta);
+    document.getElementById('om-queue').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (e) {
+    omAddFailedJob('clean', label, meta, e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function omCleanFromHistory(id) {
+  const rows = JSON.parse(document.getElementById('om-history').dataset.rows || '[]');
+  const row = rows.find(c => c.id === id);
+  if (!row || !row.filename) return;
+  let s = {};
+  try { s = JSON.parse(row.settings_json || '{}'); } catch (e) {}
+  omCleanText({ filename: row.filename, model: s.model, model_label: s.model_label,
+                seconds: s.seconds, resolution: s.resolution, aspect: s.aspect,
+                audio: s.audio, container: s.container });
+}
+
 async function omGenerate() {
   const prompt = document.getElementById('om-prompt').value.trim();
   if (!prompt) { alert('Write a prompt first.'); return; }
@@ -8891,6 +8935,9 @@ function omJobDone(job, ev) {
   if (ev.error) {
     job.state = 'error';
     job.error = ev.error;
+  } else if (ev.nothing) {
+    job.state = 'done';
+    job.note = ev.message;
   } else {
     job.state = 'done';
     job.ev = ev;
@@ -8912,7 +8959,7 @@ function omElapsed(job) {
 
 function omJobHtml(job) {
   const icon = { running: '⏳', done: '✅', error: '❌', lost: '⚠️' }[job.state];
-  const kind = job.kind === 'edit' ? '✏️ Edit' : '✨ Clip';
+  const kind = job.kind === 'edit' ? '✏️ Edit' : job.kind === 'clean' ? '🧽 Remove text' : '✨ Clip';
   const url = job.ev && job.ev.filename ? '/generated-videos/' + job.ev.filename : null;
   const billed = job.ev && job.ev.cost ? ' · $' + Number(job.ev.cost).toFixed(2) + ' billed' : '';
   return `<div style="display:flex;gap:10px;align-items:flex-start">
@@ -8922,6 +8969,7 @@ function omJobHtml(job) {
           <span style="color:#a5b4fc">${kind}</span> · ${omEsc(job.prompt)}</div>
         <div style="color:#555;font-size:11px;margin-top:2px">${omEsc(job.meta)}${billed} · <span class="omj-time">${omElapsed(job)}</span></div>
         ${job.state === 'running' ? `<div class="omj-last" style="color:#8ab4f8;font-size:11px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>` : ''}
+        ${job.note ? `<div style="color:#aaa;font-size:12px;margin-top:4px">${omEsc(job.note)}</div>` : ''}
         ${job.error ? `<div style="color:${job.state === 'lost' ? '#fbbf24' : '#f87171'};font-size:12px;margin-top:4px;white-space:pre-wrap">${omEsc(job.error)}</div>` : ''}
         ${url ? `<video controls preload="metadata" src="${url}" style="max-width:220px;max-height:180px;margin-top:8px;border-radius:8px;background:#000;display:block"></video>` : ''}
       </div>
@@ -9029,6 +9077,7 @@ async function omLoadHistory() {
           </div>
           ${url ? `<a class="btn-sm" href="${url}" download style="text-decoration:none">⬇️</a>` : ''}
           ${url ? `<button class="btn-sm" onclick="omEditFromHistory(${c.id})" title="Edit this clip">✏️</button>` : ''}
+          ${url ? `<button class="btn-sm" onclick="omCleanFromHistory(${c.id})" title="Remove on-screen text (captions, titles) — makes a new clip, ~$0.02">🧽</button>` : ''}
           <button class="btn-sm" onclick="omReuse(${c.id})" title="Put this prompt back in the box">↩︎</button>
           <button class="btn-sm" onclick="omDelete(${c.id})">🗑</button>
         </div>
